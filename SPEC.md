@@ -174,8 +174,11 @@ operand of `list.cons`/`list.get` is a name or literal, never a nested call.
 
 - `ok T` / `err E` values; `match` them. `list.get` and `bytes.get` OOB are `Err`
   results, not traps — recoverable failure is `result`, never a trap.
-- `trap` = death: `E_FUEL`, `E_STACK`, `E_DIV0`, `E_OOB`, `E_IMPORT` (link failure),
-  `E_HOLE` (draft), `E_LOWER`. Not recoverable failure.
+- `trap` = death: `E_FUEL`, `E_STACK`, `E_DIV0`, `E_OOB`, `E_IMPORT` (instantiate-time:
+  missing host binding, or negative `fuel_cost` — the unresolved-callee case of
+  `E_IMPORT` is a check, not a trap; see "Traps and region" below), `E_HOLE` (`--draft`
+  execution reaches a hole — the ship-check case of `E_HOLE` is a check, not a trap),
+  `E_LOWER`. Not recoverable failure.
 
 ### Control
 
