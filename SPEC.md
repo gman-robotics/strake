@@ -353,7 +353,11 @@ may still carry `patch`.
 - Token budget: `cl100k_base`
 - Diags: stable `code` + `kind` + `msg` + `span`, optional `want`/`got`/`patch`.
   `want`/`got` render scalars only (floats as hex bit patterns); compounds render
-  `handle:<id>`; import payloads are not deep-printed.
+  `handle:<id>`; import payloads are not deep-printed. `kind` is a single string on
+  every emitted diagnostic (`"check"`, `"trap"`, or `"result"`), never an array. The
+  catalog lists two possible kinds for `E_HOLE` and `E_IMPORT` because each code can
+  fire in either context (see [errors/catalog.json](errors/catalog.json)); a given
+  emitted instance picks the one that actually happened.
 - Model/tools = `import`, not `llm`
 - Refusal: `ret 77` (result `E_REFUSED`, CLI 77)
 - Pack: SPEC.md, LOWERING.md, GBNF, `errors/catalog.json`, `llms.txt`

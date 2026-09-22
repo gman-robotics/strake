@@ -4,6 +4,7 @@
   "kinds": ["check", "trap", "result"],
   "diag": {
     "fields": ["code", "kind", "msg", "span"],
+    "kind_note": "kind on an emitted diagnostic is always exactly one of the kinds strings, never an array; a code's kind field below is an array only to enumerate the contexts that code can fire in (e.g. E_HOLE/E_IMPORT fire as check in one context and trap in another) -- one emitted instance always carries the single kind that context produced",
     "optional_fields": ["want", "got", "patch"],
     "render": {
       "scalar": "literal value (floats render as hex bit patterns)",
