@@ -91,7 +91,14 @@ return uses `unit` and `ret unit`.
 **Delimiters.** Blocks close with `end`. Indent is not syntax — the parser ignores
 leading whitespace. `strake fmt` emits two-space indent and that output is stable for
 the life of v0. The content hash is blake3 of the formatted UTF-8, with no formatter
-version mixed in. Listings in this spec and in LOWERING.md use `end` so they are legal A.
+version mixed in. The worked example immediately below is a complete, legal A module.
+Short listings elsewhere, such as the Lists example under "Lists", are body fragments —
+legal-ANF statement sequences (no nested-call operands, `end`-delimited, no `#`/`...`
+placeholders standing in for statements) that would need a surrounding `fn` to run, not
+full modules. Other code fences in this spec and in LOWERING.md are illustrative only —
+some elide a body with `...` or `...body...` for exposition, and LOWERING.md's
+post-arrow listings show `strake-1` (the lowered ISA), not A — and are not independently
+legal A unless stated otherwise.
 
 ```
 strake 1
@@ -132,13 +139,18 @@ No strings distinct from `bytes`. No maps. No iterators as objects.
 ### Lists
 
 ```
-xs = list.cons 1 (list.cons 2 (list.empty i64))
+t0 = list.empty i64
+t1 = list.cons 2 t0
+xs = list.cons 1 t1
 n  = list.len xs
-r  = list.get xs 0          # result i64 unit   Err on OOB
+r  = list.get xs 0
 for x in xs
-  ...
+  y = add i64 x 0
 end
 ```
+
+`r` has type `result i64 unit` (`Err` on OOB, never a trap). This listing is ANF: every
+operand of `list.cons`/`list.get` is a name or literal, never a nested call.
 
 - `list.empty T -> list T`, `list.cons h t -> list T`, `list.len -> i64`
 - `list.get -> result T unit` (OOB is `Err`, never a trap, never `E_OOB`)
