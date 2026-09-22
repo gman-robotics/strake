@@ -1,194 +1,132 @@
-# Strake v0 spec (draft)
+# Strake v0 spec
 
-Status: **proposed locks** from the 2026-09-21 design thread unless marked already stamped.
-Audience: agents author; humans read spec and traces.
+Status: locks as of 2026-09-21 (Tom accepted the agent-authoring changes).
 Not JSC / Bun bytecode.
+Public: https://github.com/gman-robotics/strake
+License: MIT OR Apache-2.0
 
-This document resolves the open questions about LLM-native use and folds them into the language.
+## Why two layers
+
+The portable agent ISA was never wrong. Existing compilers (Cranelift, later LLVM; Wasm) already know chipsets. That work stays on **`strake-1`**.
+
+Agents do not author that ISA by hand. They author **Strake-A** (named-value ANF). The toolchain lowers A → `strake-1`. One semantics. Many runtimes. The ISA is the leverage point; A is the native surface.
+
+```
+intent / stories     host artifact (not in the ISA)
+Strake-A  .strake    named values, sums, result, if/loop/match, property tests
+strake-1             SSA + explicit regions; what backends eat
+interp / Wasm / Cranelift
+```
 
 ---
 
-## Already stamped
+## Stamped product locks
 
-- Name Strake; text `.strake`; binary `strake-1`; CLI `strake check | run | test | build`; crate `strake`
-- License MIT OR Apache-2.0
-- Linear heap; explicit capability imports; WASI is a host adapter later
-- Semantics SoT: spec + reference interpreter
+- Names: `.strake` (A text), `strake-1` (ship ISA), CLI `strake check | run | test | build`, crate `strake`
+- SoT: this spec + reference interpreter of **`strake-1`** (A is defined by its lowering)
+- Effects: capability imports; WASI is a host adapter later
 - First portable backend: Wasm; first native: Cranelift
-- Tests and structured JSON diagnostics are first-class
-- Public repo: https://github.com/gman-robotics/strake
+- Tests + JSON diagnostics first-class
+- `strake fmt` mandatory before hash
 
 ---
 
-## Q1. Canonical artifact: text or tree?
+## Layer A — what agents write
 
-**Resolution:** Two layers, one meaning.
-
-- Authoring / debug surface: line-oriented `.strake` text.
-- Ship / hash / agent-edit object: `strake-1` module (binary or canonical AST).
-- `strake fmt` is **mandatory** before hash. Two modules that mean the same thing are byte-identical after format.
-- Agents *may* edit via structured patch against the AST. They must not rely on raw whitespace.
-
-Whitespace is never significant except as a token separator.
-
----
-
-## Q2. Prefix-closed grammar for constrained decoding?
-
-**Resolution:** Yes. Ship `grammar/strake.gbnf` (and an equivalent CFG) with the spec.
-
-- Grammar is LL(1)-shaped and prefix-stable: a legal prefix has at least one legal completion.
-- Line-oriented statements. No indentation-as-syntax.
-- One spelling per construct (`fn`, `add`, `ret`, `call`, `test`, `assert.eq`). Aliases are formatter errors.
-- Official token budget is measured on `cl100k_base` and recorded in `bench/token.lock` when tooling exists. Language changes that grow the golden suite token count need an explicit note.
-
----
-
-## Q3. What is a hole?
-
-**Resolution:** Drafts may contain typed holes. Ship modules may not.
-
-```
-%3 = hole i64
-```
-
-- `strake check --draft` accepts holes.
-- `strake check` (ship) rejects holes.
-- Constrained decoding / FIM fills holes without rewriting the rest of the module.
-
----
-
-## Q4. Official repair object?
-
-**Resolution:** Diagnostics are JSON. Human prose is optional commentary, not the interface.
-
-```json
-{
-  "code": "E0127",
-  "at": { "file": "add2.strake", "line": 6, "col": 3 },
-  "msg": "unbound %3",
-  "want": "i64",
-  "got": null,
-  "patch": [{ "op": "insert", "at": { "line": 6 }, "text": "%3 = add i64 %0 %1\n" }]
-}
-```
-
-- Error codes are stable; they do not renumber.
-- `strake fix` applies `patch` deterministically when present.
-- Tests that fail use the same schema (`want` / `got`).
-
----
-
-## Q5–Q6. Token cost and which tokenizer?
-
-**Resolution:** `cl100k_base` is the v0 budget tokenizer. A language change that increases golden-suite tokens is a spec change, not a style change.
-
-Prefer whole-token keywords (`add`, `ret`, `call`) over novel sigils. `%N` SSA names stay because they are short and unambiguous; measure before replacing them.
-
----
-
-## Q7. Is `llm` / MCP a keyword?
-
-**Resolution:** No. Model and tool use are **capability imports**, same as I/O.
-
-```
-import ai.complete : (prompt: bytes) -> bytes
-```
-
-The ISA does not grow an `llm` statement. Hosts that want Claude/MCP bind that import.
-
----
-
-## Q8. Can the model refuse?
-
-**Resolution:** Yes. A legal ship module may be only:
-
-```
-fn main() -> i32
-  ret 77
-```
-
-Convention: `77` means author-refused (document in the error catalog). Grammar-constrained decoding must not make refusal unsayable. Do not force every prompt into a working algorithm.
-
----
-
-## Q9. What may traces expose?
-
-**Resolution:** Traces are capability-scoped.
-
-- Default test trace: export results, trap code, fuel used, pages used.
-- No raw host filesystem, credentials, or unredacted import payloads in the object that returns to the next model turn.
-- Heap dumps are opt-in and never the default repair context.
-
----
-
-## Q10. Machine-readable language pack?
-
-**Resolution:** The repo root ships:
-
-- `SPEC.md` (this file)
-- `grammar/strake.gbnf` (when written)
-- `errors/catalog.json` (stable codes)
-- `llms.txt` pointing at those three plus the opcode table
-
-One fetch should be enough to author legal Strake.
-
----
-
-## Tests sit on boundaries
-
-`test` blocks may only `call` exports and `assert` results or traps. They must not mention `%` temps or heap offsets. (Uncle Bob: tests on APIs, not internals.)
-
-```
-test add2.basic
-  %r = call add2(3, 4)
-  assert.eq %r 14
-```
-
----
-
-## Fuel and memory
-
-Ship modules declare limits. Defaults if omitted: `fuel 100000`, `pages 16` (64KiB pages).
+Named values. Compiler assigns SSA ids.
 
 ```
 strake 1
-fuel 10000
-pages 4
+fn add2(a: i64, b: i64) -> i64
+  x = add i64 a b
+  y = mul i64 x 2
+  ret y
+
+test add2.basic
+  r = call add2(3, 4)
+  assert.eq r 14
+
+property add2.zero
+  forall n: i64 in -10..10
+    assert.eq call add2(n, 0) mul i64 n 2
 ```
 
-Over-fuel or OOB store is a trap with a stable code, not UB.
+### Values first
+
+Default data: scalars, records, sums, `result T E`, `bytes`.
+Linear memory is an **opt-in region** (`region` / `buf`), not the universe. `alloc`/`load`/`store` exist only inside a region capability.
+
+### Errors
+
+- `ok T` / `err E` are values; `match` them.
+- `trap` is process death (OOB, overflow-fuel, unimplemented host). Do not use `trap` for recoverable failure.
+
+### Control
+
+`if`, `loop` with single `break`/`continue`, `match` on sums. No raw unstructured CFG in A. Lowering may emit blocks/phis in `strake-1`.
+
+### Holes
+
+`x = hole i64` legal under `strake check --draft`. Illegal in ship modules.
+
+### Tests
+
+- Example tests call **exports only** (no SSA temps, no region offsets).
+- Property tests (`forall` over finite ranges) are in the language.
+- Gherkin / stories stay **above** the file. A host may generate `test` blocks from them. Not ISA syntax.
+
+### Packages
+
+`use add2@blake3:<hex>` (or equivalent content address after `fmt`). Files are a checkout convenience.
+
+### Incremental unit
+
+`strake check --fn add2` typechecks and runs tests that only reference that export.
+
+### Prelude (frozen v0)
+
+`add sub mul div eq ne lt le gt ge`, `call ret`, `ok err match`, `if loop break continue`, `load store` (region only), `trap`, `assert.eq`, `hole`.
+If it is not on this card, it is not v0.
+
+### Fuel
+
+Module defaults: `fuel 100000`, `pages 16`. Overflow is a trap. Agents should not set these per function unless a test demands it.
 
 ---
 
-## Determinism in tests
+## Layer `strake-1` — what compilers eat
 
-- No `env.clock` / `env.random` in `test` unless the host script provides a fixed value.
-- Differential backends (interpreter vs Wasm) must match on the golden suite.
-
----
-
-## Banned in v0
-
-- `eval` of Strake strings
-- Indentation-significant syntax
-- Second human-only dialect
-- Unicode opcodes
-- Gherkin in the ISA
-- Implicit coercions
-- Host GC objects as values
+- SSA (`%n`), explicit blocks, linear regions, import table, opcode enum.
+- This is the portable ISA. Cranelift/Wasm/LLVM consume this, not A.
+- Reference interpreter executes `strake-1` (or A after a specified lowering — same answers).
+- Differential tests: interp vs Wasm must match on the golden suite.
 
 ---
 
-## Feature veto
+## Agent-native mechanics (still in)
 
-A v0 feature must help an agent **specify**, **check**, or **localize a failure** (Hoare: design, documentation, debugging). Otherwise it waits.
+- Prefix-stable grammar: `grammar/strake.gbnf` for A.
+- One spelling per construct. Aliases are formatter errors.
+- Token budget tokenizer: `cl100k_base`.
+- Diagnostics: stable `code` + `want`/`got` + optional `patch`. `strake fix` applies patches.
+- Traces capability-scoped; no host secrets in the default next-turn payload.
+- Model/tool use is `import`, not an `llm` keyword.
+- Refusal: ship module may `ret 77` (author-refused). Grammar must not erase “no”.
+- Language pack: `SPEC.md`, GBNF, `errors/catalog.json`, `llms.txt`.
 
 ---
 
-## Next implementation (not this commit)
+## Banned
 
-1. Opcode table (~40 ops) in this spec
+`eval`; indent-syntax; a second drifting human dialect; Unicode opcodes; Gherkin in the ISA; implicit coercion; host GC objects as values; asking agents to write `strake-1` by hand.
+
+## Veto
+
+Helps specify, check, or localize a failure — or it waits.
+
+## Next (still not implement tonight)
+
+1. Opcode table for `strake-1` + A lowering notes
 2. `grammar/strake.gbnf`
 3. `errors/catalog.json`
-4. Reference interpreter against golden `.strake` files — gated eng after this spec is accepted
+4. Gated: ref interpreter + A→ISA lowerer against golden files
