@@ -1,9 +1,10 @@
 # Strake v0 spec
 
-Status: locks as of 2026-09-21 (Tom accepted authoring-layer + these detail locks).
+Status: locks as of 2026-09-21 including pre-review stamps (layout, MVP, arith, stack, modules, catalog).
 Not JSC / Bun bytecode.
 Public: https://github.com/gman-robotics/strake
 License: MIT OR Apache-2.0
+Bootstrap compiler: Rust crate `strake`.
 
 ## Why two layers
 
@@ -17,16 +18,43 @@ strake-1             SSA + optional regions; what backends eat
 interp / Wasm / Cranelift
 ```
 
-A is defined by this spec plus the lowering in [LOWERING.md](LOWERING.md). Same answers from A and from the `strake-1` it becomes.
+A is defined by this spec plus [LOWERING.md](LOWERING.md).
+
+---
+
+## MVP (gated eng when review accepts)
+
+In scope: parse + check + fmt A; lower to `strake-1`; interpret `strake-1`; run `golden/`; JSON diags from [errors/catalog.json](errors/catalog.json).
+
+Out of scope for first implement: Wasm, Cranelift, self-host, multi-file packages, GBNF-driven constrained decoding (file may exist; engine later).
+
+---
+
+## Layout
+
+Compiler repo:
+
+```
+SPEC.md LOWERING.md README.md LICENSE-MIT LICENSE-APACHE
+grammar/strake.gbnf
+errors/catalog.json
+llms.txt
+crates/strake/
+golden/
+```
+
+Strake package (agents): `src/*.strake`. Tests live in the same file as exports. `tests/` only if a file is too large. `strake check <dir>` loads `src/**/*.strake`.
+
+v0 module = **one file**. Every `fn` is exported unless marked `priv`.
 
 ---
 
 ## Stamped product locks
 
 - Names: `.strake` (A), `strake-1` (ISA), CLI `strake check | run | test | build`, crate `strake`
-- SoT: this spec + LOWERING.md + reference interpreter of `strake-1`
+- SoT: this spec + LOWERING.md + catalog + reference interpreter of `strake-1`
 - Effects: capability imports; WASI adapter later
-- First portable backend: Wasm; first native: Cranelift
+- First portable backend: Wasm; first native: Cranelift — **after** interp+golden
 - Tests + JSON diagnostics first-class
 - `strake fmt` mandatory before hash
 
@@ -34,99 +62,35 @@ A is defined by this spec plus the lowering in [LOWERING.md](LOWERING.md). Same 
 
 ## Layer A
 
-Named values. Compiler assigns SSA ids at lower time.
-
-```
-strake 1
-
-type pair { a: i64, b: i64 }
-
-fn add2(a: i64, b: i64) -> i64
-  x = add i64 a b
-  y = mul i64 x 2
-  ret y
-
-test add2.basic
-  r = call add2(3, 4)
-  assert.eq r 14
-
-property add2.zero
-  forall n: i64 in -10..10
-    assert.eq call add2(n, 0) mul i64 n 2
-```
+Named values. Compiler assigns SSA ids at lower time. No shadowing (`E_SHADOW`).
 
 ### Types (v0)
 
-- Scalars: `i32 i64 f32 f64 bool`
-- `bytes`
-- Records: `type name { field: T, ... }`
-- Sums: `type name { Tag T | Tag2 U | Nil }` including `result T E` = `Ok T | Err E`
-- `list T` — **in v0**, immutable, finite, ordered
-
-No strings distinct from `bytes`. No maps. No iterators as objects.
+`i32 i64 f32 f64 bool`, `bytes`, records, sums (`result T E` = `Ok T | Err E`), `list T` immutable.
+No distinct strings. No maps. No iterator objects.
 
 ### Lists
 
-```
-xs = list.cons 1 (list.cons 2 (list.empty i64))
-n  = list.len xs
-r  = list.get xs 0          # result i64 unit   Err on OOB
-for x in xs
-  ...
-```
+`list.empty` `list.cons` `list.len` `list.get` → `result T unit` (OOB = `Err`).
+`for x in xs` desugars to an index loop.
 
-- `list.empty T`, `list.cons T (list T) -> list T`, `list.len -> i64`
-- `list.get` returns `result T unit` (OOB is `Err`, not trap)
-- `for x in xs` is A syntax. Lowers to index loop. No extra iterator type.
-- No in-place update. Build a new list or use a region.
+### Arithmetic
 
-### Errors
+- `add sub mul` on integers: **wrap** (two's complement), same as Wasm.
+- Integer `div` by zero: **trap** `E_DIV0`.
+- `eq`/`assert.eq` on floats: **bitwise**. v0 `golden/` uses `i64`/`bool` only so NaN is not a suite problem.
 
-- `ok T` / `err E` values; `match` them
-- `trap` = death (OOB **store**, fuel, missing import). Not recoverable failure.
+### Control / errors / holes / tests / packages / incremental / prelude / fuel
 
-### Control
+Unchanged from prior locks: `ok`/`err` + `match`; `trap` is death; holes draft-only; tests on exports; `forall` span must fit `i64` and `HI >= LO` else `E_FORALL`; runtime bound is **fuel only**; prelude card frozen; defaults `fuel 100000`, `pages 16`.
 
-`if`, `loop` + one `break`/`continue`, `for x in xs`, `match` on sums. No unstructured CFG in A.
+### Stack
 
-### Holes
-
-`x = hole T` in `--draft` only.
-
-### Tests
-
-Exports only. Property `forall` over finite integer ranges or finite lists of literals. Stories/Gherkin stay outside the file.
-
-### Packages
-
-`use add2@blake3:<hex>` after `fmt`.
-
-### Incremental
-
-`strake check --fn add2` — that export + tests that only call it.
-
-### Prelude (frozen v0) — complete card
-
-Arithmetic / compare: `add sub mul div eq ne lt le gt ge`
-Control: `call ret if loop break continue for match`
-Sums: `ok err`
-Lists: `list.empty list.cons list.len list.get`
-Records: field construct `{ ... }` and project `x.field`
-Regions: `load store` (only inside a region import)
-Other: `trap assert.eq hole`
-
-If it is not on this card, it is not v0.
-
-### Fuel
-
-Defaults `fuel 100000`, `pages 16`. Trap on overflow. Not per-function unless a test says so.
+Max call depth **1024**. Overflow: trap `E_STACK`. Fuel does not replace this.
 
 ---
 
 ## Layer strake-1
-
-SSA `%n`, blocks, phis, import table, optional linear regions, closed opcode enum.
-Backends consume this. Agents do not write it.
 
 See [LOWERING.md](LOWERING.md).
 
@@ -134,28 +98,20 @@ See [LOWERING.md](LOWERING.md).
 
 ## Agent-native mechanics
 
-- `grammar/strake.gbnf` for A (prefix-stable)
-- One spelling; formatter rejects aliases
-- Token budget: `cl100k_base`
-- Diags: stable `code` + `want`/`got` + optional `patch`
-- Capability-scoped traces
-- Model/tools = `import`, not `llm`
-- Refusal: `ret 77`
-- Pack: SPEC.md, LOWERING.md, GBNF, `errors/catalog.json`, `llms.txt`
+Prefix-stable GBNF for A; one spelling; token budget `cl100k_base`; diags use catalog codes + optional `patch`; capability-scoped traces; tools are `import`; refusal `ret 77`.
 
 ---
 
 ## Banned
 
-`eval`; indent-syntax; second dialect; Unicode opcodes; Gherkin in ISA; implicit coercion; host GC values; hand-written `strake-1`; maps/iterators in v0.
+`eval`; indent-syntax; second dialect; Unicode opcodes; Gherkin in ISA; implicit coercion; host GC values; hand-written `strake-1`; maps/iterators; multi-file modules in v0.
 
 ## Veto
 
 Specify, check, or localize a failure — or wait.
 
-## Next artifacts (not interpreter yet)
+## Next
 
-1. Opcode table in LOWERING.md (first cut is there)
-2. `grammar/strake.gbnf`
-3. `errors/catalog.json`
-4. Gated: interp + lowerer vs golden `.strake`
+1. Plan/system review (no Reed implement until written accept)
+2. `grammar/strake.gbnf` + `llms.txt` as review deliverables if missing
+3. Then gated: Rust interp + lowerer vs `golden/`
