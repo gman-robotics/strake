@@ -39,7 +39,9 @@ In scope: parse + check + fmt A; lower to `strake-1`; interpret `strake-1`; run
 `golden/`; JSON diags from [errors/catalog.json](errors/catalog.json).
 
 Out of scope for first implement: Wasm, Cranelift, self-host, multi-file packages,
-GBNF-driven constrained decoding (file may exist; engine later).
+GBNF-driven constrained decoding (the grammar and constrained-decoding engine both land
+later together — see [Deferrals](#deferrals); no empty `grammar/strake.gbnf` ships as a
+placeholder before then).
 
 MVP implements `check`, `fmt`, `run`, `test` only. `strake build` is not an MVP command:
 it exits **2** with message `build is post-MVP` and emits no catalog code. `strake fix`
@@ -50,7 +52,10 @@ is not an MVP command either — see [Deferrals](#deferrals); diags may still ca
 
 ## Layout
 
-Compiler repo:
+Compiler repo, target layout (this docs tip ships `SPEC.md LOWERING.md README.md
+LICENSE-MIT LICENSE-APACHE errors/catalog.json` only; `grammar/strake.gbnf`, `llms.txt`,
+`crates/strake/`, and `golden/` are deferred deliverables — see
+[Deferrals](#deferrals) — and do not exist as empty placeholders in the meantime):
 
 ```
 SPEC.md LOWERING.md README.md LICENSE-MIT LICENSE-APACHE
@@ -349,8 +354,8 @@ may still carry `patch`.
 
 ## Agent-native mechanics
 
-- `grammar/strake.gbnf` for A (prefix-stable) — file may exist ahead of the engine; see
-  [Deferrals](#deferrals)
+- `grammar/strake.gbnf` for A (prefix-stable) — lands together with the
+  constrained-decoding engine, not before; see [Deferrals](#deferrals)
 - One spelling; formatter rejects aliases
 - Token budget: `cl100k_base`
 - Diags: stable `code` + `kind` + `msg` + `span`, optional `want`/`got`/`patch`.
