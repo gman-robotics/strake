@@ -145,7 +145,8 @@ Lowering does not invent a region for lists.
 
 `test name` becomes a `strake-1` export `test.name` that returns `i32` (0 pass, nonzero fail code) plus a diag sidecar from `assert.eq`.
 
-`property` + `forall n: i64 in LO..HI` unrolls in the lowerer to a loop from LO to HI inclusive (span cap: 10_000 iterations; larger is `E_FORALL`). Each iteration is `assert.eq`.
+`property` + `forall n: i64 in LO..HI` lowers to a loop from LO to HI inclusive.
+Check-time: let `span = HI - LO + 1`. If the range is empty or reversed (`HI < LO`), or `span` does not fit in `i64` (overflow), that is `E_FORALL`. There is **no** fixed iteration cap. A huge legal span runs until module `fuel` traps.
 
 `forall` over a list literal is `for` + assert.
 
