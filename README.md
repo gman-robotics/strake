@@ -4,6 +4,8 @@ Agent-first intermediate representation: token-light ISA, tests and diagnostics 
 
 Spec-first. Not JavaScriptCore / Bun bytecode.
 
+**Spec:** [SPEC.md](SPEC.md)
+
 ## Locks (2026-09-21)
 
 - Text: `.strake`
@@ -15,7 +17,7 @@ Spec-first. Not JavaScriptCore / Bun bytecode.
 - Semantics SoT: spec + reference interpreter
 - First portable backend: Wasm
 - First native backend: Cranelift (LLVM later)
-- Next work: short spec, then interpreter. No runtime code in this commit.
+- Agent-native rules (holes, JSON patches, GBNF, fuel, boundary tests): see SPEC.md
 
 ## License
 
