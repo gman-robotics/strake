@@ -1,0 +1,17 @@
+{
+  "version": "strake-1",
+  "codes": [
+    {"code": "E_SHADOW", "msg": "binding name reused in the same function"},
+    {"code": "E_FORALL", "msg": "forall span empty, reversed, or does not fit i64"},
+    {"code": "E_MATCH", "msg": "match is not exhaustive"},
+    {"code": "E_HOLE", "msg": "hole in ship module or executed draft hole"},
+    {"code": "E_REGION", "msg": "load/store outside a region"},
+    {"code": "E_STACK", "msg": "call stack deeper than 1024"},
+    {"code": "E_DIV0", "msg": "integer division by zero"},
+    {"code": "E_FUEL", "msg": "module fuel exhausted"},
+    {"code": "E_TEST", "msg": "assert.eq failed"},
+    {"code": "E_REFUSED", "msg": "author refused (ret 77)"},
+    {"code": "E_IF_PHI", "msg": "if arms do not define the same join names"},
+    {"code": "E_CYCLE", "msg": "cyclic value (reserved)"}
+  ]
+}
