@@ -49,7 +49,10 @@ binding. Assigning `acc` in the body is `E_SHADOW`. `continue` must mention each
 parameter exactly once (`E_TYPE` if not). Bare `loop` / `break` / `continue` with no
 parameters carries no SSA values. Blocks close with `end`; indent is insignificant.
 
-`%`-prefixed names introduced by lowering (below) are exempt from `E_SHADOW`.
+`%`-prefixed names introduced by lowering (below) are exempt from `E_SHADOW`. The `%`
+prefix is reserved for the lowerer: user source may not spell a `%`-prefixed name (check
+`E_PARSE`); every `%n`/`%i`/`%done`/`%slot`/`%v`/… below is a compiler temp, never a
+name an agent can write.
 
 ## Blocks and phis
 
@@ -114,7 +117,10 @@ bindings (loop parameters — see L6 above).
 
 ### for x in xs (normative desugar)
 
-Hygienic `%`-prefixed temporaries, not user bindings:
+Every temporary the desugar introduces is `%`-prefixed and hygienic — never a user
+binding, never reused as one. The single user binder is `x`. The match yields the
+element into `x`; the user's loop body then runs (it may use `x`, and may itself bind
+further names); `continue` runs last:
 
 ```
 %n = list.len xs
@@ -124,9 +130,10 @@ loop %i = 0
     break
   end
   %slot = list.get xs %i
-  x = match %slot
-    Ok v ->
-      x1 = v
+  match %slot
+    Ok %v ->
+      x = %v
+      ...body...
     Err _ ->
       trap E_LOWER
   end
@@ -134,11 +141,15 @@ loop %i = 0
 end
 ```
 
-The user binder `x` is one binding for the body; `%`-names are exempt from `E_SHADOW`
-and the desugar does not assign any user name twice. `E_LOWER` fires only if this
-desugar observes `list.get` return `Err` while `%i < %n` — a lowering assertion, not a
-user-reachable case for any `xs` whose `list.len` reports correctly. No iterator object
-in `strake-1`.
+`match` here is a statement, not an expression: the `Ok` arm binds `x` from the payload
+and then runs the user's loop body in place, ending at (but not including) `continue`;
+the `Err` arm traps and never reaches `continue` for that iteration. `x` is one binding
+site for the body (L6) — the desugar does not assign `x` a second time and does not
+reuse it as a loop parameter. `continue %i = add i64 %i 1` matches the loop-parameter
+form (see "L6" and "loop / break / continue" above): it mentions the sole loop
+parameter `%i` exactly once. `E_LOWER` fires only if this desugar observes `list.get`
+return `Err` while `%i < %n` — a lowering assertion, not a user-reachable case for any
+`xs` whose `list.len` reports correctly. No iterator object in `strake-1`.
 
 ### match
 

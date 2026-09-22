@@ -172,7 +172,10 @@ back-edge operands and is not itself a binding. Both `if` arms may contribute th
 join name; that is one binding site. A join name used after `if` and missing on one arm
 is `E_IF_PHI`. A name bound outside an arm and assigned inside an arm is `E_SHADOW`. The
 `for` desugar uses hygienic `%`-prefixed temporaries (exempt from `E_SHADOW`) and does
-not assign the user binder twice — see LOWERING.md for the exact desugar.
+not assign the user binder twice — see LOWERING.md for the exact desugar. The `%`
+prefix is reserved for the lowerer: user source may not spell a `%`-prefixed name
+(check `E_PARSE`); those temps are exempt from `E_SHADOW` because they are not source
+names at all.
 
 ### Holes
 
