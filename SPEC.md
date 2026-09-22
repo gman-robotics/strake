@@ -312,10 +312,13 @@ host→guest calls push more guest frames.
 
 `LO..HI` is inclusive. Check-time, in **i128**: if `HI < LO`, or
 `span = i128(HI) - i128(LO) + 1` is ≤ 0 or `> 9223372036854775807`, check `E_FORALL`.
-Do not use wrapping `sub`. `LO` and `HI` are `i64` literals or module-level integer
-literal bindings; otherwise `E_FORALL`. No iteration cap — the runtime bound remains
-module fuel only. No v0 golden may use a `forall` whose static span exceeds that
-module's fuel; an `E_FUEL` golden sets an explicit module `fuel N` lower than the
+For `LO`/`HI` that fit `i64`, computed without overflow in `i128`, `span ≤ 0` and
+`HI < LO` are the same condition (`span ≤ 0 ⟺ HI < LO`) — both spellings are given so
+the check reads directly off either the span or the bounds, not because they can
+diverge. Do not use wrapping `sub`. `LO` and `HI` are `i64` literals or module-level
+integer literal bindings; otherwise `E_FORALL`. No iteration cap — the runtime bound
+remains module fuel only. No v0 golden may use a `forall` whose static span exceeds
+that module's fuel; an `E_FUEL` golden sets an explicit module `fuel N` lower than the
 default.
 
 ### Value heap

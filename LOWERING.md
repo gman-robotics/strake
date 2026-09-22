@@ -271,7 +271,9 @@ fail code) plus a diag sidecar from `assert.eq` (see "assert.eq desugar" above).
 
 `property` + `forall n: i64 in LO..HI` lowers to the loop-parameter form over the static
 span, inclusive. Check-time: let `span = i128(HI) - i128(LO) + 1`. If `HI < LO`, or
-`span` is ≤ 0 or `> 9223372036854775807` (`i64::MAX`), that is `E_FORALL`. Do not use
+`span` is ≤ 0 or `> 9223372036854775807` (`i64::MAX`), that is `E_FORALL`. For `i64`
+`LO`/`HI` computed in `i128` (no overflow), `span ≤ 0` and `HI < LO` are the same
+condition; both are named so the check reads directly off either form. Do not use
 wrapping `sub`. `LO`/`HI` must be `i64` literals or module-level integer literal
 bindings, else `E_FORALL`. There is **no** fixed iteration cap. A huge legal span runs
 until module `fuel` traps.
