@@ -220,7 +220,7 @@ not the linear region.
 | `list.cons h t` | `list.cons h t` |
 | `list.len` | `list.len` |
 | `list.get` | `list.get` → `result` |
-| `bytes.new` | `bytes.new` |
+| `bytes.new hex` | `bytes.new` (`hex` immediate → `bytes`) |
 | `bytes.len` | `bytes.len` |
 | `bytes.get` | `bytes.get` → `result` |
 

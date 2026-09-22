@@ -160,7 +160,9 @@ operand of `list.cons`/`list.get` is a name or literal, never a nested call.
 
 ### Bytes
 
-- `bytes.new`, `bytes.len -> i64`
+- `bytes.new hex -> bytes` — `hex` is an even-length hex literal payload, the same
+  grammar as the `x"dead"` literal (not an SSA name); the result is a `bytes` handle.
+- `bytes.len -> i64`
 - `bytes.get -> result i64 unit` (byte value 0..255; OOB is `Err`, never `E_OOB`)
 
 ### Errors
