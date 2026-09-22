@@ -1,23 +1,25 @@
 # Strake
 
-Agent-first intermediate representation: token-light ISA, tests and diagnostics in the IR, one semantics, many runtimes.
-
-Spec-first. Not JavaScriptCore / Bun bytecode.
+Agent-authored language that lowers to a portable ISA. One semantics, many runtimes.
+Not JavaScriptCore / Bun bytecode.
 
 **Spec:** [SPEC.md](SPEC.md)
 
+Agents write **Strake-A** (named values, sums, `result`, structured control, property tests).
+Toolchains lower A to **`strake-1`** (SSA + optional regions). Wasm and Cranelift eat `strake-1` so existing chipset optimizers stay in play.
+
 ## Locks (2026-09-21)
 
-- Text: `.strake`
-- Binary / version: `strake-1`
+- Text: `.strake` (layer A)
+- Ship ISA: `strake-1`
 - CLI: `strake check | run | test | build`
 - License: MIT OR Apache-2.0
-- Memory: linear heap; no host-GC objects in v0
+- Data: values first; linear memory is an opt-in region
 - Effects: explicit capability imports (WASI is a later host adapter)
-- Semantics SoT: spec + reference interpreter
+- Semantics SoT: spec + reference interpreter of `strake-1`
 - First portable backend: Wasm
 - First native backend: Cranelift (LLVM later)
-- Agent-native rules (holes, JSON patches, GBNF, fuel, boundary tests): see SPEC.md
+- Agent-native rules: see SPEC.md
 
 ## License
 
