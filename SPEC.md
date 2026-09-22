@@ -375,7 +375,7 @@ may still carry `patch`.
 - Refusal: `ret 77` (result `E_REFUSED`, CLI 77)
 - Pack: SPEC.md, LOWERING.md, GBNF, `errors/catalog.json`, `llms.txt`
 
-**P11 — capability-scoped traces.** Diagnostic and trace payloads are scoped to the
+**Capability-scoped traces.** Diagnostic and trace payloads are scoped to the
 capabilities the failing module actually imported. The default next-turn payload
 carries no host secrets.
 
@@ -416,9 +416,9 @@ No `forall` in the default suite has a static span that exceeds that module's fu
 ## Deferrals
 
 - `grammar/strake.gbnf` and `llms.txt` are deferred until constrained decoding lands.
-  They are pack members (P8) but not blockers for the semantics re-review that gates the
-  interpreter. Normative syntax until then is this spec. Do not ship empty grammar files
-  as placeholders.
+  They are pack members (see "Pack" under "Agent-native mechanics" above) but not
+  blockers for the semantics re-review that gates the interpreter. Normative syntax
+  until then is this spec. Do not ship empty grammar files as placeholders.
 - `golden/` fixture files are deferred until eng; the minimum list above is locked now
   as text.
 - `strake fix` is deferred; diags may still carry `patch` ahead of the command existing.
