@@ -120,7 +120,9 @@ any trap -> 2; else any 77 -> 77; else any nonzero test -> 1; else 0
 
 `status` folds test and property exports. A trap is never rewritten to `E_TEST` or 77. An explicit `ret 2` in a test becomes 1. `build` does not call `status`. Unit rows: trap with 77 → 2; 77 with a nonzero test → 77; nonzero → 1; all zero → 0.
 
-`run` does not call `status`. A normal return prints one scalar (`handle:<id>` for a compound) and exits 0, including a return of i64 77 or 2. A trap on `run` exits 2 with that trap code. When check fails first, `test` and `run` return the check exit (1 under Q8), do not call `status`, and do not enter `exec`. `check` and `fmt` exits, and usage exit 2 with no catalog code, are Q8.
+`run` does not call `status`. A normal return prints one scalar (`handle:<id>` for a compound) and exits 0, including a return of i64 77 or 2. A trap on `run` exits 2 with that trap code. When check fails first, `test` and `run` return the check exit (1 under Q8), do not call `status`, and do not enter `exec`. `check` and `fmt` exits, and usage exit 2 with no catalog code, are Q8. How `run --fn` receives arguments is Q19. Until that spelling exists, `run` is only demonstrated on a nullary export.
+
+A rejection that has no catalog code yet is not a clean check and not a successful run. Q8's else-0 does not apply. Q3 (a second `fuel` or `pages`), Q6 (a match arm missing the join value), Q12 (a list-`forall` form other than the chosen syntax), and Q13 (a test calling `priv`) exit **3**, plain text, no `"code"`, do not call `status`, do not lower, and do not enter `exec`. Q17 is the same exit once a bool `load` runs: byte 0 is false, byte 1 is true, and any other byte does not become a bool. The process stops with exit 3 instead of returning true. Exit 3 is not exit 70 (Q18) and is not `E_PARSE`, `E_MATCH`, `E_FORALL`, `E_TYPE`, `E_IMPORT`, or `E_OOB`.
 
 ### Fuel, stack, wrap
 
@@ -146,22 +148,23 @@ A default is what the tickets implement until Tom answers. None of these reopen 
 
 1. **Header.** The worked example starts with `strake 1` and does not say it is the only legal header (SPEC "Layer A"). **Default:** header required, else `E_PARSE`. Question for Tom.
 2. **Page precedence.** SPEC "Traps and region" lets the import state a page count, else 16. SPEC "Fuel" lets one directive override. **Default:** directive, else the import, else 16. Question for Tom.
-3. **Second directive.** At most one `fuel` and one `pages` is locked. The catalog code is not. **Default:** reject the second directive, do not lower, and emit no catalog code until Tom names one. Question for Tom.
+3. **Second directive.** At most one `fuel` and one `pages` is locked. The catalog code is not. **Default:** reject the second directive under the exit-3 rule in §1. Do not emit a catalog code until Tom names one. Question for Tom.
 4. **Bare bindings and compare leftovers.** `assert.eq r 14` does not label `want`/`got`. **Default:** got, then want, so that example is got `r`, want `14`. A bare integer binding (`acc0 = 0`) is i64. `eq` / `ne` on `unit`, and ordered compares on `bool`, are `E_TYPE` ("compare family"). Question for Tom. Literal typing on `call` and `assert.eq` is already decided.
 5. **Tag spelling and `_`.** SPEC "Prelude" spells `ok` / `err`. The `for` desugar spells `Ok` / `Err` and `Err _` (D7). **Default:** A spelling is `ok` / `err`. P6: the other spelling is `E_PARSE`. `_` is a match-arm discard and is not an L6 site. Question for Tom.
-6. **Match-arm join value.** Arms may share one join name, the same shape as `if`. A missing arm value is a different fault from a non-exhaustive sum (`E_MATCH`, catalog "match is not exhaustive") and from `E_IF_PHI` (a name missing after `if`). **No code is emitted until Tom names one.** Question for Tom.
-7. **User `trap` immediates.** The form exists (A7). **Default:** it lowers to the `trap` opcode and cannot carry `E_FUEL`, `E_STACK`, `E_DIV0`, `E_OOB`, or `E_IMPORT`. Which immediates it may carry is open. Question for Tom.
-8. **Span JSON and check/fmt/usage exits.** Catalog lists `span` and does not define it. **Default:** JSON Lines on stderr, one object per line, catalog field order, absent optionals omitted; `span` is `{"file","start","end"}` half-open bytes; `check` exits 1 on any check diagnostic else 0; `fmt` exits 1 on `E_PARSE` else 0 and writes text to stdout; usage errors exit 2, plain text, no catalog code. Question for Tom.
+6. **Match-arm join value.** Arms may share one join name, the same shape as `if`. A missing arm value is a different fault from a non-exhaustive sum (`E_MATCH`, catalog "match is not exhaustive") and from `E_IF_PHI` (a name missing after `if`). **No code is emitted until Tom names one.** The module exits 3 (§1). Question for Tom.
+7. **User `trap` immediates.** The form exists (A7). **Default:** it lowers to the `trap` opcode and cannot carry `E_FUEL`, `E_STACK`, `E_DIV0`, `E_OOB`, `E_IMPORT`, `E_HOLE`, or `E_LOWER` (those messages are exec faults, a hole, or the `for` assertion). Which immediates it may carry is open. Until Tom names one, `golden/trap_user.strake` is a unit lower check only: opcode `trap`, immediate outside that list, no CLI exit. Question for Tom.
+8. **Span JSON and check/fmt/usage exits.** Catalog lists `span` and does not define it. **Default:** JSON Lines on stderr, one object per line, catalog field order, absent optionals omitted; `span` is `{"file","start","end"}` half-open bytes; `check` exits 1 on any check diagnostic; else, if the module is a codeless rejection, exit 3 (§1); else 0. `fmt` exits 1 on `E_PARSE` else 0 and writes text to stdout. Usage errors exit 2, plain text, no catalog code. Question for Tom.
 9. **Entry frame and fuel scope.** SPEC "MVP" names `run` and defines no entry. **Default:** each test, property, and `run` gets a fresh machine; host entry is call 1 and frame 1. `golden/stack.strake` uses that count. `run`'s exit rule is §1, not this question. Question for Tom.
 10. **`use` blob root.** A present blob whose blake3 matches the formatted text is legal. A missing blob or a mismatched hash is `E_USE` (SPEC "Packages"). Only the directory that holds the blob is open. **Default:** T8 passes that directory with `--blob-root`. Question for Tom.
 11. **Property export name.** LOWERING names `test.name` only. **Default:** `property.<name>`. Question for Tom.
-12. **List `forall` syntax.** SPEC "Tests" allows a finite list of literals and shows syntax only for `LO..HI`. **Default shape:** `forall x: T in NAME` on a module-level list literal. A form that is not the chosen syntax does not emit `E_FORALL` (that message is span empty, reversed, not an i64, or bounds not static). **No code until Tom answers.** Question for Tom.
-13. **Test calls `priv`.** The prohibition is P13. `E_IMPORT` does not fit (a `priv fn` is a local fn). `E_TYPE` does not fit (catalog: operand type, arity, compare family, or `eq` on list/record/sum). **No code until Tom answers.** The call is rejected and does not lower. Question for Tom.
+12. **List `forall` syntax.** SPEC "Tests" allows a finite list of literals and shows syntax only for `LO..HI`. **Default shape:** `forall x: T in NAME` on a module-level list literal. A form that is not the chosen syntax does not emit `E_FORALL` (that message is span empty, reversed, not an i64, or bounds not static). **No code until Tom answers.** The module exits 3 (§1). Question for Tom.
+13. **Test calls `priv`.** The prohibition is P13. `E_IMPORT` does not fit (a `priv fn` is a local fn). `E_TYPE` does not fit (catalog: operand type, arity, compare family, or `eq` on list/record/sum). **No code until Tom answers.** `golden/priv_call.strake` exits 3 and does not lower. `golden/priv.strake` stays a clean export check. Question for Tom.
 14. **`check --draft` on a hole.** Ship `check` emits `E_HOLE` kind `check` and does not lower (SPEC "Holes"). Draft execution traps. **Default:** `check --draft` does not emit check `E_HOLE`; it lowers and drops, and does not exec. Question for Tom.
 15. **`--fn` through a helper.** Direct calls are SPEC "Incremental". A test that reaches a second export or a `priv fn` only through a local helper is unspecified. **Default:** the helper counts; that test is not selected. Question for Tom.
 16. **Module-level integer bindings.** Forall bounds may be module-level integer literal bindings (SPEC "Forall span"). The syntax is unstated. **Default:** `name = <i64 literal>` at module scope. T7's running forall uses range literals until this is confirmed. Question for Tom.
-17. **Region bytes.** Bool `load` of a byte other than 0 or 1, and the bytes of a fresh region, are unstated. `E_OOB` is the address range (catalog), so it is not the bool-byte fault. **Default:** a fresh region is zero-filled. A bool load of any other byte emits no catalog code until Tom names one. T8's region files load bytes they stored. Question for Tom.
-18. **Lowerer abort.** §1 names exit 70 so a lowerer bug is not exit 2. Question for Tom: is 70 the number?
+17. **Region bytes.** Bool `load` of a byte other than 0 or 1, and the bytes of a fresh region, are unstated. `E_OOB` is the address range (catalog), so it is not the bool-byte fault. **Default:** a fresh region is zero-filled. Byte 0 loads as false and byte 1 as true. Any other byte does not become a bool: the run stops under the exit-3 rule and does not return true. T8's region files load bytes they stored. Question for Tom.
+18. **Lowerer abort.** §1 names exit 70 so a lowerer bug is not exit 2 and not exit 3. Question for Tom: is 70 the number?
+19. **`run` argument spelling.** SPEC "MVP" names `run` and spells no arguments. **Default:** `run --fn` takes a nullary export. `golden/run_const.strake` is `fn answer() -> i64` / `ret 14`, and `strake run --fn answer` prints `14` and exits 0. No argv is invented for `add2`. Question for Tom.
 
 ## 3. Minimum goldens
 
@@ -177,7 +180,7 @@ Each source is a fmt fixed point. `want` / `got` are omitted when the diag has n
 | 5 | `golden/for_list.strake` | `strake test golden/for_list.strake` | 0 | none. `list.get` out of range is `Err`. Stderr has no `E_OOB` |
 | 6 | `golden/forall_rev.strake` | `strake test golden/forall_rev.strake` | 1 | `E_FORALL` kind `check`, `HI < LO`. No lower. `exec` not entered |
 | 6 | `golden/forall_ok.strake` | `strake test golden/forall_ok.strake` | 0 | none. Inclusive span ≤ default fuel `100000` |
-| 7 | `golden/fuel.strake` | `strake test golden/fuel.strake` | 2 | `E_FUEL` kind `trap`. The next instruction is a host import and the host records zero calls |
+| 7 | `golden/fuel.strake` | `strake test golden/fuel.strake` | 2 | `E_FUEL` kind `trap`. The file sets `fuel 0`, adds two i64 literals inside a test, and imports nothing. That program costs at least 1, so `EmptyHost` reaches `E_FUEL` |
 | 8 | `golden/stack.strake` | `strake test golden/stack.strake` | 2 | `E_STACK` kind `trap`. Entry is call 1; calls 2..1024 fill frames 2..1024; call 1025 traps; fuel unchanged |
 | 9 | `golden/test_fail.strake` | `strake test golden/test_fail.strake` | 1 | `E_TEST` kind `result`, `want` `14`, `got` `16` (`assert.eq r 14`, `r` is 16) |
 | 9 | `golden/refused.strake` | `strake test golden/refused.strake` | 77 | `E_REFUSED` kind `result` |
@@ -205,7 +208,7 @@ Eight PRs. T3 is the thin slice. T4–T6 fan out. T7–T8 finish the card and th
 **Size** M. **Depends** T1.
 **Goal.** One CST. Parse and fmt are its consumers. `syntax` imports `diag` only.
 **Files.** `body/syntax.rs`.
-**Acceptance.** `fn add2` and `test add2.basic` parse and format idempotently at two-space indent. `if`, `loop`, `for`, `forall`, and `not` parse. `E_PARSE` for a nested-call operand, `assert.eq` outside `test`/`property`, a user `%` name, odd-length hex, and `and` / `or` / `rem` / bitwise / casts (SPEC "Arithmetic" closed absence). Indent is not syntax. Integer literals lex as i128; `-9223372036854775808` is a legal i64 literal. Header per Q1. A second `fuel` or `pages` is rejected with no catalog code (Q3).
+**Acceptance.** `fn add2` and `test add2.basic` parse and format idempotently at two-space indent. `if`, `loop`, `for`, `forall`, and `not` parse. `E_PARSE` for a nested-call operand, `assert.eq` outside `test`/`property`, a user `%` name, odd-length hex, and `and` / `or` / `rem` / bitwise / casts (SPEC "Arithmetic" closed absence). Indent is not syntax. Integer literals lex as i128; `-9223372036854775808` is a legal i64 literal. Header per Q1. A second `fuel` or `pages` exits 3, plain text, no catalog code, and does not lower (Q3, §1).
 **Verification.** Unit parser. Black-box `strake fmt` byte compare on the worked-example slice.
 
 ### T3. Thin slice: `add2.basic`
@@ -213,22 +216,23 @@ Eight PRs. T3 is the thin slice. T4–T6 fan out. T7–T8 finish the card and th
 **Size** M. **Depends** T2.
 **Goal.** Accept-path check, lower, and interpret one file. `compile` sequences CST → check → lower → exec.
 **Files.** `body/check.rs`, `body/lower.rs`, `body/interp/mod.rs`, `body/interp/op.rs`, `body/interp/ir.rs`, `body/host.rs`, `golden/add2_basic.strake`.
-**Acceptance.** The file is `add2` plus `test add2.basic` only. `call add2(3, 4)` typechecks because `3` and `4` take the parameter type. `strake test golden/add2_basic.strake` exits 0 and stderr is empty. Unit exec result is 14. `lower` cannot name `br`.
-**Verification.** Unit result 14. Black-box `strake test golden/add2_basic.strake`.
+**Acceptance.** The file is `add2` plus `test add2.basic` only. `call add2(3, 4)` typechecks because `3` and `4` take the parameter type. `strake test golden/add2_basic.strake` exits 0 and stderr is empty. Unit exec result is 14. `lower` cannot name `br`. A `finish` rejection returns exit 70, plain text, and does not call `status` (Q18).
+**Verification.** Unit result 14, and the abort unit above. Black-box `strake test golden/add2_basic.strake`.
 
 ### T4. Checks that block lowering
 
 **Size** L. **Depends** T3.
 **Goal.** L6, if-join failure, the ship hole, unknown callees, `priv` exports, directory selection, `--fn`.
-**Files.** `body/check.rs`, `golden/shadow.strake`, `golden/if_phi.strake`, `golden/hole_ship.strake`, `golden/priv.strake`.
-**Acceptance.** §3 rows 3, 4 (failure), and 10 (ship), each via `strake test`, exit 1, `exec` counter 0. Also `E_SHADOW` for an outer name assigned in an arm, two sibling `for` binders, a loop param assigned in the body, and a forall binder rebound. `eq` on a list → `E_TYPE`. Unknown callee → `E_IMPORT` kind `check`, no lower. `golden/priv.strake`: `strake check`, exit 0, and `exports()` omits the `priv fn` (R1). A test that calls `priv` does not lower and emits no catalog code (Q13). `check <dir>` reads only `src/**/*.strake`. `--fn` keeps a test whose direct calls are only that export.
-**Verification.** Unit exec counter is 0 on the three `strake test` failures. Black-box:
+**Files.** `body/check.rs`, `golden/shadow.strake`, `golden/if_phi.strake`, `golden/hole_ship.strake`, `golden/priv.strake`, `golden/priv_call.strake`.
+**Acceptance.** §3 rows 3, 4 (failure), and 10 (ship), each via `strake test`, exit 1, `exec` counter 0. Also `E_SHADOW` for an outer name assigned in an arm, two sibling `for` binders, a loop param assigned in the body, and a forall binder rebound. `eq` on a list → `E_TYPE`. Unknown callee → `E_IMPORT` kind `check`, no lower. `golden/priv.strake`: `strake check`, exit 0, and `exports()` omits the `priv fn` (R1). `golden/priv_call.strake`: a test calls that `priv fn`; `strake test` exits 3, plain text, no catalog code, does not lower, `exec` counter 0 (Q13). `check <dir>` reads only `src/**/*.strake`. `--fn` keeps a test whose direct calls are only that export.
+**Verification.** Unit exec counter is 0 on the three catalog failures and on `priv_call`. Black-box:
 
 ```
 strake test golden/shadow.strake
 strake test golden/if_phi.strake
 strake test golden/hole_ship.strake
 strake check golden/priv.strake
+strake test golden/priv_call.strake
 ```
 
 ### T5. Test channel
@@ -244,29 +248,29 @@ strake check golden/priv.strake
 **Size** M. **Depends** T3.
 **Goal.** The arithmetic and limit goldens, and `not` sugar.
 **Files.** interp arith and fuel, `golden/wrap.strake`, `golden/div0.strake`, `golden/fuel.strake`, `golden/stack.strake`, `golden/not_bool.strake`.
-**Acceptance.** §3 rows 1, 2, 7, and 8. `golden/not_bool.strake`: `strake test`, exit 0; `not true` lowers to `eq bool` against `false` and the test expects false. Unresolved import beats stack and does not charge (unit). Phi costs 1 (unit).
-**Verification.** Unit call-entry table. Black-box `strake test` on the five files.
+**Acceptance.** §3 rows 1, 2, 7, and 8. `golden/not_bool.strake`: `strake test`, exit 0; `not true` lowers to `eq bool` against `false` and the test expects false. Unresolved import beats stack and does not charge (unit). Phi costs 1 (unit). Unit, with a bound host: the next instruction would be an integer `div` by 0 and remaining fuel is 0; the diagnostic is `E_FUEL`, not `E_DIV0`, and the `div` does not execute.
+**Verification.** Unit call-entry table, including that fuel-before-div case. Black-box `strake test` on the five files.
 
 ### T7. Lists, loop, match, forall
 
 **Size** L. **Depends** T4.
 **Goal.** Normative `for`, `loop` / `break` / `continue`, sums, `E_MATCH`, `E_FORALL`. The small property uses default fuel, so this ticket does not wait on T6.
 **Files.** `golden/for_list.strake`, `golden/forall_rev.strake`, `golden/forall_ok.strake`, `golden/loop.strake`, `golden/loop_arity.strake`.
-**Acceptance.** §3 rows 5 and 6. `golden/loop.strake`: `strake test`, exit 0; a loop parameter, `break`, and `continue` that names that parameter once (L7). `golden/loop_arity.strake`: `strake test`, exit 1, `E_TYPE` kind `check` (continue must name each loop parameter once), `exec` not entered. Non-exhaustive match → `E_MATCH`. A match arm that lacks the join value emits no catalog code (Q6). The desugar's `Err` arm is `trap Lower`, executed through the builder in a unit test, not by a lying list. No iterator value. Unit: `LO = 1`, `HI = i64::MAX` is accepted and not run; `LO = 0`, `HI = i64::MAX` is `E_FORALL`.
+**Acceptance.** §3 rows 5 and 6. `golden/loop.strake`: `strake test`, exit 0; a loop parameter, `break`, and `continue` that names that parameter once (L7). `golden/loop_arity.strake`: `strake test`, exit 1, `E_TYPE` kind `check` (continue must name each loop parameter once), `exec` not entered. Non-exhaustive match → `E_MATCH`. A match arm that lacks the join value exits 3, plain text, no catalog code, and is not a passing test (Q6). A list-`forall` form other than Q12's shape does the same and does not emit `E_FORALL`. The desugar's `Err` arm is `trap Lower`, executed through the builder in a unit test, not by a lying list. No iterator value. Unit: `LO = 1`, `HI = i64::MAX` is accepted and not run; `LO = 0`, `HI = i64::MAX` is `E_FORALL`.
 **Verification.** Unit OOB tag 1, desugar shape, and the `trap Lower` builder case. Black-box `strake test` on the five files.
 
 ### T8. Rest of the card and the sweep
 
 **Size** L. **Depends** T5, T7.
 **Goal.** Records, bytes, region, imports, `use`, draft holes, user `trap`, `run`, and the §3 sweep.
-**Files.** `blake3` on the crate; `golden/hole_draft.strake`, `golden/region_oob.strake`, `golden/region_miss.strake`, `golden/region_unaligned.strake`, `golden/import_miss.strake`, `golden/use_ok.strake`, `golden/use_bad.strake`, `golden/bytes_oob.strake`, `golden/load_type.strake`, `golden/trap_user.strake`.
-**Acceptance.** §3 row 10 draft. `golden/region_oob.strake`: `strake test`, exit 2, `E_OOB` kind `trap` (negative offset). `golden/region_miss.strake`: `strake test`, exit 1, `E_REGION` kind `check`, `exec` not entered. `golden/region_unaligned.strake`: `strake test`, exit 0, unaligned i64 store. `golden/import_miss.strake`: `strake test`, exit 2, `E_IMPORT` kind `trap`, host recorded zero calls. `golden/use_ok.strake`: `strake check --blob-root <dir> golden/use_ok.strake`, exit 0, blob bytes equal blake3 of the formatted file. `golden/use_bad.strake`: same command with a missing blob and again with a mismatched blob; each exits 1, `E_USE` kind `check`, `exec` not entered. `golden/bytes_oob.strake`: `strake test`, exit 0, `bytes.get` out of range is `Err`. `golden/load_type.strake`: `strake test`, exit 1, `E_TYPE` kind `check` for `load` of a list. `golden/trap_user.strake`: the form parses and lowers to `trap`; the immediate is not an `exec` fault (Q7). `strake run --fn add2 golden/add2_basic.strake` prints `14` and exits 0. The sweep is every §3 command.
+**Files.** `blake3` on the crate; `golden/hole_draft.strake`, `golden/region_oob.strake`, `golden/region_miss.strake`, `golden/region_unaligned.strake`, `golden/import_miss.strake`, `golden/use_ok.strake`, `golden/use_bad.strake`, `golden/bytes_oob.strake`, `golden/load_type.strake`, `golden/trap_user.strake`, `golden/run_const.strake`.
+**Acceptance.** §3 row 10 draft. `golden/region_oob.strake`: `strake test`, exit 2, `E_OOB` kind `trap` (negative offset). `golden/region_miss.strake`: `strake test`, exit 1, `E_REGION` kind `check`, `exec` not entered. `golden/region_unaligned.strake`: `strake test`, exit 0, unaligned i64 store. `golden/import_miss.strake`: `strake test`, exit 2, `E_IMPORT` kind `trap`, host recorded zero calls. `golden/use_ok.strake`: `strake check --blob-root <dir> golden/use_ok.strake`, exit 0, blob bytes equal blake3 of the formatted file. `golden/use_bad.strake`: same command with a missing blob and again with a mismatched blob; each exits 1, `E_USE` kind `check`, `exec` not entered. `golden/bytes_oob.strake`: `strake test`, exit 0, `bytes.get` out of range is `Err`. `golden/load_type.strake`: `strake test`, exit 1, `E_TYPE` kind `check` for `load` of a list. `golden/trap_user.strake` has no CLI command: a unit lower check emits opcode `trap` with an immediate outside Q7's cannot-carry list, and there is no process exit. `golden/run_const.strake`: `strake run --fn answer golden/run_const.strake` prints `14` and exits 0 (Q19). The sweep is every §3 command.
 **Verification.** Unit instantiate and i128 bounds. Black-box the commands above, then the §3 table.
 
 ## 5. Risks, and what Phase 1 is not
 
 - README and the SPEC status line still say engineering is gated. This PR does not edit them.
-- A fuel golden is a tripwire. `golden/fuel.strake` shows the missed instruction by a host counter, not by a leftover fuel total.
+- A fuel golden is a tripwire. `golden/fuel.strake` is `fuel 0` and no host import. The "instruction did not run" oracle is T6's unit: a would-be `E_DIV0` comes back as `E_FUEL`.
 - `E_LOWER` is unreachable for a well-formed list. T7's builder test is the acceptance.
 - A huge `pages` or a huge legal `forall` can abort the process (SPEC "Value heap", L11).
 - The i64 minimum literal is lexed as sign plus digits in i128, then range-checked.
