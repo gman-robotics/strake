@@ -1,9 +1,7 @@
 use std::env;
 use std::process;
 
-use strake::{build, check, fmt, run, test, Exit, Opts};
-
-const CHECK_USAGE: &str = "usage: strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>";
+use strake::{build, check, fmt, run, test, Exit, Opts, CHECK_USAGE};
 
 fn main() {
     let exit = dispatch(env::args().skip(1).collect());
