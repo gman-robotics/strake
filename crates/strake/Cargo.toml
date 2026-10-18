@@ -1,0 +1,15 @@
+[package]
+name = "strake"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Strake reference toolchain"
+publish = false
+
+[[bin]]
+name = "strake"
+path = "src/main.rs"
+
+[lib]
+name = "strake"
+path = "src/lib.rs"
