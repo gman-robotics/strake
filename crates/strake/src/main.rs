@@ -1,7 +1,7 @@
 use std::env;
 use std::process;
 
-use strake::{build, check, fmt, run, test, Exit, Opts};
+use strake::{build, check, fmt, run, test, Exit, Opts, CHECK_USAGE};
 
 fn main() {
     let exit = dispatch(env::args().skip(1).collect());
@@ -72,7 +72,7 @@ fn usage_check() -> Exit {
     Exit {
         code: 2,
         stdout: String::new(),
-        stderr: "usage: strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>\n".into(),
+        stderr: format!("{CHECK_USAGE}\n"),
     }
 }
 
@@ -145,6 +145,7 @@ fn usage_run() -> Exit {
 #[cfg(test)]
 mod tests {
     use super::dispatch;
+    use strake::CHECK_USAGE;
 
     #[test]
     fn dispatch_build() {
@@ -152,5 +153,12 @@ mod tests {
         assert_eq!(exit.code, 2);
         assert_eq!(exit.stdout, "build is post-MVP\n");
         assert!(exit.stderr.is_empty());
+    }
+
+    #[test]
+    fn check_usage_includes_blob_root() {
+        assert!(CHECK_USAGE.contains("[--blob-root DIR]"));
+        let exit = dispatch(vec!["check".into()]);
+        assert!(exit.stderr.contains("[--blob-root DIR]"));
     }
 }

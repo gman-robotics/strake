@@ -1,6 +1,9 @@
 mod body;
+mod run_cmd;
 
-pub use body::diag::{status, Code, Diag, ExportOutcome, Kind, Span};
+/// Usage line for `strake check` (includes `[--blob-root DIR]` for T8).
+pub const CHECK_USAGE: &str =
+    "usage: strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>";
 
 /// CLI options shared across commands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -28,7 +31,7 @@ fn usage(message: &str) -> Exit {
 
 /// `strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>`
 pub fn check(_path: &str, _opts: Opts) -> Exit {
-    usage("usage: strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>")
+    usage(CHECK_USAGE)
 }
 
 /// `strake fmt <file>`
@@ -42,9 +45,8 @@ pub fn test(_path: &str, _opts: Opts) -> Exit {
 }
 
 /// `strake run --fn NAME [--draft] <file>`
-pub fn run(_path: &str, _fn_name: &str, _opts: Opts) -> Exit {
-    // `status` is for the test channel only; `run` never calls it.
-    usage("usage: strake run --fn NAME [--draft] <file>")
+pub fn run(path: &str, fn_name: &str, opts: Opts) -> Exit {
+    run_cmd::run(path, fn_name, opts)
 }
 
 /// `strake build` — post-MVP stub (SPEC "MVP").
@@ -69,9 +71,21 @@ mod tests {
     }
 
     #[test]
-    fn run_does_not_use_status() {
-        let exit = run("x.strake", "main", Opts::default());
-        assert_eq!(exit.code, 2);
-        assert!(!exit.stderr.contains("code"));
+    fn check_usage_includes_blob_root() {
+        assert!(
+            CHECK_USAGE.contains("[--blob-root DIR]"),
+            "check usage must document --blob-root for T8"
+        );
+        let exit = check("x.strake", Opts::default());
+        assert_eq!(exit.stderr, format!("{CHECK_USAGE}\n"));
+    }
+
+    #[test]
+    fn run_module_does_not_reference_status() {
+        const RUN_SRC: &str = include_str!("run_cmd.rs");
+        assert!(
+            !RUN_SRC.contains("status(") && !RUN_SRC.contains("test_channel::"),
+            "run must not call test-channel status"
+        );
     }
 }
