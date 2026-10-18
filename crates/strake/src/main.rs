@@ -1,7 +1,9 @@
 use std::env;
 use std::process;
 
-use strake::{build, check, fmt, run, test, Exit, Opts, CHECK_USAGE};
+use strake::{build, check, fmt, run, test, Exit, Opts};
+
+const CHECK_USAGE: &str = "usage: strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>";
 
 fn main() {
     let exit = dispatch(env::args().skip(1).collect());
@@ -144,8 +146,7 @@ fn usage_run() -> Exit {
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch;
-    use strake::CHECK_USAGE;
+    use super::{dispatch, CHECK_USAGE};
 
     #[test]
     fn dispatch_build() {

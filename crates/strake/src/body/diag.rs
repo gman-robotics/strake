@@ -249,29 +249,25 @@ pub struct ExportOutcome {
     pub ret: i64,
 }
 
-/// Test-channel exit aggregation (`run` must not import this module).
-pub mod test_channel {
-    use super::ExportOutcome;
-
-    /// Precedence (catalog `cli.precedence`, SPEC "Tests"):
-    /// any trap -> 2; else any 77 -> 77; else any nonzero test -> 1; else 0
-    pub fn status(exports: &[ExportOutcome]) -> i32 {
-        if exports.iter().any(|e| e.trapped) {
-            return 2;
-        }
-        if exports.iter().any(|e| e.ret == 77) {
-            return 77;
-        }
-        if exports.iter().any(|e| e.ret != 0) {
-            return 1;
-        }
-        0
+/// Test-channel exit code only (`run` must not call this).
+///
+/// Precedence (catalog `cli.precedence`, SPEC "Tests"):
+/// any trap -> 2; else any 77 -> 77; else any nonzero test -> 1; else 0
+pub(crate) fn status(exports: &[ExportOutcome]) -> i32 {
+    if exports.iter().any(|e| e.trapped) {
+        return 2;
     }
+    if exports.iter().any(|e| e.ret == 77) {
+        return 77;
+    }
+    if exports.iter().any(|e| e.ret != 0) {
+        return 1;
+    }
+    0
 }
 
 #[cfg(test)]
 mod tests {
-    use super::test_channel::status;
     use super::*;
 
     #[test]
@@ -290,6 +286,15 @@ mod tests {
                 ret: 77,
             },
         ];
+        assert_eq!(status(&exports), 2);
+    }
+
+    #[test]
+    fn status_trap_alone_with_ret_77_is_2() {
+        let exports = [ExportOutcome {
+            trapped: true,
+            ret: 77,
+        }];
         assert_eq!(status(&exports), 2);
     }
 
@@ -416,6 +421,28 @@ mod tests {
     }
 
     #[test]
+    fn json_escapes_strings() {
+        let diag = Diag {
+            code: Code::ETest,
+            kind: Kind::Result,
+            span: Span {
+                file: "a\"b\\c\n.strake".into(),
+                start: 0,
+                end: 1,
+            },
+            want: Some("w\"o\n".into()),
+            got: Some("g\\t".into()),
+            patch: None,
+        };
+        let mut buf = Vec::new();
+        diag.write_json_line(&mut buf).unwrap();
+        let line = String::from_utf8(buf).unwrap();
+        assert!(line.contains("a\\\"b\\\\c\\n.strake"));
+        assert!(line.contains("w\\\"o\\n"));
+        assert!(line.contains("g\\\\t"));
+    }
+
+    #[test]
     fn e_cycle_not_constructable() {
         assert_eq!(Code::from_catalog_name("E_CYCLE"), None);
     }
@@ -440,12 +467,17 @@ mod tests {
         }
 
         for code in constructable {
-            let name = code.as_str();
+            let name = exhaustive_catalog_name(code);
+            assert_eq!(name, code.as_str());
             let entry = non_reserved
                 .iter()
                 .find(|e| e.code == name)
                 .unwrap_or_else(|| panic!("Code {} missing from catalog", name));
             assert_eq!(code.msg(), entry.msg);
+            assert!(
+                !entries.iter().any(|e| e.code == name && e.reserved),
+                "{name} must not be a reserved catalog row"
+            );
         }
 
         let cycle = entries
@@ -454,6 +486,29 @@ mod tests {
             .expect("catalog must list E_CYCLE");
         assert!(cycle.reserved, "E_CYCLE must stay reserved in catalog");
         assert_eq!(Code::from_catalog_name("E_CYCLE"), None);
+    }
+
+    /// Exhaustive over [`Code`] — no wildcard; a new variant is a compile error here.
+    fn exhaustive_catalog_name(code: Code) -> &'static str {
+        match code {
+            Code::EParse => "E_PARSE",
+            Code::EType => "E_TYPE",
+            Code::EShadow => "E_SHADOW",
+            Code::EForall => "E_FORALL",
+            Code::EMatch => "E_MATCH",
+            Code::EIfPhi => "E_IF_PHI",
+            Code::EHole => "E_HOLE",
+            Code::ERegion => "E_REGION",
+            Code::EUse => "E_USE",
+            Code::EImport => "E_IMPORT",
+            Code::EOob => "E_OOB",
+            Code::EStack => "E_STACK",
+            Code::EDiv0 => "E_DIV0",
+            Code::EFuel => "E_FUEL",
+            Code::ELower => "E_LOWER",
+            Code::ETest => "E_TEST",
+            Code::ERefused => "E_REFUSED",
+        }
     }
 
     struct CatalogCodeEntry {

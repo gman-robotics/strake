@@ -1,8 +1,7 @@
 mod body;
-mod run_cmd;
 
 /// Usage line for `strake check` (includes `[--blob-root DIR]` for T8).
-pub const CHECK_USAGE: &str =
+pub(crate) const CHECK_USAGE: &str =
     "usage: strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>";
 
 /// CLI options shared across commands.
@@ -41,12 +40,13 @@ pub fn fmt(_path: &str) -> Exit {
 
 /// `strake test [--draft] <file>`
 pub fn test(_path: &str, _opts: Opts) -> Exit {
+    let _test_channel = crate::body::diag::status;
     usage("usage: strake test [--draft] <file>")
 }
 
 /// `strake run --fn NAME [--draft] <file>`
-pub fn run(path: &str, fn_name: &str, opts: Opts) -> Exit {
-    run_cmd::run(path, fn_name, opts)
+pub fn run(_path: &str, _fn_name: &str, _opts: Opts) -> Exit {
+    usage("usage: strake run --fn NAME [--draft] <file>")
 }
 
 /// `strake build` — post-MVP stub (SPEC "MVP").
@@ -78,14 +78,5 @@ mod tests {
         );
         let exit = check("x.strake", Opts::default());
         assert_eq!(exit.stderr, format!("{CHECK_USAGE}\n"));
-    }
-
-    #[test]
-    fn run_module_does_not_reference_status() {
-        const RUN_SRC: &str = include_str!("run_cmd.rs");
-        assert!(
-            !RUN_SRC.contains("status(") && !RUN_SRC.contains("test_channel::"),
-            "run must not call test-channel status"
-        );
     }
 }
