@@ -528,6 +528,9 @@ impl<'a> Lexer<'a> {
         while matches!(self.peek_byte(), Some(b'0'..=b'9')) {
             self.bump();
         }
+        if matches!(self.peek_byte(), Some(b'e' | b'E')) {
+            return Err(e_parse(self.file, start, self.byte_pos()));
+        }
         let slice = &self.src[num_start..self.i];
         if self.peek_byte() == Some(b'.') {
             let dot = self.i;
@@ -536,10 +539,16 @@ impl<'a> Lexer<'a> {
                 while matches!(self.peek_byte(), Some(b'0'..=b'9')) {
                     self.bump();
                 }
+                if matches!(self.peek_byte(), Some(b'e' | b'E')) {
+                    return Err(e_parse(self.file, start, self.byte_pos()));
+                }
                 let fslice = &self.src[num_start..self.i];
-                let v = fslice
+                let mut v = fslice
                     .parse::<f64>()
                     .map_err(|_| e_parse(self.file, start, self.byte_pos()))?;
+                if neg {
+                    v = -v;
+                }
                 return Ok(Tok::Float(v));
             }
             self.i = dot;
@@ -769,6 +778,36 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    /// After `name =`, distinguish `continue i = 0` / `loop i = 0` from `n = add i64 ...`.
+    fn looks_like_stmt_rhs_after_eq(&self) -> bool {
+        if matches!(&self.cur, Some((Tok::LBrace, _, _))) {
+            return true;
+        }
+        let Some((Tok::Ident(head), _, en)) = self.cur.clone() else {
+            return false;
+        };
+        if binop_from_ident(&head).is_some() {
+            return matches!(
+                self.peek_token_at(en),
+                Ok(Some((Tok::Ident(ty), _, _))) if is_type_name(&ty)
+            );
+        }
+        matches!(
+            head.as_str(),
+            "call"
+                | "list.empty"
+                | "list.cons"
+                | "list.len"
+                | "list.get"
+                | "bytes.new"
+                | "bytes.len"
+                | "bytes.get"
+                | "load"
+                | "store"
+                | "not"
+        )
+    }
+
     fn parse_module(&mut self) -> Result<Module, Diag> {
         let start = self.span_of().0;
         if !self.eat_ident("strake")? {
@@ -892,6 +931,7 @@ impl<'a> Parser<'a> {
     }
 
     fn finish_sum_variant(&mut self, tag: String, st: u32, en: u32) -> Result<SumVariant, Diag> {
+        Self::check_user_name(&tag, (st, en), self.file)?;
         let payload = match &self.cur {
             Some((Tok::Ident(s), _, _)) if s != "}" && s != "|" => Some(self.parse_type()?),
             _ => None,
@@ -970,8 +1010,12 @@ impl<'a> Parser<'a> {
         if scheme != "blake3" {
             return Err(self.err_here());
         }
-        if !self.eat_tok(Tok::Colon)? {
-            return Err(self.err_here());
+        match self.cur.take() {
+            Some((Tok::Colon, _, en)) => {
+                self.lex.set_byte_pos(en);
+                self.cur = None;
+            }
+            _ => return Err(self.err_here()),
         }
         let (hash, _, _) = self.expect_blake3_hash()?;
         let end = self.lex.byte_pos();
@@ -1169,29 +1213,36 @@ impl<'a> Parser<'a> {
 
     fn parse_loop(&mut self, start: u32, ctx: BodyCtx) -> Result<Stmt, Diag> {
         let mut params = Vec::new();
-        if self.cur_ident().is_some() && self.cur_ident() != Some("end") {
-            if let Some((Tok::Ident(name), pst, pen)) = self.cur.clone() {
-                if name != "end"
-                    && name != "break"
-                    && name != "continue"
-                    && name != "if"
-                    && name != "for"
-                    && name != "match"
-                {
-                    self.bump()?;
-                    if self.eat_tok(Tok::Eq)? {
-                        Self::check_user_name(&name, (pst, pen), self.file)?;
-                        let init = self.parse_operand()?;
-                        params.push(LoopParam {
-                            span: span(self.file, pst, pen),
-                            name,
-                            init,
-                        });
-                    } else {
-                        return Err(self.err_here());
-                    }
-                }
+        while self.cur_ident().is_some() && self.cur_ident() != Some("end") {
+            let Some((Tok::Ident(name), pst, pen)) = self.cur.clone() else {
+                break;
+            };
+            if matches!(
+                name.as_str(),
+                "end" | "break" | "continue" | "if" | "for" | "match" | "ret" | "trap" | "forall"
+            ) {
+                break;
             }
+            self.bump()?;
+            if !self.eat_tok(Tok::Eq)? {
+                self.lex.set_byte_pos(pst);
+                self.cur = None;
+                self.bump()?;
+                break;
+            }
+            if self.looks_like_stmt_rhs_after_eq() {
+                self.lex.set_byte_pos(pst);
+                self.cur = None;
+                self.bump()?;
+                break;
+            }
+            Self::check_user_name(&name, (pst, pen), self.file)?;
+            let init = self.parse_operand()?;
+            params.push(LoopParam {
+                span: span(self.file, pst, pen),
+                name,
+                init,
+            });
         }
         let body = self.parse_block(ctx)?;
         let end = self.lex.byte_pos();
@@ -1217,6 +1268,12 @@ impl<'a> Parser<'a> {
             let (name, pst, pen) = self.expect_ident()?;
             Self::check_user_name(&name, (pst, pen), self.file)?;
             if !self.eat_tok(Tok::Eq)? {
+                self.lex.set_byte_pos(pst);
+                self.cur = None;
+                self.bump()?;
+                break;
+            }
+            if self.looks_like_stmt_rhs_after_eq() {
                 self.lex.set_byte_pos(pst);
                 self.cur = None;
                 self.bump()?;
@@ -1467,7 +1524,8 @@ impl<'a> Parser<'a> {
         if self.eat_tok(Tok::LBrace)? {
             let mut fields = Vec::new();
             loop {
-                let (fname, _, _) = self.expect_ident()?;
+                let (fname, fst, fen) = self.expect_ident()?;
+                Self::check_user_name(&fname, (fst, fen), self.file)?;
                 if !self.eat_tok(Tok::Colon)? {
                     return Err(self.err_here());
                 }
@@ -1492,6 +1550,9 @@ impl<'a> Parser<'a> {
         }
         if let Some((base, field)) = split_dotted_project(&head) {
             let fstart = hen - field.len() as u32;
+            let bstart = hst;
+            let bend = fstart;
+            Self::check_user_name(&base, (bstart, bend), self.file)?;
             Self::check_user_name(&field, (fstart, hen), self.file)?;
             return Ok(Rhs::Project {
                 span: span(self.file, hst, hen),
@@ -1708,6 +1769,9 @@ fn binop_from_ident(name: &str) -> Option<BinOp> {
 // --- Formatter -----------------------------------------------------------------
 
 fn format_float_literal(v: f64) -> String {
+    if !v.is_finite() {
+        return format!("{}", v.to_bits());
+    }
     let printed = format!("{}", v);
     if printed.contains('.') || printed.contains('e') || printed.contains('E') {
         printed
@@ -2540,5 +2604,115 @@ end
     fn continue_then_ret_parses() {
         let src = "strake 1\n\nfn f() -> i64\n  loop i = 0\n    continue\n    ret 1\n  end\n  ret 0\nend\n";
         parse(src, "t.strake").expect("continue then ret");
+    }
+
+    #[test]
+    fn loop_without_params_then_ret_parses() {
+        let src = "strake 1\n\nfn f() -> i64\n  loop\n    ret 1\n  end\n  ret 0\nend\n";
+        parse(src, "t.strake").expect("loop then ret");
+    }
+
+    #[test]
+    fn loop_not_stmt_assign_rhs_as_header_param() {
+        let src = "strake 1\n\nfn f() -> i64\n  loop\n    n = add i64 1 2\n  end\n  ret 0\nend\n";
+        parse(src, "t.strake").expect("loop body assign not header param");
+    }
+
+    #[test]
+    fn loop_two_header_params() {
+        let src = "strake 1\n\nfn f() -> i64\n  loop a = 0 b = 1\n    break\n  end\n  ret 0\nend\n";
+        let m = parse(src, "t.strake").expect("loop two params");
+        let Item::Fn(f) = &m.items[0] else {
+            panic!("fn")
+        };
+        let Stmt::Loop { params, .. } = &f.body[0] else {
+            panic!("loop")
+        };
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0].name, "a");
+        assert_eq!(params[1].name, "b");
+    }
+
+    #[test]
+    fn continue_then_assign_parses() {
+        let src = "strake 1\n\nfn f() -> i64\n  loop i = 0\n    continue\n    n = add i64 1 2\n  end\n  ret 0\nend\n";
+        parse(src, "t.strake").expect("continue then assign");
+    }
+
+    #[test]
+    fn continue_assign_rewind_not_edge() {
+        let src = "strake 1\n\nfn f() -> i64\n  loop i = 0\n    continue n = add i64 1 2\n    ret 0\n  end\n  ret 0\nend\n";
+        let m = parse(src, "t.strake").expect("continue rewinds stmt assign");
+        let Item::Fn(f) = &m.items[0] else {
+            panic!("fn")
+        };
+        let Stmt::Loop { body, .. } = &f.body[0] else {
+            panic!("loop")
+        };
+        let Stmt::Continue { edges, .. } = &body[0] else {
+            panic!("continue")
+        };
+        assert!(edges.is_empty(), "n = add must not be a continue edge");
+        let Stmt::Assign { name, .. } = &body[1] else {
+            panic!("assign after continue")
+        };
+        assert_eq!(name, "n");
+    }
+
+    #[test]
+    fn e_parse_percent_record_literal_field() {
+        let src = "strake 1\n\nfn f() -> unit\n  r = { %a: 1 }\n  ret unit\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_project_base() {
+        let src = "strake 1\n\nfn f() -> i64\n  v = %p.x\n  ret v\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_sum_tag() {
+        let src = "strake 1\n\ntype t { a | %b i64 }\n\nfn f() -> unit\n  ret unit\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn use_blake3_hash_long_leading_digits() {
+        let src = "strake 1\n\nuse pkg@blake3:9999999999999999999999999999999999999999abcd\n\nfn f() -> unit\n  ret unit\nend\n";
+        parse(src, "t.strake").expect("long leading-digit blake3 hash");
+    }
+
+    #[test]
+    fn signed_float_literal_fmt_roundtrip() {
+        let src = "strake 1\n\ntest t\n  a = add f64 -1.5 1.0\n  b = add f64 -1.0 0.0\n  c = add f64 -10.25 -0.5\nend\n";
+        let m = parse(src, "t.strake").expect("parse signed floats");
+        let f = format(&m);
+        assert!(f.contains("-1.5"), "fmt: {f}");
+        assert!(f.contains("-1.0"), "fmt: {f}");
+        assert!(f.contains("-10.25"), "fmt: {f}");
+        assert!(f.contains("-0.5"), "fmt: {f}");
+        let m2 = parse(&f, "t.strake").expect("reparse signed floats");
+        let f2 = format(&m2);
+        assert_eq!(f, f2);
+    }
+
+    #[test]
+    fn format_non_finite_float_not_pseudo_decimal() {
+        let inf = format_float_literal(f64::INFINITY);
+        let ninf = format_float_literal(f64::NEG_INFINITY);
+        let nan = format_float_literal(f64::NAN);
+        assert!(!inf.to_ascii_lowercase().contains("inf"));
+        assert!(!ninf.to_ascii_lowercase().contains("inf"));
+        assert!(!nan.to_ascii_lowercase().contains("nan"));
+        assert!(!inf.ends_with(".0"));
+        assert!(!ninf.ends_with(".0"));
+        assert!(!nan.ends_with(".0"));
+    }
+
+    #[test]
+    fn e_parse_exponent_float_literal() {
+        let src = "strake 1\n\ntest t\n  x = add f64 1e2 1.0\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
     }
 }
