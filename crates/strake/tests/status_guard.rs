@@ -310,7 +310,6 @@ fn run() {
         let src = r#"#[rustfmt::skip]
 fn run() {
     fn status(x: i32) { diag::status(&[]); }
-    let _ = status(0);
 }
 "#;
         expect_status_violation(&scrub_source(src));
