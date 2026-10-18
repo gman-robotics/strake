@@ -38,24 +38,6 @@ fn scrub_source(source: &str) -> String {
     let mut i = 0usize;
     let bytes = source.as_bytes();
     while i < bytes.len() {
-        if bytes[i] == b'#' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            if let Some(end) = source[i..].find(']') {
-                let attr = &source[i..i + end + 1];
-                if attr.contains("rustfmt::skip") {
-                    if let Some(fn_start) = source[i + end + 1..].find("fn ") {
-                        let abs = i + end + 1 + fn_start;
-                        if let Some(body_start) = source[abs..].find('{') {
-                            let open = abs + body_start;
-                            if let Some(close) = matching_brace_end(source, open) {
-                                out.push(' ');
-                                i = close + 1;
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-        }
         if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
             while i < bytes.len() && bytes[i] != b'\n' {
                 out.push(' ');
@@ -176,8 +158,8 @@ fn assert_diag_rs_status_rules(scrubbed: &str, rel: &Path) {
             .map(|l| l.len() + 1)
             .sum::<usize>();
         let in_tests = byte_off >= tests_start;
-        let is_definition = line.trim_start().starts_with("fn status(")
-            || line.trim_start().starts_with("pub(crate) fn status(");
+        let is_definition = line.trim_start().starts_with("pub(crate) fn status(")
+            || line.trim_start().starts_with("fn status(");
         assert!(
             is_definition || in_tests,
             "{}:{}: status identifier only allowed on fn status or in diag tests: {}",
@@ -254,10 +236,6 @@ fn scrubbed_contains_status(body: &str) -> bool {
 }
 
 fn line_contains_status_identifier(line: &str) -> bool {
-    let t = line.trim();
-    if t.starts_with("fn status(") || t.starts_with("pub(crate) fn status(") {
-        return false;
-    }
     if line.contains("diag::status") || line.contains("body::diag::status") {
         return true;
     }
@@ -291,37 +269,51 @@ fn line_contains_status_identifier(line: &str) -> bool {
     false
 }
 
+fn expect_status_violation(scrubbed: &str) {
+    let rel = Path::new("synthetic.rs");
+    let result = std::panic::catch_unwind(|| assert_no_status_identifier(scrubbed, rel));
+    assert!(
+        result.is_err(),
+        "expected status guard to reject synthetic snippet"
+    );
+}
+
 #[cfg(test)]
-mod scrub_checks {
-    use super::{scrub_source, scrubbed_contains_status};
+mod violation_shapes {
+    use super::{expect_status_violation, scrub_source};
 
     #[test]
-    fn rustfmt_skip_body_hides_star_status_line() {
+    fn rustfmt_skip_run_with_diag_status_is_rejected() {
         let src = r#"#[rustfmt::skip]
 fn run() {
-    * status(1);
+    let _ = diag::status(&[]);
 }
 "#;
-        let scrubbed = scrub_source(src);
-        assert!(
-            !scrubbed_contains_status(&scrubbed),
-            "leading * status line inside skip must be stripped"
-        );
+        expect_status_violation(&scrub_source(src));
     }
 
     #[test]
-    fn rustfmt_skip_body_hides_one_line_fn_status() {
+    fn rustfmt_skip_nested_helper_with_status_is_rejected() {
         let src = r#"#[rustfmt::skip]
 fn run() {
-    fn status(x: i32) { let _ = x; }
+    fn helper() {
+        diag::status(&[]);
+    }
+    helper();
+}
+"#;
+        expect_status_violation(&scrub_source(src));
+    }
+
+    #[test]
+    fn rustfmt_skip_one_line_fn_status_wrapper_is_rejected() {
+        let src = r#"#[rustfmt::skip]
+fn run() {
+    fn status(x: i32) { diag::status(&[]); }
     let _ = status(0);
 }
 "#;
-        let scrubbed = scrub_source(src);
-        assert!(
-            !scrubbed_contains_status(&scrubbed),
-            "one-line fn status( inside skip must be stripped"
-        );
+        expect_status_violation(&scrub_source(src));
     }
 
     #[test]
@@ -330,9 +322,7 @@ fn run() {
 // trailing comment mentions status(1)
 "#;
         let scrubbed = scrub_source(src);
-        assert!(
-            !scrubbed_contains_status(&scrubbed),
-            "strings and comments must not count as status usage"
-        );
+        let rel = std::path::Path::new("synthetic.rs");
+        super::assert_no_status_identifier(&scrubbed, rel);
     }
 }

@@ -1,7 +1,8 @@
 mod body;
-mod usage;
 
-pub use usage::CHECK_USAGE;
+/// Usage line for `strake check` (includes `[--blob-root DIR]` for T8).
+pub const CHECK_USAGE: &str =
+    "usage: strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>";
 
 use std::fs;
 
@@ -30,6 +31,11 @@ fn usage(message: &str) -> Exit {
         stdout: String::new(),
         stderr: format!("{message}\n"),
     }
+}
+
+/// Message printed for `strake check` usage errors (must match [`CHECK_USAGE`]).
+pub fn check_usage_stderr() -> String {
+    format!("{CHECK_USAGE}\n")
 }
 
 fn read_source(path: &str) -> Result<String, Exit> {
@@ -149,5 +155,36 @@ mod tests {
     #[test]
     fn check_usage_includes_blob_root() {
         assert!(CHECK_USAGE.contains("[--blob-root DIR]"));
+        assert_eq!(check_usage_stderr(), format!("{CHECK_USAGE}\n"));
+    }
+
+    #[test]
+    fn check_eparse_exits_1_with_catalog_code() {
+        let tmp = std::env::temp_dir().join("strake_eparse_cli.strake");
+        std::fs::write(&tmp, "fn f() -> unit\n  ret unit\nend\n").expect("write");
+        let exit = check(tmp.to_str().unwrap(), Opts::default());
+        assert_eq!(exit.code, 1);
+        assert!(exit.stderr.contains("\"code\""));
+        assert!(exit.stderr.contains("E_PARSE"));
+    }
+
+    #[test]
+    fn check_duplicate_fuel_codeless_not_catalog() {
+        let src = "strake 1\nfuel 1\nfuel 2\nfn f() -> unit\n  ret unit\nend\n";
+        let tmp = std::env::temp_dir().join("strake_fuel_twice_cli.strake");
+        std::fs::write(&tmp, src).expect("write");
+        let exit = check(tmp.to_str().unwrap(), Opts::default());
+        assert_eq!(exit.code, 3);
+        assert!(!exit.stderr.contains("\"code\""));
+        assert!(!exit.stderr.contains("E_LOWER"));
+    }
+
+    #[test]
+    fn fmt_eparse_exits_1() {
+        let tmp = std::env::temp_dir().join("strake_fmt_eparse.strake");
+        std::fs::write(&tmp, "fn f() -> unit\n  ret unit\nend\n").expect("write");
+        let exit = fmt(tmp.to_str().unwrap());
+        assert_eq!(exit.code, 1);
+        assert!(exit.stderr.contains("E_PARSE"));
     }
 }

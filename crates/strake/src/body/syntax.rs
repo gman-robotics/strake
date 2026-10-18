@@ -19,7 +19,7 @@ pub enum Item {
     Import(ImportDecl),
     Use(UseDecl),
     Fuel(i128, Span),
-    Pages(i64, Span),
+    Pages(i128, Span),
     Fn(FnItem),
     Test(TestItem),
     Property(PropertyItem),
@@ -161,8 +161,8 @@ pub enum Stmt {
     },
     AssertEq {
         span: Span,
-        want: Operand,
         got: Operand,
+        want: Operand,
     },
 }
 
@@ -190,8 +190,17 @@ pub struct MatchArm {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ForallBound {
-    Range { span: Span, lo: i128, hi: i128 },
-    List { span: Span, ty: Type, name: String },
+    Range {
+        span: Span,
+        ty: Type,
+        lo: i128,
+        hi: i128,
+    },
+    List {
+        span: Span,
+        ty: Type,
+        name: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -738,7 +747,7 @@ impl<'a> Parser<'a> {
         if self.eat_ident("pages")? {
             let (n, st, en) = self.expect_int()?;
             return Ok(Item::Pages(
-                n as i64,
+                n,
                 Span {
                     file: self.file.to_string(),
                     start: st,
@@ -944,7 +953,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_test(&mut self, start: u32) -> Result<TestItem, Diag> {
-        let (name, _, _) = self.expect_ident()?;
+        let (name, nst, nen) = self.expect_ident()?;
+        Self::check_user_name(&name, (nst, nen), self.file)?;
         let body = self.parse_block(BodyCtx::Test)?;
         let end = self.lex.byte_pos();
         Ok(TestItem {
@@ -955,7 +965,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_property(&mut self, start: u32) -> Result<PropertyItem, Diag> {
-        let (name, _, _) = self.expect_ident()?;
+        let (name, nst, nen) = self.expect_ident()?;
+        Self::check_user_name(&name, (nst, nen), self.file)?;
         let body = self.parse_block(BodyCtx::Property)?;
         let end = self.lex.byte_pos();
         Ok(PropertyItem {
@@ -1026,13 +1037,13 @@ impl<'a> Parser<'a> {
             if ctx != BodyCtx::Test && ctx != BodyCtx::Property {
                 return Err(self.err_range(st, self.span_of().1));
             }
-            let want = self.parse_operand()?;
             let got = self.parse_operand()?;
+            let want = self.parse_operand()?;
             let end = self.lex.byte_pos();
             return Ok(Stmt::AssertEq {
                 span: span(self.file, st, end),
-                want,
                 got,
+                want,
             });
         }
         if self.eat_ident("ret")? {
@@ -1153,7 +1164,8 @@ impl<'a> Parser<'a> {
         if !self.eat_ident("in")? {
             return Err(self.err_here());
         }
-        let (list, _, _) = self.expect_ident()?;
+        let (list, lst, len) = self.expect_ident()?;
+        Self::check_user_name(&list, (lst, len), self.file)?;
         let body = self.parse_block(ctx)?;
         let end = self.lex.byte_pos();
         Ok(Stmt::For {
@@ -1165,7 +1177,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_match(&mut self, start: u32, ctx: BodyCtx) -> Result<Stmt, Diag> {
-        let (scrutinee, _, _) = self.expect_ident()?;
+        let (scrutinee, sst, sen) = self.expect_ident()?;
+        Self::check_user_name(&scrutinee, (sst, sen), self.file)?;
         let mut arms = Vec::new();
         while self.cur.is_some() && self.cur_ident() != Some("end") {
             let (tag, tst, ten) = self.expect_ident()?;
@@ -1183,7 +1196,7 @@ impl<'a> Parser<'a> {
             if !self.eat_tok(Tok::Arrow)? {
                 return Err(self.err_here());
             }
-            let body = self.parse_stmts_until(ctx, &["end", "Ok", "Err"])?;
+            let body = self.parse_stmts_until(ctx, &["end", "ok", "err"])?;
             arms.push(MatchArm {
                 span: span(self.file, tst, ten),
                 tag,
@@ -1220,11 +1233,13 @@ impl<'a> Parser<'a> {
             let (hi, _hst, hen) = self.expect_int()?;
             ForallBound::Range {
                 span: span(self.file, lst, hen),
+                ty,
                 lo,
                 hi,
             }
         } else {
             let (name, nst, nen) = self.expect_ident()?;
+            Self::check_user_name(&name, (nst, nen), self.file)?;
             ForallBound::List {
                 span: span(self.file, nst, nen),
                 ty,
@@ -1243,6 +1258,16 @@ impl<'a> Parser<'a> {
 
     fn parse_rhs(&mut self, assign_start: u32) -> Result<Rhs, Diag> {
         let (st, _) = self.span_of();
+        if matches!(
+            &self.cur,
+            Some((Tok::Int(_), _, _)) | Some((Tok::Float(_), _, _)) | Some((Tok::Bytes(_), _, _))
+        ) || self.cur_ident() == Some("unit")
+            || self.cur_ident() == Some("true")
+            || self.cur_ident() == Some("false")
+        {
+            let op = self.parse_operand()?;
+            return Ok(Rhs::Operand(op));
+        }
         if self.eat_ident("not")? {
             let operand = self.parse_operand()?;
             return Ok(Rhs::Not {
@@ -1386,6 +1411,13 @@ impl<'a> Parser<'a> {
         if Self::banned_op(&head) {
             return Err(self.err_range(hst, hen));
         }
+        if let Some((base, field)) = split_dotted_project(&head) {
+            return Ok(Rhs::Project {
+                span: span(self.file, hst, hen),
+                base,
+                field,
+            });
+        }
         if self.eat_tok(Tok::Dot)? {
             let (field, _fst, fen) = self.expect_ident()?;
             return Ok(Rhs::Project {
@@ -1419,7 +1451,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_call_rhs(&mut self, start: u32) -> Result<Rhs, Diag> {
-        let (callee, _cst, _cen) = self.expect_ident()?;
+        let (callee, cst, cen) = self.expect_ident()?;
+        Self::check_user_name(&callee, (cst, cen), self.file)?;
         if !self.eat_tok(Tok::LParen)? {
             return Err(self.err_here());
         }
@@ -1543,6 +1576,30 @@ fn type_is_region(ty: &Type) -> bool {
     matches!(ty, Type::Named(n, _) if n == "region")
 }
 
+fn is_dotted_builtin_ident(name: &str) -> bool {
+    matches!(
+        name,
+        "list.empty"
+            | "list.cons"
+            | "list.len"
+            | "list.get"
+            | "bytes.new"
+            | "bytes.len"
+            | "bytes.get"
+    )
+}
+
+fn split_dotted_project(ident: &str) -> Option<(String, String)> {
+    if !ident.contains('.') || is_dotted_builtin_ident(ident) {
+        return None;
+    }
+    let (base, field) = ident.rsplit_once('.')?;
+    if base.is_empty() || field.is_empty() {
+        return None;
+    }
+    Some((base.to_string(), field.to_string()))
+}
+
 fn is_type_name(name: &str) -> bool {
     matches!(
         name,
@@ -1568,6 +1625,16 @@ fn binop_from_ident(name: &str) -> Option<BinOp> {
 
 // --- Formatter -----------------------------------------------------------------
 
+fn blank_line_between_items(prev: &Item, cur: &Item) -> bool {
+    !matches!(
+        (prev, cur),
+        (Item::Fuel(_, _), Item::Fuel(_, _))
+            | (Item::Fuel(_, _), Item::Pages(_, _))
+            | (Item::Pages(_, _), Item::Fuel(_, _))
+            | (Item::Pages(_, _), Item::Pages(_, _))
+    )
+}
+
 struct Fmt {
     out: String,
     indent: usize,
@@ -1583,12 +1650,22 @@ impl Fmt {
 
     fn format_module(&mut self, module: &Module) -> String {
         self.writeln(&format!("strake {}", module.version));
-        self.blank();
-        for (i, item) in module.items.iter().enumerate() {
-            if i > 0 {
-                self.blank();
+        let header_blank = !matches!(
+            module.items.first(),
+            Some(Item::Fuel(_, _) | Item::Pages(_, _))
+        );
+        if header_blank && !module.items.is_empty() {
+            self.blank();
+        }
+        let mut prev: Option<&Item> = None;
+        for item in &module.items {
+            if let Some(p) = prev {
+                if blank_line_between_items(p, item) {
+                    self.blank();
+                }
             }
             self.format_item(item);
+            prev = Some(item);
         }
         if !self.out.ends_with('\n') {
             self.out.push('\n');
@@ -1838,8 +1915,14 @@ impl Fmt {
                 ..
             } => {
                 let header = match bound {
-                    ForallBound::Range { lo, hi, .. } => {
-                        format!("forall {}: i64 in {}..{}", binder, lo, hi)
+                    ForallBound::Range { ty, lo, hi, .. } => {
+                        format!(
+                            "forall {}: {} in {}..{}",
+                            binder,
+                            self.type_string(ty),
+                            lo,
+                            hi
+                        )
                     }
                     ForallBound::List { ty, name, .. } => {
                         format!("forall {}: {} in {}", binder, self.type_string(ty), name)
@@ -1854,11 +1937,11 @@ impl Fmt {
                 self.writeln("end");
             }
             Stmt::Trap { .. } => self.writeln("trap"),
-            Stmt::AssertEq { want, got, .. } => {
+            Stmt::AssertEq { got, want, .. } => {
                 self.writeln(&format!(
                     "assert.eq {} {}",
-                    self.format_operand(want),
-                    self.format_operand(got)
+                    self.format_operand(got),
+                    self.format_operand(want)
                 ));
             }
         }
@@ -2112,9 +2195,9 @@ fn ctrl() -> unit
     z = mul i64 v 2
   end
   match r
-    Ok val ->
+    ok val ->
       w = add i64 val 1
-    Err _ ->
+    err _ ->
       trap
   end
   ret unit
@@ -2140,5 +2223,160 @@ end
     fn missing_header_e_parse() {
         let err = parse("fn f() -> unit\n  ret unit\nend\n", "t.strake").unwrap_err();
         assert_eq!(err.code, Code::EParse);
+    }
+
+    #[test]
+    fn assert_eq_parses_got_then_want() {
+        let src = "strake 1\n\ntest t\n  assert.eq r 14\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let Item::Test(t) = &m.items[0] else {
+            panic!("test")
+        };
+        let Stmt::AssertEq { got, want, .. } = &t.body[0] else {
+            panic!("assert")
+        };
+        let Operand::Name(g, _) = got else {
+            panic!("got name")
+        };
+        let Operand::Int(w, _) = want else {
+            panic!("want int")
+        };
+        assert_eq!(g, "r");
+        assert_eq!(*w, 14);
+    }
+
+    #[test]
+    fn literal_zero_assign_parses() {
+        let src = "strake 1\n\nfn f() -> unit\n  skipped = 0\n  ret unit\nend\n";
+        parse(src, "t.strake").expect("zero assign");
+    }
+
+    #[test]
+    fn project_dotted_roundtrip() {
+        let src =
+            "strake 1\n\ntype pair { x: i64 }\n\nfn f(p: pair) -> i64\n  v = p.x\n  ret v\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let f1 = format(&m);
+        let m2 = parse(&f1, "t.strake").expect("reparse");
+        assert_eq!(format(&m2), f1);
+    }
+
+    #[test]
+    fn tab_indented_body_parses() {
+        let src = "strake 1\n\nfn f() -> i64\n\tx = add i64 1 2\n\tret x\nend\n";
+        parse(src, "t.strake").expect("tabs");
+    }
+
+    #[test]
+    fn i128_literal_above_i64_max() {
+        let src = "strake 1\n\nfn f() -> i64\n  x = add i64 9223372036854775808 0\n  ret x\nend\n";
+        let m = parse(src, "t.strake").expect("big int");
+        let Item::Fn(f) = &m.items[0] else {
+            panic!("fn")
+        };
+        let Stmt::Assign { rhs, .. } = &f.body[0] else {
+            panic!("assign")
+        };
+        let Rhs::BinOp { lhs, .. } = rhs else {
+            panic!("binop")
+        };
+        let Operand::Int(v, _) = lhs else {
+            panic!("int")
+        };
+        assert_eq!(*v, 9223372036854775808);
+    }
+
+    #[test]
+    fn pages_directive_large_u64() {
+        let src = "strake 1\npages 9223372036854775808\n\nfn f() -> unit\n  ret unit\nend\n";
+        let m = parse(src, "t.strake").expect("pages");
+        let Item::Pages(n, _) = &m.items[0] else {
+            panic!("pages")
+        };
+        assert_eq!(*n, 9223372036854775808);
+    }
+
+    #[test]
+    fn e_parse_percent_test_name() {
+        let err = parse("strake 1\n\ntest %t\n  ret unit\nend\n", "t.strake").unwrap_err();
+        assert_eq!(err.code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_property_name() {
+        let err = parse(
+            "strake 1\n\nproperty %p\n  forall n: i64 in 0..0\n  end\nend\n",
+            "t.strake",
+        )
+        .unwrap_err();
+        assert_eq!(err.code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_for_list() {
+        let src = "strake 1\n\nfn f() -> unit\n  for v in %xs\n    trap\n  end\n  ret unit\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_match_scrutinee() {
+        let src = "strake 1\n\nfn f() -> unit\n  match %r\n    ok _ ->\n      trap\n  end\n  ret unit\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_call_callee() {
+        let src = "strake 1\n\ntest t\n  x = call %g(1)\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_forall_list() {
+        let src = "strake 1\n\nproperty p\n  forall n: i64 in %xs\n    trap\n  end\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_closed_absence_or() {
+        let src = "strake 1\n\nfn f() -> bool\n  x = or bool a b\n  ret x\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_closed_absence_rem() {
+        let src = "strake 1\n\nfn f() -> i64\n  x = rem i64 a b\n  ret x\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_closed_absence_xor() {
+        let src = "strake 1\n\nfn f() -> i64\n  x = xor i64 a b\n  ret x\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_closed_absence_shl() {
+        let src = "strake 1\n\nfn f() -> i64\n  x = shl i64 a b\n  ret x\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_closed_absence_shr() {
+        let src = "strake 1\n\nfn f() -> i64\n  x = shr i64 a b\n  ret x\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_keyword_nested_call_operand() {
+        let src = "strake 1\n\nfn f() -> i64\n  x = add i64 call g(1) 2\n  ret x\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn forall_range_keeps_type_in_fmt() {
+        let src = "strake 1\n\nproperty p\n  forall n: i32 in 0..1\n    trap\n  end\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let f = format(&m);
+        assert!(f.contains("forall n: i32 in 0..1"));
     }
 }

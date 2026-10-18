@@ -477,12 +477,36 @@ mod tests {
     #[test]
     fn constructable_lists_every_variant() {
         let codes = Code::constructable();
-        assert_eq!(codes.len(), 17);
         let mut set = std::collections::HashSet::new();
         for code in codes {
             assert!(set.insert(code), "duplicate in constructable: {:?}", code);
             assert_eq!(Code::exhaustive_catalog_name(code), code.as_str());
         }
+        assert_constructable_covers_all_variants(&codes);
+    }
+
+    fn assert_constructable_covers_all_variants(list: &[Code]) {
+        fn must_include(c: Code, list: &[Code]) {
+            assert!(list.contains(&c), "constructable missing {}", c.as_str());
+            assert_eq!(Code::exhaustive_catalog_name(c), c.as_str());
+        }
+        must_include(Code::EParse, list);
+        must_include(Code::EType, list);
+        must_include(Code::EShadow, list);
+        must_include(Code::EForall, list);
+        must_include(Code::EMatch, list);
+        must_include(Code::EIfPhi, list);
+        must_include(Code::EHole, list);
+        must_include(Code::ERegion, list);
+        must_include(Code::EUse, list);
+        must_include(Code::EImport, list);
+        must_include(Code::EOob, list);
+        must_include(Code::EStack, list);
+        must_include(Code::EDiv0, list);
+        must_include(Code::EFuel, list);
+        must_include(Code::ELower, list);
+        must_include(Code::ETest, list);
+        must_include(Code::ERefused, list);
     }
 
     #[test]
