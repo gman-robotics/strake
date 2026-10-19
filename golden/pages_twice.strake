@@ -1,0 +1,7 @@
+strake 1
+pages 1
+pages 2
+
+fn answer() -> i64
+  ret 1
+end

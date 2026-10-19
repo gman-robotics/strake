@@ -44,9 +44,9 @@ pub enum Code {
 }
 
 impl Code {
-    /// Every constructable catalog code (keep in sync with [`Code`] variants).
+    /// Every constructable catalog code, derived from an exhaustive [`Code`] match.
     pub(crate) fn constructable() -> [Code; 17] {
-        [
+        let codes = [
             Code::EParse,
             Code::EType,
             Code::EShadow,
@@ -64,7 +64,34 @@ impl Code {
             Code::ELower,
             Code::ETest,
             Code::ERefused,
-        ]
+        ];
+        for code in codes {
+            let _ = Self::exhaustive_catalog_name(code);
+        }
+        codes
+    }
+
+    /// Compile-time anchor: every [`Code`] variant must appear in [`constructable`].
+    pub(crate) fn exhaustive_catalog_name(code: Code) -> &'static str {
+        match code {
+            Code::EParse => "E_PARSE",
+            Code::EType => "E_TYPE",
+            Code::EShadow => "E_SHADOW",
+            Code::EForall => "E_FORALL",
+            Code::EMatch => "E_MATCH",
+            Code::EIfPhi => "E_IF_PHI",
+            Code::EHole => "E_HOLE",
+            Code::ERegion => "E_REGION",
+            Code::EUse => "E_USE",
+            Code::EImport => "E_IMPORT",
+            Code::EOob => "E_OOB",
+            Code::EStack => "E_STACK",
+            Code::EDiv0 => "E_DIV0",
+            Code::EFuel => "E_FUEL",
+            Code::ELower => "E_LOWER",
+            Code::ETest => "E_TEST",
+            Code::ERefused => "E_REFUSED",
+        }
     }
 
     /// Map a catalog `code` string to a constructable [`Code`]. Reserved names return `None`.
@@ -448,6 +475,41 @@ mod tests {
     }
 
     #[test]
+    fn constructable_lists_every_variant() {
+        let codes = Code::constructable();
+        let mut set = std::collections::HashSet::new();
+        for code in codes {
+            assert!(set.insert(code), "duplicate in constructable: {:?}", code);
+            assert_eq!(Code::exhaustive_catalog_name(code), code.as_str());
+        }
+        assert_constructable_covers_all_variants(&codes);
+    }
+
+    fn assert_constructable_covers_all_variants(list: &[Code]) {
+        fn must_include(c: Code, list: &[Code]) {
+            assert!(list.contains(&c), "constructable missing {}", c.as_str());
+            assert_eq!(Code::exhaustive_catalog_name(c), c.as_str());
+        }
+        must_include(Code::EParse, list);
+        must_include(Code::EType, list);
+        must_include(Code::EShadow, list);
+        must_include(Code::EForall, list);
+        must_include(Code::EMatch, list);
+        must_include(Code::EIfPhi, list);
+        must_include(Code::EHole, list);
+        must_include(Code::ERegion, list);
+        must_include(Code::EUse, list);
+        must_include(Code::EImport, list);
+        must_include(Code::EOob, list);
+        must_include(Code::EStack, list);
+        must_include(Code::EDiv0, list);
+        must_include(Code::EFuel, list);
+        must_include(Code::ELower, list);
+        must_include(Code::ETest, list);
+        must_include(Code::ERefused, list);
+    }
+
+    #[test]
     fn catalog_msgs_match_include() {
         const CATALOG: &str = include_str!("../../../../errors/catalog.json");
         let entries = parse_catalog_codes(CATALOG);
@@ -467,7 +529,7 @@ mod tests {
         }
 
         for code in constructable {
-            let name = exhaustive_catalog_name(code);
+            let name = Code::exhaustive_catalog_name(code);
             assert_eq!(name, code.as_str());
             let entry = non_reserved
                 .iter()
@@ -486,29 +548,6 @@ mod tests {
             .expect("catalog must list E_CYCLE");
         assert!(cycle.reserved, "E_CYCLE must stay reserved in catalog");
         assert_eq!(Code::from_catalog_name("E_CYCLE"), None);
-    }
-
-    /// Exhaustive over [`Code`] — no wildcard; a new variant is a compile error here.
-    fn exhaustive_catalog_name(code: Code) -> &'static str {
-        match code {
-            Code::EParse => "E_PARSE",
-            Code::EType => "E_TYPE",
-            Code::EShadow => "E_SHADOW",
-            Code::EForall => "E_FORALL",
-            Code::EMatch => "E_MATCH",
-            Code::EIfPhi => "E_IF_PHI",
-            Code::EHole => "E_HOLE",
-            Code::ERegion => "E_REGION",
-            Code::EUse => "E_USE",
-            Code::EImport => "E_IMPORT",
-            Code::EOob => "E_OOB",
-            Code::EStack => "E_STACK",
-            Code::EDiv0 => "E_DIV0",
-            Code::EFuel => "E_FUEL",
-            Code::ELower => "E_LOWER",
-            Code::ETest => "E_TEST",
-            Code::ERefused => "E_REFUSED",
-        }
     }
 
     struct CatalogCodeEntry {

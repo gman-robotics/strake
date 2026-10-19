@@ -9,10 +9,11 @@ fn status_usage_guard() {
         let rel = path.strip_prefix(&src_root).unwrap();
         let content = fs::read_to_string(&path).expect("read source");
         assert_no_forbidden_diag_imports(&content, rel);
+        let scrubbed = scrub_source(&content);
         match rel.to_str() {
-            Some("body/diag.rs") => assert_diag_rs_status_rules(&content, rel),
-            Some("lib.rs") => assert_lib_rs_status_rules(&content, rel),
-            _ => assert_no_status_identifier(&content, rel),
+            Some("body/diag.rs") => assert_diag_rs_status_rules(&scrubbed, rel),
+            Some("lib.rs") => assert_lib_rs_status_rules(&content, &scrubbed, rel),
+            _ => assert_no_status_identifier(&scrubbed, rel),
         }
     }
 }
@@ -32,13 +33,85 @@ fn list_rs_files(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+fn scrub_source(source: &str) -> String {
+    let mut out = String::new();
+    let mut i = 0usize;
+    let bytes = source.as_bytes();
+    while i < bytes.len() {
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                out.push(' ');
+                i += 1;
+            }
+            if i + 1 < bytes.len() {
+                out.push(' ');
+                out.push(' ');
+                i += 2;
+            }
+            continue;
+        }
+        if bytes[i] == b'"' {
+            out.push(' ');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'"' {
+                    out.push(' ');
+                    i += 1;
+                    break;
+                }
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+        if bytes[i] == b'\'' {
+            out.push(' ');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    out.push(' ');
+                    out.push(' ');
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'\'' {
+                    out.push(' ');
+                    i += 1;
+                    break;
+                }
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+        let ch = source[i..].chars().next().expect("char");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 fn assert_no_forbidden_diag_imports(content: &str, rel: &Path) {
     for (line_no, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if !trimmed.starts_with("use ") {
             continue;
         }
-        if !trimmed.contains("body::diag") && !trimmed.contains("body::diag::") {
+        if !trimmed.contains("body::diag") {
             continue;
         }
         assert!(
@@ -58,16 +131,8 @@ fn assert_no_forbidden_diag_imports(content: &str, rel: &Path) {
     }
 }
 
-fn is_comment_line(line: &str) -> bool {
-    let t = line.trim_start();
-    t.starts_with("//") || t.starts_with("///") || t.starts_with('*')
-}
-
-fn assert_no_status_identifier(content: &str, rel: &Path) {
-    for (line_no, line) in content.lines().enumerate() {
-        if is_comment_line(line) {
-            continue;
-        }
+fn assert_no_status_identifier(scrubbed: &str, rel: &Path) {
+    for (line_no, line) in scrubbed.lines().enumerate() {
         if line_contains_status_identifier(line) {
             panic!(
                 "{}:{}: unexpected status identifier: {}",
@@ -79,24 +144,22 @@ fn assert_no_status_identifier(content: &str, rel: &Path) {
     }
 }
 
-fn assert_diag_rs_status_rules(content: &str, rel: &Path) {
-    let tests_start = content
+fn assert_diag_rs_status_rules(scrubbed: &str, rel: &Path) {
+    let tests_start = scrubbed
         .find("#[cfg(test)]")
         .expect("diag.rs must have unit tests");
-    for (line_no, line) in content.lines().enumerate() {
-        if is_comment_line(line) {
-            continue;
-        }
+    for (line_no, line) in scrubbed.lines().enumerate() {
         if !line_contains_status_identifier(line) {
             continue;
         }
-        let byte_off = content
+        let byte_off = scrubbed
             .lines()
             .take(line_no)
             .map(|l| l.len() + 1)
             .sum::<usize>();
         let in_tests = byte_off >= tests_start;
-        let is_definition = line.contains("fn status(");
+        let is_definition = line.trim_start().starts_with("pub(crate) fn status(")
+            || line.trim_start().starts_with("fn status(");
         assert!(
             is_definition || in_tests,
             "{}:{}: status identifier only allowed on fn status or in diag tests: {}",
@@ -107,25 +170,22 @@ fn assert_diag_rs_status_rules(content: &str, rel: &Path) {
     }
 }
 
-fn assert_lib_rs_status_rules(content: &str, rel: &Path) {
-    let run_body = function_body(content, "pub fn run").expect("lib.rs must have pub fn run");
-    let run_text = &content[run_body.range.clone()];
+fn assert_lib_rs_status_rules(raw: &str, scrubbed: &str, rel: &Path) {
+    let run_body = function_body(raw, "pub fn run").expect("lib.rs must have pub fn run");
+    let run_scrub = &scrubbed[run_body.range.clone()];
     assert!(
-        !body_contains_status_identifier(run_text),
+        !scrubbed_contains_status(run_scrub),
         "{}: pub fn run must not reference status",
         rel.display()
     );
 
-    let test_body = function_body(content, "pub fn test").expect("lib.rs must have pub fn test");
+    let test_body = function_body(raw, "pub fn test").expect("lib.rs must have pub fn test");
 
-    for (line_no, line) in content.lines().enumerate() {
-        if is_comment_line(line) {
-            continue;
-        }
+    for (line_no, line) in scrubbed.lines().enumerate() {
         if !line_contains_status_identifier(line) {
             continue;
         }
-        let byte_off = content
+        let byte_off = scrubbed
             .lines()
             .take(line_no)
             .map(|l| l.len() + 1)
@@ -171,23 +231,17 @@ fn matching_brace_end(source: &str, open: usize) -> Option<usize> {
     None
 }
 
-fn body_contains_status_identifier(body: &str) -> bool {
-    body.lines()
-        .filter(|l| !is_comment_line(l))
-        .any(line_contains_status_identifier)
+fn scrubbed_contains_status(body: &str) -> bool {
+    body.lines().any(line_contains_status_identifier)
 }
 
 fn line_contains_status_identifier(line: &str) -> bool {
-    if line.contains("fn status(") {
-        return false;
-    }
     if line.contains("diag::status") || line.contains("body::diag::status") {
         return true;
     }
     if line.contains("::status") && line.contains("diag") {
         return true;
     }
-    // call or binding to status: `status(`, `status;`, `status,`, `= status`
     let mut search = line;
     while let Some(pos) = search.find("status") {
         let before = if pos > 0 {
@@ -201,7 +255,6 @@ fn line_contains_status_identifier(line: &str) -> bool {
             b';'
         };
         let ident_before = before.is_ascii_alphanumeric() || before == b'_';
-        let ident_after = after.is_ascii_alphanumeric() || after == b'_';
         if !ident_before
             && (after == b'('
                 || after == b';'
@@ -211,10 +264,64 @@ fn line_contains_status_identifier(line: &str) -> bool {
         {
             return true;
         }
-        if !ident_before && !ident_after && after == b':' {
-            // status: in use line already caught
-        }
         search = &search[pos + 6..];
     }
     false
+}
+
+fn expect_status_violation(scrubbed: &str) {
+    let rel = Path::new("synthetic.rs");
+    let result = std::panic::catch_unwind(|| assert_no_status_identifier(scrubbed, rel));
+    assert!(
+        result.is_err(),
+        "expected status guard to reject synthetic snippet"
+    );
+}
+
+#[cfg(test)]
+mod violation_shapes {
+    use super::{expect_status_violation, scrub_source};
+
+    #[test]
+    fn rustfmt_skip_run_with_diag_status_is_rejected() {
+        let src = r#"#[rustfmt::skip]
+fn run() {
+    let _ = diag::status(&[]);
+}
+"#;
+        expect_status_violation(&scrub_source(src));
+    }
+
+    #[test]
+    fn rustfmt_skip_nested_helper_with_status_is_rejected() {
+        let src = r#"#[rustfmt::skip]
+fn run() {
+    fn helper() {
+        diag::status(&[]);
+    }
+    helper();
+}
+"#;
+        expect_status_violation(&scrub_source(src));
+    }
+
+    #[test]
+    fn rustfmt_skip_one_line_fn_status_wrapper_is_rejected() {
+        let src = r#"#[rustfmt::skip]
+fn run() {
+    fn status(x: i32) { diag::status(&[]); }
+}
+"#;
+        expect_status_violation(&scrub_source(src));
+    }
+
+    #[test]
+    fn string_literal_status_is_not_a_false_positive() {
+        let src = r#"let _ = "diag::status trap";
+// trailing comment mentions status(1)
+"#;
+        let scrubbed = scrub_source(src);
+        let rel = std::path::Path::new("synthetic.rs");
+        super::assert_no_status_identifier(&scrubbed, rel);
+    }
 }
