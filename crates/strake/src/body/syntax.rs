@@ -687,8 +687,9 @@ impl<'a> Parser<'a> {
         if hex.is_empty() {
             return Err(self.err_here());
         }
-        self.bump()?;
-        Ok((hex, st, self.lex.byte_pos()))
+        let en = self.lex.byte_pos();
+        self.cur = self.lex.next()?;
+        Ok((hex, st, en))
     }
 
     fn peek_token_at(&self, byte_off: u32) -> Result<Option<(Tok, u32, u32)>, Diag> {
@@ -786,6 +787,9 @@ impl<'a> Parser<'a> {
         let Some((Tok::Ident(head), _, en)) = self.cur.clone() else {
             return false;
         };
+        if split_dotted_project(&head).is_some() {
+            return true;
+        }
         if binop_from_ident(&head).is_some() {
             return matches!(
                 self.peek_token_at(en),
@@ -794,7 +798,10 @@ impl<'a> Parser<'a> {
         }
         matches!(
             head.as_str(),
-            "call"
+            "ok"
+                | "err"
+                | "hole"
+                | "call"
                 | "list.empty"
                 | "list.cons"
                 | "list.len"
@@ -881,8 +888,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type_def(&mut self, start: u32) -> Result<TypeDef, Diag> {
-        let (name, _, _) = self.expect_ident()?;
-        Self::check_user_name(&name, self.span_of(), self.file)?;
+        let (name, nst, nen) = self.expect_ident()?;
+        Self::check_user_name(&name, (nst, nen), self.file)?;
         if !self.eat_tok(Tok::LBrace)? {
             return Err(self.err_here());
         }
@@ -1017,10 +1024,9 @@ impl<'a> Parser<'a> {
             }
             _ => return Err(self.err_here()),
         }
-        let (hash, _, _) = self.expect_blake3_hash()?;
-        let end = self.lex.byte_pos();
+        let (hash, _, hen) = self.expect_blake3_hash()?;
         Ok(UseDecl {
-            span: span(self.file, start, end),
+            span: span(self.file, start, hen),
             name,
             hash,
         })
@@ -1317,10 +1323,9 @@ impl<'a> Parser<'a> {
         let mut arms = Vec::new();
         while self.cur.is_some() && self.cur_ident() != Some("end") {
             let (tag, tst, ten) = self.expect_ident()?;
+            Self::check_user_name(&tag, (tst, ten), self.file)?;
             Self::check_match_arm_tag(&tag, (tst, ten), self.file)?;
-            let binder = if self.cur_ident() == Some("->") {
-                None
-            } else if matches!(&self.cur, Some((Tok::Ident(_), _, _))) {
+            let binder = if matches!(&self.cur, Some((Tok::Ident(_), _, _))) {
                 let (b, bst, ben) = self.expect_ident()?;
                 if b != "_" {
                     Self::check_user_name(&b, (bst, ben), self.file)?;
@@ -1561,6 +1566,7 @@ impl<'a> Parser<'a> {
             });
         }
         if self.eat_tok(Tok::Dot)? {
+            Self::check_user_name(&head, (hst, hen), self.file)?;
             let (field, fst, fen) = self.expect_ident()?;
             Self::check_user_name(&field, (fst, fen), self.file)?;
             return Ok(Rhs::Project {
@@ -1689,6 +1695,7 @@ impl<'a> Parser<'a> {
 
     fn parse_type(&mut self) -> Result<Type, Diag> {
         let (name, st, en) = self.expect_ident()?;
+        Self::check_user_name(&name, (st, en), self.file)?;
         if name == "list" {
             // list T
             let inner = self.parse_type()?;
@@ -2714,5 +2721,73 @@ end
     fn e_parse_exponent_float_literal() {
         let src = "strake 1\n\ntest t\n  x = add f64 1e2 1.0\nend\n";
         assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn loop_body_project_not_header() {
+        let src = "strake 1\n\nfn f() -> i64\n  loop\n    v = p.x\n    break\n  end\n  ret 0\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let f = format(&m);
+        assert!(
+            !f.contains("loop v = p.x"),
+            "projection must stay in body: {f}"
+        );
+        assert!(f.contains("v = p.x"), "fmt: {f}");
+    }
+
+    #[test]
+    fn continue_body_project_not_edge() {
+        let src = "strake 1\n\nfn f() -> i64\n  loop i = 0\n    continue\n    v = p.x\n  end\n  ret 0\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let f = format(&m);
+        assert!(
+            !f.contains("continue v = p.x"),
+            "projection must stay in body: {f}"
+        );
+        assert!(f.contains("v = p.x"), "fmt: {f}");
+    }
+
+    #[test]
+    fn loop_body_ok_err_hole() {
+        let src = "strake 1\n\nfn f() -> unit\n  loop\n    r = ok i64 1\n    s = err i64 2\n    t = hole i64\n  end\n  ret unit\nend\n";
+        parse(src, "t.strake").expect("ok/err/hole in loop body");
+    }
+
+    #[test]
+    fn e_parse_percent_type_position() {
+        let src = "strake 1\n\nfn f(a: %t) -> i64\n  ret a\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_spaced_projection_base() {
+        let src = "strake 1\n\nfn f() -> i64\n  v = %p . x\n  ret v\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_match_arm_tag() {
+        let src = "strake 1\n\nfn f() -> unit\n  match r\n    %b v ->\n      trap\n  end\n  ret unit\nend\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_type_name_span() {
+        let src = "strake 1\n\ntype %pair { a: i64 }\n\nfn f() -> unit\n  ret unit\nend\n";
+        let err = parse(src, "t.strake").unwrap_err();
+        assert_eq!(err.code, Code::EParse);
+        assert_eq!(err.span.start, 15);
+        assert_eq!(err.span.end, 20);
+    }
+
+    #[test]
+    fn use_decl_span_ends_at_hash() {
+        let src = "strake 1\n\nuse pkg@blake3:abcd\n\nfn f() -> unit\n  ret unit\nend\n";
+        let m = parse(src, "t.strake").expect("parse use");
+        let Item::Use(u) = &m.items[0] else {
+            panic!("use item")
+        };
+        let slice = &src[u.span.start as usize..u.span.end as usize];
+        assert_eq!(slice, "use pkg@blake3:abcd");
     }
 }
