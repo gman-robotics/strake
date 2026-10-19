@@ -790,17 +790,24 @@ impl<'a> Parser<'a> {
         if split_dotted_project(&head).is_some() {
             return true;
         }
+        if matches!(self.peek_token_at(en), Ok(Some((Tok::Dot, _, _)))) {
+            return true;
+        }
         if binop_from_ident(&head).is_some() {
             return matches!(
                 self.peek_token_at(en),
                 Ok(Some((Tok::Ident(ty), _, _))) if is_type_name(&ty)
             );
         }
+        if matches!(head.as_str(), "ok" | "err" | "hole") {
+            return matches!(
+                self.peek_token_at(en),
+                Ok(Some((Tok::Ident(ty), _, _))) if ident_starts_type(&ty)
+            );
+        }
         matches!(
             head.as_str(),
-            "ok" | "err"
-                | "hole"
-                | "call"
+            "call"
                 | "list.empty"
                 | "list.cons"
                 | "list.len"
@@ -1753,6 +1760,44 @@ fn is_type_name(name: &str) -> bool {
     matches!(
         name,
         "i32" | "i64" | "f32" | "f64" | "bool" | "unit" | "bytes" | "region"
+    )
+}
+
+fn ident_starts_type(name: &str) -> bool {
+    if is_type_name(name) || name == "list" || name == "result" {
+        return true;
+    }
+    !matches!(
+        name,
+        "break"
+            | "continue"
+            | "end"
+            | "if"
+            | "for"
+            | "match"
+            | "ret"
+            | "trap"
+            | "forall"
+            | "loop"
+            | "else"
+            | "strake"
+            | "type"
+            | "import"
+            | "use"
+            | "fuel"
+            | "pages"
+            | "test"
+            | "property"
+            | "fn"
+            | "call"
+            | "not"
+            | "ok"
+            | "err"
+            | "hole"
+            | "true"
+            | "false"
+            | "unit"
+            | "in"
     )
 }
 
@@ -2751,6 +2796,64 @@ end
     fn loop_body_ok_err_hole() {
         let src = "strake 1\n\nfn f() -> unit\n  loop\n    r = ok i64 1\n    s = err i64 2\n    t = hole i64\n  end\n  ret unit\nend\n";
         parse(src, "t.strake").expect("ok/err/hole in loop body");
+    }
+
+    #[test]
+    fn loop_header_hole_then_break_fmt_roundtrip() {
+        let src =
+            "strake 1\n\nfn f() -> unit\n  loop x = hole\n    break\n  end\n  ret unit\nend\n";
+        let m = parse(src, "t.strake").expect("loop header hole then break");
+        let f = format(&m);
+        assert!(
+            !f.contains("hole break"),
+            "break must not fuse into hole rhs: {f}"
+        );
+        assert!(f.contains("break"), "fmt: {f}");
+        let m2 = parse(&f, "t.strake").expect("reparse");
+        assert_eq!(format(&m2), f);
+    }
+
+    #[test]
+    fn loop_header_ok_err_stmt_rhs() {
+        let ok_src =
+            "strake 1\n\nfn f() -> unit\n  loop x = ok i64 1\n    break\n  end\n  ret unit\nend\n";
+        parse(ok_src, "t.strake").expect("loop header ok stmt rhs");
+        let err_src =
+            "strake 1\n\nfn f() -> unit\n  loop x = err i64 2\n    break\n  end\n  ret unit\nend\n";
+        parse(err_src, "t.strake").expect("loop header err stmt rhs");
+    }
+
+    #[test]
+    fn continue_header_ok_stmt_rhs() {
+        let src = "strake 1\n\nfn f() -> unit\n  loop i = 0\n    continue i = ok i64 1\n    break\n  end\n  ret unit\nend\n";
+        let m = parse(src, "t.strake").expect("continue header ok stmt rhs");
+        let f = format(&m);
+        let m2 = parse(&f, "t.strake").expect("reparse continue ok");
+        assert_eq!(format(&m2), f);
+    }
+
+    #[test]
+    fn loop_spaced_projection_after_paramless_loop() {
+        let src =
+            "strake 1\n\nfn f() -> i64\n  loop\n    v = p . x\n    break\n  end\n  ret 0\nend\n";
+        let m = parse(src, "t.strake").expect("spaced projection after loop");
+        let f = format(&m);
+        assert!(f.contains("v = p.x") || f.contains("v = p . x"), "fmt: {f}");
+        let m2 = parse(&f, "t.strake").expect("reparse spaced projection");
+        assert_eq!(format(&m2), f);
+    }
+
+    #[test]
+    fn continue_spaced_projection_after_bare_continue() {
+        let src = "strake 1\n\nfn f() -> i64\n  loop i = 0\n    continue\n    v = p . x\n  end\n  ret 0\nend\n";
+        let m = parse(src, "t.strake").expect("spaced projection after continue");
+        let f = format(&m);
+        assert!(
+            !f.contains("continue v = p"),
+            "projection must stay in body: {f}"
+        );
+        let m2 = parse(&f, "t.strake").expect("reparse");
+        assert_eq!(format(&m2), f);
     }
 
     #[test]
