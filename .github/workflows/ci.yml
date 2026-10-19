@@ -34,3 +34,24 @@ jobs:
 
       - name: cargo test
         run: cargo test --locked
+
+  verify:
+    name: verify-strake skill
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.83.0 --profile minimal
+          rustup default 1.83.0
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+
+      - name: verify-strake end-to-end
+        run: .cursor/skills/verify-strake/scripts/verify.sh
