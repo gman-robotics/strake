@@ -798,8 +798,7 @@ impl<'a> Parser<'a> {
         }
         matches!(
             head.as_str(),
-            "ok"
-                | "err"
+            "ok" | "err"
                 | "hole"
                 | "call"
                 | "list.empty"
@@ -2725,7 +2724,8 @@ end
 
     #[test]
     fn loop_body_project_not_header() {
-        let src = "strake 1\n\nfn f() -> i64\n  loop\n    v = p.x\n    break\n  end\n  ret 0\nend\n";
+        let src =
+            "strake 1\n\nfn f() -> i64\n  loop\n    v = p.x\n    break\n  end\n  ret 0\nend\n";
         let m = parse(src, "t.strake").expect("parse");
         let f = format(&m);
         assert!(
