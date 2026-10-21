@@ -1,0 +1,12 @@
+strake 1
+
+fn add2(a: i64, b: i64) -> i64
+  x = add i64 a b
+  y = mul i64 x 2
+  ret y
+end
+
+test add2.basic
+  r = call add2(3, 4)
+  assert.eq r 14
+end
