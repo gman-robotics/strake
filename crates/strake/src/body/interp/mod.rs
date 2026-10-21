@@ -33,6 +33,8 @@ struct Frame {
     fn_idx: usize,
     block: usize,
     ip: usize,
+    /// Predecessor block for the most recent edge into `block`.
+    edge_pred: usize,
     regs: Vec<Option<Value>>,
     /// When set, `Ret` writes into this vreg in the caller frame instead of halting.
     pending_call_dst: Option<VReg>,
@@ -65,7 +67,7 @@ impl<'a> Machine<'a> {
 
     pub(crate) fn run_root_function(&mut self, fn_idx: usize) -> Result<i64, ExecFault> {
         self.root_return = None;
-        self.enter_function(fn_idx, &[], None)?;
+        self.enter_function(fn_idx, &[], None, true)?;
         self.run_loop()?;
         self.root_return
             .ok_or_else(|| ExecFault::Codeless("function returned no value".into()))
@@ -76,11 +78,14 @@ impl<'a> Machine<'a> {
         fn_idx: usize,
         args: &[Value],
         call_dst: Option<VReg>,
+        charge_entry: bool,
     ) -> Result<(), ExecFault> {
         if self.frames.len() >= 1024 {
             return Err(ExecFault::Trap(Code::EStack));
         }
-        self.charge(1)?;
+        if charge_entry {
+            self.charge(1)?;
+        }
         let func = &self.program.functions[fn_idx];
         let mut regs = vec![None; func.param_count.max(1)];
         for (i, arg) in args.iter().enumerate() {
@@ -93,6 +98,7 @@ impl<'a> Machine<'a> {
             fn_idx,
             block: 0,
             ip: 0,
+            edge_pred: 0,
             regs,
             pending_call_dst: call_dst,
         });
@@ -120,7 +126,9 @@ impl<'a> Machine<'a> {
 
     /// Returns `true` when the root function has finished.
     fn exec_inst(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
-        self.charge(1)?;
+        if inst.op != Op::Call {
+            self.charge(1)?;
+        }
         match inst.op {
             Op::ConstI64 => {
                 let v = match inst.imm {
@@ -142,6 +150,10 @@ impl<'a> Machine<'a> {
                 self.write_reg(inst.dst, Value::Bool(a == b))?;
             }
             Op::Call => {
+                if self.frames.len() >= 1024 {
+                    return Err(ExecFault::Trap(Code::EStack));
+                }
+                self.charge(1)?;
                 let callee = match inst.imm {
                     Imm::Fn(i) => i,
                     _ => return Err(ExecFault::Codeless("bad call".into())),
@@ -152,7 +164,7 @@ impl<'a> Machine<'a> {
                     .map(|r| self.read_reg(*r))
                     .collect::<Result<Vec<_>, _>>()?;
                 let dst = inst.dst;
-                self.enter_function(callee, &args, dst)?;
+                self.enter_function(callee, &args, dst, false)?;
             }
             Op::Ret => {
                 let v = self.read_reg(inst.args[0])?;
@@ -185,7 +197,7 @@ impl<'a> Machine<'a> {
             }
             Op::Phi => {
                 let preds = blocks_imm(&inst.imm)?;
-                let pred = self.frames.last().unwrap().block;
+                let pred = self.frames.last().unwrap().edge_pred;
                 let idx = preds.iter().position(|&p| p == pred).ok_or_else(|| {
                     ExecFault::Codeless(format!("phi missing arm for block {pred}"))
                 })?;
@@ -220,6 +232,8 @@ impl<'a> Machine<'a> {
 
     fn jump(&mut self, block: usize, ip: usize) -> Result<(), ExecFault> {
         let frame = self.frames.last_mut().unwrap();
+        let from = frame.block;
+        frame.edge_pred = from;
         frame.block = block;
         frame.ip = ip;
         Ok(())
@@ -324,7 +338,7 @@ pub(crate) fn call_function_i64(
     let vargs: Vec<Value> = args.iter().map(|&n| Value::I64(n)).collect();
     let mut m = Machine::new(program, 100_000, host);
     m.root_return = None;
-    m.enter_function(fn_idx, &vargs, None)?;
+    m.enter_function(fn_idx, &vargs, None, true)?;
     m.run_loop()?;
     m.root_return
         .ok_or_else(|| ExecFault::Codeless("function returned no value".into()))

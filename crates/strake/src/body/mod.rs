@@ -6,7 +6,8 @@ pub mod lower;
 pub mod syntax;
 
 use diag::Diag;
-use interp::ir::{FinishError, Program};
+use interp::Program;
+use lower::LowerError;
 use syntax::Module;
 
 pub(crate) const LOWER_ABORT_EXIT: i32 = 70;
@@ -14,56 +15,44 @@ pub(crate) const LOWER_ABORT_EXIT: i32 = 70;
 #[derive(Debug)]
 pub(crate) enum CompileError {
     Check(Vec<Diag>),
-    Lower(FinishError),
+    Lower(LowerError),
 }
 
 /// CST → check → lower (exec is separate).
 pub(crate) fn compile_module(module: &Module, _draft: bool) -> Result<Program, CompileError> {
-    check::touch_catalog_for_clippy();
     let sketch = check::check(module).map_err(CompileError::Check)?;
     let program = lower::lower(&sketch).map_err(CompileError::Lower)?;
     Ok(program)
 }
 
-pub(crate) fn lower_abort_message(err: &FinishError) -> String {
-    format!("{}\n", err.message())
+pub(crate) fn lower_abort_message(err: &LowerError) -> String {
+    err.message()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use diag::Span;
-    use interp::Builder;
+    use crate::{test as strake_test, Opts};
 
     #[test]
-    fn finish_rejection_maps_to_exit_70_plain_text() {
-        let mut b = Builder::new();
-        b.begin_function("bad", 0);
-        let entry = 0;
-        b.br(entry, span(), 42);
-        let err = b.finish().unwrap_err();
-        let msg = lower_abort_message(&err);
-        assert!(!msg.contains("\"code\""));
-        assert!(msg.contains("finish"));
-        assert_eq!(LOWER_ABORT_EXIT, 70);
+    fn unsupported_sub_lowering_returns_exit_70() {
+        let src =
+            "strake 1\n\nfn f() -> i64\n  x = sub i64 8 3\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
+        let tmp = std::env::temp_dir().join("strake_sub_lower.strake");
+        std::fs::write(&tmp, src).expect("write");
+        let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
+        assert_eq!(exit.code, LOWER_ABORT_EXIT);
+        assert!(!exit.stderr.contains("\"code\""));
+        assert!(exit.stderr.contains("lower:"));
     }
 
     #[test]
-    fn compile_lower_abort_does_not_touch_status() {
-        let mut b = Builder::new();
-        b.begin_function("bad", 0);
-        b.br(0, span(), 9);
-        let err = b.finish().unwrap_err();
-        let _msg = lower_abort_message(&err);
-        // `status` is only legal inside `lib::test`; this path must stop at 70.
-        assert_eq!(LOWER_ABORT_EXIT, 70);
-    }
-
-    fn span() -> Span {
-        Span {
-            file: "t.strake".into(),
-            start: 0,
-            end: 1,
-        }
+    fn unsupported_fn_call_lowering_returns_exit_70() {
+        let src = "strake 1\n\nfn add2(a: i64, b: i64) -> i64\n  x = add i64 a b\n  y = mul i64 x 2\n  ret y\nend\n\nfn twice(a: i64) -> i64\n  r = call add2(a, a)\n  ret r\nend\n\ntest t\n  ret 0\nend\n";
+        let tmp = std::env::temp_dir().join("strake_twice_lower.strake");
+        std::fs::write(&tmp, src).expect("write");
+        let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
+        assert_eq!(exit.code, LOWER_ABORT_EXIT);
+        assert!(!exit.stderr.contains("\"code\""));
     }
 }

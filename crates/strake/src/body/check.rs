@@ -1,24 +1,6 @@
 //! Type and binding checks; produces a checked sketch for lowering.
 
 use super::diag::{Code, Diag, Kind, Span};
-
-/// Keeps catalog variants reachable for later tickets without emitting them yet.
-pub(crate) fn touch_catalog_for_clippy() {
-    let _ = Code::constructable();
-    let _ = Code::from_catalog_name("E_PARSE");
-    let _ = (
-        Kind::Trap,
-        Kind::Result,
-        Code::EForall,
-        Code::EMatch,
-        Code::EIfPhi,
-        Code::EHole,
-        Code::ERegion,
-        Code::EUse,
-        Code::ETest,
-        Code::ERefused,
-    );
-}
 use super::syntax::{FnItem, Item, Module, Operand, Rhs, Stmt, TestItem, Type};
 
 /// Checked module ready for lowering.
@@ -57,11 +39,8 @@ fn check_fn(f: &FnItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
         .iter()
         .map(|p| (p.name.clone(), p.ty.clone()))
         .collect();
-    if !types_equal(&f.ret, &scalar("i64", f.span.clone())) && !is_unit(&f.ret) {
-        // allow i64 return for add2; other returns still checked at ret sites
-    }
     for stmt in &f.body {
-        check_stmt(stmt, &mut env, fns, f.span.clone(), false, diags);
+        check_stmt(stmt, &mut env, fns, true, diags);
     }
     check_ret_type(f, &env, fns, diags);
 }
@@ -69,14 +48,14 @@ fn check_fn(f: &FnItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
 fn check_test(t: &TestItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
     let mut env: Vec<(String, Type)> = Vec::new();
     for stmt in &t.body {
-        check_stmt(stmt, &mut env, fns, t.span.clone(), true, diags);
+        check_stmt(stmt, &mut env, fns, false, diags);
     }
 }
 
 fn check_ret_type(f: &FnItem, env: &[(String, Type)], fns: &[&FnItem], diags: &mut Vec<Diag>) {
     for stmt in &f.body {
         if let Stmt::Ret { value, span } = stmt {
-            let got = operand_ty(value, env, fns, diags);
+            let got = operand_ty(value, env, fns, None, diags);
             if !types_compatible(&got, &f.ret) {
                 diags.push(type_diag(span.clone()));
             }
@@ -88,8 +67,7 @@ fn check_stmt(
     stmt: &Stmt,
     env: &mut Vec<(String, Type)>,
     fns: &[&FnItem],
-    _scope: Span,
-    in_test: bool,
+    in_fn: bool,
     diags: &mut Vec<Diag>,
 ) {
     match stmt {
@@ -100,27 +78,23 @@ fn check_stmt(
             }
             env.push((name.clone(), ty));
         }
-        Stmt::Ret { value, span } => {
-            let _ = operand_ty(value, env, fns, diags);
-            if !in_test {
-                let got = operand_ty(value, env, fns, diags);
-                if !is_i64(&got) && !is_unit(&got) {
-                    diags.push(type_diag(span.clone()));
-                }
+        Stmt::Ret { value, .. } => {
+            if !in_fn {
+                operand_ty(value, env, fns, None, diags);
             }
         }
         Stmt::AssertEq { span, got, want } => {
-            if !in_test {
+            if in_fn {
                 diags.push(parse_diag(span.clone()));
                 return;
             }
-            let g = operand_ty(got, env, fns, diags);
-            let w = operand_ty(want, env, fns, diags);
+            let g = operand_ty(got, env, fns, None, diags);
+            let w = operand_ty(want, env, fns, Some(&g), diags);
             if !types_compatible(&g, &w) {
                 diags.push(type_diag(span.clone()));
             }
         }
-        _ => diags.push(type_diag(_scope.clone())),
+        _ => {}
     }
 }
 
@@ -129,8 +103,8 @@ fn check_rhs(rhs: &Rhs, env: &[(String, Type)], fns: &[&FnItem], diags: &mut Vec
         Rhs::BinOp {
             ty, lhs, rhs, span, ..
         } => {
-            let lt = operand_ty(lhs, env, fns, diags);
-            let rt = operand_ty(rhs, env, fns, diags);
+            let lt = operand_ty(lhs, env, fns, Some(ty), diags);
+            let rt = operand_ty(rhs, env, fns, Some(ty), diags);
             if !types_compatible(&lt, ty) || !types_compatible(&rt, ty) {
                 diags.push(type_diag(span.clone()));
             }
@@ -147,29 +121,22 @@ fn check_rhs(rhs: &Rhs, env: &[(String, Type)], fns: &[&FnItem], diags: &mut Vec
                 diags.push(type_diag(span.clone()));
             }
             for (arg, param_ty) in args.iter().zip(params.iter()) {
-                let at = operand_ty(arg, env, fns, diags);
+                let at = operand_ty(arg, env, fns, Some(param_ty), diags);
                 if !types_compatible(&at, param_ty) {
                     diags.push(type_diag(span.clone()));
                 }
             }
             ret
         }
-        Rhs::Operand(op) => operand_ty(op, env, fns, diags),
-        _ => {
-            diags.push(type_diag(Span {
+        Rhs::Operand(op) => operand_ty(op, env, fns, None, diags),
+        _ => scalar(
+            "i64",
+            Span {
                 file: String::new(),
                 start: 0,
                 end: 0,
-            }));
-            scalar(
-                "i64",
-                Span {
-                    file: String::new(),
-                    start: 0,
-                    end: 0,
-                },
-            )
-        }
+            },
+        ),
     }
 }
 
@@ -186,6 +153,7 @@ fn operand_ty(
     op: &Operand,
     env: &[(String, Type)],
     _fns: &[&FnItem],
+    expected: Option<&Type>,
     diags: &mut Vec<Diag>,
 ) -> Type {
     match op {
@@ -198,14 +166,7 @@ fn operand_ty(
                 diags.push(type_diag(span.clone()));
                 scalar("i64", span.clone())
             }),
-        Operand::Int(n, span) => {
-            if fits_i64(*n) {
-                scalar("i64", span.clone())
-            } else {
-                diags.push(type_diag(span.clone()));
-                scalar("i64", span.clone())
-            }
-        }
+        Operand::Int(n, span) => int_literal_ty(*n, span.clone(), expected, diags),
         Operand::Unit(span) => Type::Named("unit".into(), span.clone()),
         Operand::Bool(_, span) => Type::Named("bool".into(), span.clone()),
         Operand::Float(_, span) => Type::Named("f64".into(), span.clone()),
@@ -213,12 +174,37 @@ fn operand_ty(
     }
 }
 
+fn int_literal_ty(n: i128, span: Span, expected: Option<&Type>, diags: &mut Vec<Diag>) -> Type {
+    if let Some(Type::Named(name, _)) = expected {
+        match name.as_str() {
+            "i32" if fits_i32(n) => return scalar("i32", span),
+            "i64" if fits_i64(n) => return scalar("i64", span),
+            "i32" | "i64" => {
+                diags.push(type_diag(span.clone()));
+                return scalar(name, span);
+            }
+            _ => {}
+        }
+    }
+    if fits_i64(n) {
+        scalar("i64", span)
+    } else {
+        diags.push(type_diag(span.clone()));
+        scalar("i64", span)
+    }
+}
+
 fn types_compatible(found: &Type, expected: &Type) -> bool {
     if types_equal(found, expected) {
         return true;
     }
-    if is_i64(expected) {
-        return matches!(found, Type::Named(n, _) if n == "i64");
+    if let (Type::Named(f, _), Type::Named(e, _)) = (found, expected) {
+        if f == e {
+            return true;
+        }
+        if (f == "i32" || f == "i64") && (e == "i32" || e == "i64") {
+            return true;
+        }
     }
     false
 }
@@ -234,20 +220,16 @@ fn types_equal(a: &Type, b: &Type) -> bool {
     }
 }
 
-fn is_i64(t: &Type) -> bool {
-    matches!(t, Type::Named(n, _) if n == "i64")
-}
-
-fn is_unit(t: &Type) -> bool {
-    matches!(t, Type::Named(n, _) if n == "unit")
-}
-
 fn scalar(name: &str, span: Span) -> Type {
     Type::Named(name.to_string(), span)
 }
 
 fn fits_i64(n: i128) -> bool {
     n >= i64::MIN as i128 && n <= i64::MAX as i128
+}
+
+fn fits_i32(n: i128) -> bool {
+    n >= i32::MIN as i128 && n <= i32::MAX as i128
 }
 
 fn type_diag(span: Span) -> Diag {
@@ -291,5 +273,18 @@ fn parse_diag(span: Span) -> Diag {
         want: None,
         got: None,
         patch: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::body::syntax;
+
+    #[test]
+    fn call_i32_param_accepts_small_literal() {
+        let src = "strake 1\n\nfn id32(a: i32) -> i32\n  ret a\nend\n\ntest t\n  r = call id32(3)\n  ret 0\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        assert!(check(&m).is_ok());
     }
 }

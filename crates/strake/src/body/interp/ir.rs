@@ -212,21 +212,7 @@ impl Builder {
         self.ret(block, span, v);
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn br(&mut self, block: usize, span: Span, target: usize) {
-        self.emit(
-            block,
-            Inst {
-                op: Op::Br,
-                dst: None,
-                args: Vec::new(),
-                imm: Imm::Block(target),
-                span,
-            },
-        );
-    }
-
-    pub(crate) fn br_if(
+    fn br_if(
         &mut self,
         block: usize,
         span: Span,
@@ -246,24 +232,20 @@ impl Builder {
         );
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn phi(&mut self, block: usize, span: Span, dst: VReg, pairs: Vec<(usize, VReg)>) {
-        let mut args = Vec::new();
-        let mut blocks = Vec::new();
-        for (b, v) in pairs {
-            blocks.push(b);
-            args.push(v);
-        }
-        self.emit(
-            block,
-            Inst {
-                op: Op::Phi,
-                dst: Some(dst),
-                args,
-                imm: Imm::Blocks(blocks),
-                span,
-            },
-        );
+    /// `assert.eq` desugar: on mismatch `ret 1`, else continue in the returned block.
+    pub(crate) fn assert_eq_i64(
+        &mut self,
+        block: usize,
+        span: Span,
+        got: VReg,
+        want: VReg,
+    ) -> usize {
+        let eq = self.eq_i64(block, span.clone(), got, want);
+        let fail = self.new_block();
+        let pass = self.new_block();
+        self.br_if(block, span.clone(), eq, pass, fail);
+        self.ret_i64(fail, span.clone(), 1);
+        pass
     }
 
     pub(crate) fn add_export(&mut self, name: &str, fn_idx: usize, is_test: bool) {
@@ -342,6 +324,41 @@ impl FinishError {
                 format!("lower finish: block {block} phi %{dst} has mismatched predecessors")
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl Builder {
+    fn br(&mut self, block: usize, span: Span, target: usize) {
+        self.emit(
+            block,
+            Inst {
+                op: Op::Br,
+                dst: None,
+                args: Vec::new(),
+                imm: Imm::Block(target),
+                span,
+            },
+        );
+    }
+
+    fn phi(&mut self, block: usize, span: Span, dst: VReg, pairs: Vec<(usize, VReg)>) {
+        let mut args = Vec::new();
+        let mut blocks = Vec::new();
+        for (b, v) in pairs {
+            blocks.push(b);
+            args.push(v);
+        }
+        self.emit(
+            block,
+            Inst {
+                op: Op::Phi,
+                dst: Some(dst),
+                args,
+                imm: Imm::Blocks(blocks),
+                span,
+            },
+        );
     }
 }
 

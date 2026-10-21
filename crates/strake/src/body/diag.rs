@@ -5,6 +5,7 @@ use std::io::Write;
 
 /// Diagnostic channel kind (catalog `kinds`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum Kind {
     Check,
     Trap,
@@ -23,6 +24,7 @@ impl Kind {
 
 /// Stable catalog fault / result code. Reserved catalog codes (e.g. `E_CYCLE`) have no variant.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum Code {
     EParse,
     EType,
@@ -45,6 +47,7 @@ pub enum Code {
 
 impl Code {
     /// Every constructable catalog code, derived from an exhaustive [`Code`] match.
+    #[allow(dead_code)]
     pub(crate) fn constructable() -> [Code; 17] {
         let codes = [
             Code::EParse,
@@ -95,6 +98,7 @@ impl Code {
     }
 
     /// Map a catalog `code` string to a constructable [`Code`]. Reserved names return `None`.
+    #[allow(dead_code)]
     pub fn from_catalog_name(name: &str) -> Option<Code> {
         match name {
             "E_PARSE" => Some(Code::EParse),
