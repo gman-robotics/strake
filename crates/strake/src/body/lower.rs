@@ -1,0 +1,214 @@
+//! Lower checked A into strake-1 via the IR builder (no opcode names).
+
+use super::check::Sketch;
+use super::interp::Program;
+use super::interp::{Builder, FinishError};
+use super::syntax::{BinOp, FnItem, Item, Operand, Rhs, Stmt, TestItem};
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum LowerError {
+    Unsupported(String),
+    Finish(FinishError),
+}
+
+impl LowerError {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            LowerError::Unsupported(msg) => format!("{msg}\n"),
+            LowerError::Finish(err) => err.message(),
+        }
+    }
+
+    fn unsupported(what: &str) -> Self {
+        LowerError::Unsupported(format!("lower: {what}"))
+    }
+}
+
+pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
+    let mut b = Builder::new();
+    let mut fn_indices = std::collections::HashMap::new();
+    for item in &sketch.module.items {
+        if let Item::Fn(f) = item {
+            let idx = lower_fn(&mut b, f)?;
+            fn_indices.insert(f.name.clone(), idx);
+        }
+    }
+    for item in &sketch.module.items {
+        match item {
+            Item::Test(t) => {
+                let export = format!("test.{}", t.name);
+                let idx = lower_test(&mut b, t, &fn_indices)?;
+                b.add_export(&export, idx, true);
+            }
+            Item::Fn(f) => {
+                if f.private {
+                    continue;
+                }
+                let idx = fn_indices[&f.name];
+                b.add_export(&f.name, idx, false);
+            }
+            _ => {}
+        }
+    }
+    b.finish().map_err(LowerError::Finish)
+}
+
+fn lower_fn(b: &mut Builder, f: &FnItem) -> Result<usize, LowerError> {
+    let idx = b.begin_function(&f.name, f.params.len());
+    let entry = 0;
+    let mut env = std::collections::HashMap::new();
+    for (i, p) in f.params.iter().enumerate() {
+        env.insert(p.name.clone(), i as u32);
+    }
+    let mut cur = entry;
+    for stmt in &f.body {
+        cur = lower_stmt(b, cur, stmt, &mut env)?;
+    }
+    Ok(idx)
+}
+
+fn lower_test(
+    b: &mut Builder,
+    t: &TestItem,
+    fn_indices: &std::collections::HashMap<String, usize>,
+) -> Result<usize, LowerError> {
+    let idx = b.begin_function(&format!("test.{}", t.name), 0);
+    let entry = 0;
+    let mut env = std::collections::HashMap::new();
+    let mut cur = entry;
+    for stmt in &t.body {
+        cur = lower_stmt_test(b, cur, stmt, &mut env, fn_indices)?;
+    }
+    let unit_span = t.span.clone();
+    b.ret_i64(cur, unit_span, 0);
+    Ok(idx)
+}
+
+fn lower_stmt(
+    b: &mut Builder,
+    block: usize,
+    stmt: &Stmt,
+    env: &mut std::collections::HashMap<String, u32>,
+) -> Result<usize, LowerError> {
+    match stmt {
+        Stmt::Assign { name, rhs, .. } => {
+            let v = lower_rhs(b, block, rhs, env)?;
+            env.insert(name.clone(), v);
+            Ok(block)
+        }
+        Stmt::Ret { span, value } => {
+            let v = lower_operand(b, block, value, env)?;
+            b.ret(block, span.clone(), v);
+            Ok(block)
+        }
+        _ => Err(LowerError::unsupported(
+            "statement not supported in this slice",
+        )),
+    }
+}
+
+fn lower_stmt_test(
+    b: &mut Builder,
+    block: usize,
+    stmt: &Stmt,
+    env: &mut std::collections::HashMap<String, u32>,
+    fn_indices: &std::collections::HashMap<String, usize>,
+) -> Result<usize, LowerError> {
+    match stmt {
+        Stmt::Assign { name, rhs, .. } => {
+            let v = lower_rhs_call(b, block, rhs, env, fn_indices)?;
+            env.insert(name.clone(), v);
+            Ok(block)
+        }
+        Stmt::AssertEq { span, got, want } => {
+            let g = lower_operand(b, block, got, env)?;
+            let w = lower_operand(b, block, want, env)?;
+            Ok(b.assert_eq_i64(block, span.clone(), g, w))
+        }
+        Stmt::Ret { span, value } => {
+            let v = lower_operand(b, block, value, env)?;
+            b.ret(block, span.clone(), v);
+            Ok(block)
+        }
+        _ => Err(LowerError::unsupported(
+            "statement not supported in test body",
+        )),
+    }
+}
+
+fn lower_rhs(
+    b: &mut Builder,
+    block: usize,
+    rhs: &Rhs,
+    env: &std::collections::HashMap<String, u32>,
+) -> Result<u32, LowerError> {
+    match rhs {
+        Rhs::BinOp {
+            span, op, lhs, rhs, ..
+        } => {
+            let l = lower_operand(b, block, lhs, env)?;
+            let r = lower_operand(b, block, rhs, env)?;
+            match op {
+                BinOp::Add => Ok(b.add_i64(block, span.clone(), l, r)),
+                BinOp::Mul => Ok(b.mul_i64(block, span.clone(), l, r)),
+                _ => Err(LowerError::unsupported(
+                    "binary operator not lowered in this slice",
+                )),
+            }
+        }
+        Rhs::Operand(op) => Ok(lower_operand(b, block, op, env)?),
+        Rhs::Call { .. } => Err(LowerError::unsupported("call in function body")),
+        _ => Err(LowerError::unsupported("rhs form")),
+    }
+}
+
+fn lower_rhs_call(
+    b: &mut Builder,
+    block: usize,
+    rhs: &Rhs,
+    env: &std::collections::HashMap<String, u32>,
+    fn_indices: &std::collections::HashMap<String, usize>,
+) -> Result<u32, LowerError> {
+    if let Rhs::Call { span, callee, args } = rhs {
+        let callee_idx = fn_indices
+            .get(callee)
+            .ok_or_else(|| LowerError::unsupported("unknown callee"))?;
+        let argv: Vec<u32> = args
+            .iter()
+            .map(|a| lower_operand(b, block, a, env))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(b.call_fn(block, span.clone(), *callee_idx, &argv));
+    }
+    lower_rhs(b, block, rhs, env)
+}
+
+fn lower_operand(
+    b: &mut Builder,
+    block: usize,
+    op: &Operand,
+    env: &std::collections::HashMap<String, u32>,
+) -> Result<u32, LowerError> {
+    match op {
+        Operand::Name(name, _span) => env
+            .get(name)
+            .copied()
+            .ok_or_else(|| LowerError::unsupported("unbound name in lower")),
+        Operand::Int(n, span) => Ok(b.const_i64(block, span.clone(), *n as i64)),
+        Operand::Unit(span) => Ok(b.const_i64(block, span.clone(), 0)),
+        Operand::Bool(v, span) => Ok(b.const_i64(block, span.clone(), if *v { 1 } else { 0 })),
+        Operand::Float(_, _) | Operand::Bytes(_, _) => Err(LowerError::unsupported("operand type")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn lower_source_never_names_branch_control() {
+        let src = include_str!("lower.rs");
+        let body = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(!body.contains("br_if"));
+        assert!(!body.contains(".br("));
+        assert!(!body.contains("br("));
+        assert!(!body.contains("phi("));
+    }
+}

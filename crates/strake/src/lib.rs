@@ -6,8 +6,10 @@ pub const CHECK_USAGE: &str =
 
 use std::fs;
 
-use body::diag::Diag;
+use body::diag::{self, Diag, ExportOutcome};
+use body::host::EmptyHost;
 use body::syntax;
+use body::{compile_module, lower_abort_message, CompileError, LOWER_ABORT_EXIT};
 
 /// CLI options shared across commands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -60,6 +62,15 @@ fn parse_fail(diag: Diag) -> Exit {
     }
 }
 
+fn check_fail(diags: Vec<Diag>) -> Exit {
+    let stderr = diags.iter().map(diag_stderr).collect::<String>();
+    Exit {
+        code: 1,
+        stdout: String::new(),
+        stderr,
+    }
+}
+
 fn codeless_exit(msg: &str) -> Exit {
     Exit {
         code: 3,
@@ -81,10 +92,18 @@ pub fn check(path: &str, _opts: Opts) -> Exit {
     if let Some(msg) = syntax::codeless_rejection(&module) {
         return codeless_exit(msg);
     }
-    Exit {
-        code: 0,
-        stdout: String::new(),
-        stderr: String::new(),
+    match compile_module(&module, _opts.draft) {
+        Ok(_) => Exit {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        },
+        Err(CompileError::Check(diags)) => check_fail(diags),
+        Err(CompileError::Lower(err)) => Exit {
+            code: LOWER_ABORT_EXIT,
+            stdout: String::new(),
+            stderr: lower_abort_message(&err),
+        },
     }
 }
 
@@ -106,8 +125,7 @@ pub fn fmt(path: &str) -> Exit {
 }
 
 /// `strake test [--draft] <file>`
-pub fn test(path: &str, _opts: Opts) -> Exit {
-    let _test_channel = crate::body::diag::status;
+pub fn test(path: &str, opts: Opts) -> Exit {
     let source = match read_source(path) {
         Ok(s) => s,
         Err(e) => return e,
@@ -119,8 +137,22 @@ pub fn test(path: &str, _opts: Opts) -> Exit {
     if let Some(msg) = syntax::codeless_rejection(&module) {
         return codeless_exit(msg);
     }
+    let program = match compile_module(&module, opts.draft) {
+        Ok(p) => p,
+        Err(CompileError::Check(diags)) => return check_fail(diags),
+        Err(CompileError::Lower(err)) => {
+            return Exit {
+                code: LOWER_ABORT_EXIT,
+                stdout: String::new(),
+                stderr: lower_abort_message(&err),
+            };
+        }
+    };
+    let host = EmptyHost;
+    let outcomes: Vec<ExportOutcome> = body::interp::run_test_exports(&program, &host);
+    let code = diag::status(&outcomes);
     Exit {
-        code: 0,
+        code,
         stdout: String::new(),
         stderr: String::new(),
     }
@@ -177,6 +209,18 @@ mod tests {
         assert_eq!(exit.code, 3);
         assert!(!exit.stderr.contains("\"code\""));
         assert!(!exit.stderr.contains("E_LOWER"));
+    }
+
+    #[test]
+    fn lower_abort_exit_is_plain_70() {
+        let src =
+            "strake 1\n\nfn f() -> i64\n  x = sub i64 1 2\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
+        let tmp = std::env::temp_dir().join("strake_lib_lower70.strake");
+        std::fs::write(&tmp, src).expect("write");
+        let exit = test(tmp.to_str().unwrap(), Opts::default());
+        assert_eq!(exit.code, body::LOWER_ABORT_EXIT);
+        assert!(!exit.stderr.contains("\"code\""));
+        assert!(exit.stderr.contains("lower:"));
     }
 
     #[test]
