@@ -299,6 +299,10 @@ fn blocks_imm(imm: &Imm) -> Result<Vec<usize>, ExecFault> {
 }
 
 pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<ExportOutcome> {
+    #[cfg(test)]
+    {
+        crate::body::EXEC_ENTERED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     program
         .exports
         .iter()

@@ -101,10 +101,82 @@ fn lower_stmt(
             b.ret(block, span.clone(), v);
             Ok(block)
         }
+        Stmt::If {
+            span,
+            cond,
+            then_body,
+            else_body,
+        } => lower_if(b, block, span, cond, then_body, else_body, env),
         _ => Err(LowerError::unsupported(
             "statement not supported in this slice",
         )),
     }
+}
+
+fn lower_if(
+    b: &mut Builder,
+    block: usize,
+    span: &crate::body::diag::Span,
+    cond: &Operand,
+    then_body: &[Stmt],
+    else_body: &[Stmt],
+    env: &mut std::collections::HashMap<String, u32>,
+) -> Result<usize, LowerError> {
+    let cond_v = lower_operand(b, block, cond, env)?;
+    let join_name = if_join_name(then_body, else_body);
+    let (join_block, joined_v) = b
+        .if_join_i64(
+            block,
+            span.clone(),
+            cond_v,
+            |bb, then_b| lower_if_arm(bb, then_b, then_body, env),
+            |bb, else_b| lower_if_arm(bb, else_b, else_body, env),
+        )
+        .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    if let Some(name) = join_name {
+        env.insert(name, joined_v);
+    }
+    Ok(join_block)
+}
+
+fn if_join_name(then_body: &[Stmt], else_body: &[Stmt]) -> Option<String> {
+    let t = top_assign_name(then_body);
+    let e = top_assign_name(else_body);
+    match (t, e) {
+        (Some(a), Some(b)) if a == b => Some(a),
+        _ => None,
+    }
+}
+
+fn top_assign_name(body: &[Stmt]) -> Option<String> {
+    for stmt in body {
+        if let Stmt::Assign { name, .. } = stmt {
+            return Some(name.clone());
+        }
+    }
+    None
+}
+
+fn lower_if_arm(
+    b: &mut Builder,
+    block: usize,
+    body: &[Stmt],
+    outer_env: &std::collections::HashMap<String, u32>,
+) -> Result<(usize, u32), ()> {
+    let mut env = outer_env.clone();
+    let cur = block;
+    let mut last_v = None;
+    for stmt in body {
+        match stmt {
+            Stmt::Assign { name, rhs, .. } => {
+                let v = lower_rhs(b, cur, rhs, &env).map_err(|_| ())?;
+                env.insert(name.clone(), v);
+                last_v = Some(v);
+            }
+            _ => return Err(()),
+        }
+    }
+    last_v.map(|v| (cur, v)).ok_or(())
 }
 
 fn lower_stmt_test(
@@ -157,6 +229,7 @@ fn lower_rhs(
             }
         }
         Rhs::Operand(op) => Ok(lower_operand(b, block, op, env)?),
+        Rhs::Hole { span, .. } => Ok(b.trap_hole(block, span.clone())),
         Rhs::Call { .. } => Err(LowerError::unsupported("call in function body")),
         _ => Err(LowerError::unsupported("rhs form")),
     }

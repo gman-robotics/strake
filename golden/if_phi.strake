@@ -1,0 +1,14 @@
+strake 1
+
+fn pick(c: bool) -> i64
+  if c
+    t = add i64 1 2
+  else
+    u = add i64 3 4
+  end
+  ret t
+end
+
+test if_phi.miss
+  ret 0
+end

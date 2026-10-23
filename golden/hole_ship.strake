@@ -1,0 +1,10 @@
+strake 1
+
+fn f() -> i64
+  x = hole i64
+  ret x
+end
+
+test hole.ship
+  ret 0
+end

@@ -19,10 +19,24 @@ pub(crate) enum CompileError {
 }
 
 /// CST → check → lower (exec is separate).
-pub(crate) fn compile_module(module: &Module, _draft: bool) -> Result<Program, CompileError> {
-    let sketch = check::check(module).map_err(CompileError::Check)?;
+pub(crate) fn compile_module(module: &Module, draft: bool) -> Result<Program, CompileError> {
+    let sketch = check::check(module, draft).map_err(CompileError::Check)?;
     let program = lower::lower(&sketch).map_err(CompileError::Lower)?;
     Ok(program)
+}
+
+#[cfg(test)]
+pub(crate) static EXEC_ENTERED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn exec_entered_count() -> usize {
+    EXEC_ENTERED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_exec_entered() {
+    EXEC_ENTERED.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 pub(crate) fn lower_abort_message(err: &LowerError) -> String {
@@ -32,6 +46,7 @@ pub(crate) fn lower_abort_message(err: &LowerError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::body::syntax;
     use crate::{test as strake_test, Opts};
 
     #[test]
@@ -44,6 +59,34 @@ mod tests {
         assert_eq!(exit.code, LOWER_ABORT_EXIT);
         assert!(!exit.stderr.contains("\"code\""));
         assert!(exit.stderr.contains("lower:"));
+    }
+
+    #[test]
+    fn catalog_check_failures_do_not_enter_exec() {
+        reset_exec_entered();
+        let src = include_str!("../../../../golden/shadow.strake");
+        let tmp = std::env::temp_dir().join("strake_t4_shadow_exec.strake");
+        std::fs::write(&tmp, src).expect("write");
+        let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
+        assert_eq!(exit.code, 1);
+        assert_eq!(exec_entered_count(), 0);
+
+        reset_exec_entered();
+        let src = include_str!("../../../../golden/priv_call.strake");
+        let tmp = std::env::temp_dir().join("strake_t4_priv_call_exec.strake");
+        std::fs::write(&tmp, src).expect("write");
+        let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
+        assert_eq!(exit.code, 3);
+        assert_eq!(exec_entered_count(), 0);
+    }
+
+    #[test]
+    fn priv_fn_omitted_from_exports() {
+        let src = include_str!("../../../../golden/priv.strake");
+        let module = syntax::parse(src, "golden/priv.strake").expect("parse");
+        let program = compile_module(&module, false).expect("compile");
+        assert!(program.exports.iter().any(|e| e.name == "visible"));
+        assert!(!program.exports.iter().any(|e| e.name == "secret"));
     }
 
     #[test]

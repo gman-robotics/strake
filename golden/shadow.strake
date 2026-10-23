@@ -1,0 +1,11 @@
+strake 1
+
+fn f() -> i64
+  x = add i64 1 2
+  x = add i64 x 1
+  ret x
+end
+
+test shadow.rebind
+  ret 0
+end

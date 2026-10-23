@@ -212,6 +212,49 @@ impl Builder {
         self.ret(block, span, v);
     }
 
+    pub(crate) fn br(
+        &mut self,
+        block: usize,
+        span: Span,
+        target: usize,
+    ) {
+        self.emit(
+            block,
+            Inst {
+                op: Op::Br,
+                dst: None,
+                args: Vec::new(),
+                imm: Imm::Block(target),
+                span,
+            },
+        );
+    }
+
+    pub(crate) fn phi(
+        &mut self,
+        block: usize,
+        span: Span,
+        dst: VReg,
+        pairs: &[(usize, VReg)],
+    ) {
+        let mut args = Vec::new();
+        let mut blocks = Vec::new();
+        for (b, v) in pairs {
+            blocks.push(*b);
+            args.push(*v);
+        }
+        self.emit(
+            block,
+            Inst {
+                op: Op::Phi,
+                dst: Some(dst),
+                args,
+                imm: Imm::Blocks(blocks),
+                span,
+            },
+        );
+    }
+
     fn br_if(
         &mut self,
         block: usize,
@@ -246,6 +289,52 @@ impl Builder {
         self.br_if(block, span.clone(), eq, pass, fail);
         self.ret_i64(fail, span.clone(), 1);
         pass
+    }
+
+    /// Structured `if` with one i64 join value per arm (invariant 1).
+    pub(crate) fn if_join_i64<F1, F2>(
+        &mut self,
+        block: usize,
+        span: Span,
+        cond: VReg,
+        then_fn: F1,
+        else_fn: F2,
+    ) -> Result<(usize, VReg), ()>
+    where
+        F1: FnOnce(&mut Builder, usize) -> Result<(usize, VReg), ()>,
+        F2: FnOnce(&mut Builder, usize) -> Result<(usize, VReg), ()>,
+    {
+        let then_b = self.new_block();
+        let else_b = self.new_block();
+        let join_b = self.new_block();
+        self.br_if(block, span.clone(), cond, then_b, else_b);
+        let (then_end, then_v) = then_fn(self, then_b)?;
+        self.br(then_end, span.clone(), join_b);
+        let (else_end, else_v) = else_fn(self, else_b)?;
+        self.br(else_end, span.clone(), join_b);
+        let dst = self.alloc_vreg();
+        self.phi(
+            join_b,
+            span.clone(),
+            dst,
+            &[(then_b, then_v), (else_b, else_v)],
+        );
+        Ok((join_b, dst))
+    }
+
+    pub(crate) fn trap_hole(&mut self, block: usize, span: Span) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Trap,
+                dst: Some(dst),
+                args: Vec::new(),
+                imm: Imm::Trap(TrapImm::Hole),
+                span,
+            },
+        );
+        dst
     }
 
     pub(crate) fn add_export(&mut self, name: &str, fn_idx: usize, is_test: bool) {
@@ -327,40 +416,6 @@ impl FinishError {
     }
 }
 
-#[cfg(test)]
-impl Builder {
-    fn br(&mut self, block: usize, span: Span, target: usize) {
-        self.emit(
-            block,
-            Inst {
-                op: Op::Br,
-                dst: None,
-                args: Vec::new(),
-                imm: Imm::Block(target),
-                span,
-            },
-        );
-    }
-
-    fn phi(&mut self, block: usize, span: Span, dst: VReg, pairs: Vec<(usize, VReg)>) {
-        let mut args = Vec::new();
-        let mut blocks = Vec::new();
-        for (b, v) in pairs {
-            blocks.push(b);
-            args.push(v);
-        }
-        self.emit(
-            block,
-            Inst {
-                op: Op::Phi,
-                dst: Some(dst),
-                args,
-                imm: Imm::Blocks(blocks),
-                span,
-            },
-        );
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -394,7 +449,7 @@ mod tests {
         b.begin_function("f", 0);
         let entry = 0;
         let dst = b.alloc_vreg();
-        b.phi(entry, span(), dst, vec![(0, 0), (5, 0)]);
+        b.phi(entry, span(), dst, &[(0, 0), (5, 0)]);
         let err = b.finish().unwrap_err();
         assert!(matches!(
             err,

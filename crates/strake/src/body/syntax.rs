@@ -322,6 +322,14 @@ pub fn format(module: &Module) -> String {
 pub fn codeless_rejection(module: &Module) -> Option<&'static str> {
     let mut fuel = 0u32;
     let mut pages = 0u32;
+    let priv_fns: std::collections::HashSet<String> = module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Fn(f) if f.private => Some(f.name.clone()),
+            _ => None,
+        })
+        .collect();
     for item in &module.items {
         match item {
             Item::Fuel(_, _) => {
@@ -336,10 +344,30 @@ pub fn codeless_rejection(module: &Module) -> Option<&'static str> {
                     return Some("module may contain at most one pages directive");
                 }
             }
+            Item::Test(t) => {
+                if test_calls_priv(t, &priv_fns) {
+                    return Some("tests must call exported functions only");
+                }
+            }
             _ => {}
         }
     }
     None
+}
+
+fn test_calls_priv(test: &TestItem, priv_fns: &std::collections::HashSet<String>) -> bool {
+    for stmt in &test.body {
+        if let Stmt::Assign {
+            rhs: Rhs::Call { callee, .. },
+            ..
+        } = stmt
+        {
+            if priv_fns.contains(callee) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // --- Parse diagnostics ---------------------------------------------------------
