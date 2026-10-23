@@ -212,12 +212,7 @@ impl Builder {
         self.ret(block, span, v);
     }
 
-    pub(crate) fn br(
-        &mut self,
-        block: usize,
-        span: Span,
-        target: usize,
-    ) {
+    pub(crate) fn br(&mut self, block: usize, span: Span, target: usize) {
         self.emit(
             block,
             Inst {
@@ -230,13 +225,7 @@ impl Builder {
         );
     }
 
-    pub(crate) fn phi(
-        &mut self,
-        block: usize,
-        span: Span,
-        dst: VReg,
-        pairs: &[(usize, VReg)],
-    ) {
+    pub(crate) fn phi(&mut self, block: usize, span: Span, dst: VReg, pairs: &[(usize, VReg)]) {
         let mut args = Vec::new();
         let mut blocks = Vec::new();
         for (b, v) in pairs {
@@ -415,7 +404,6 @@ impl FinishError {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

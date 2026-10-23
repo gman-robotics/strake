@@ -3,9 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::diag::{Code, Diag, Kind, Span};
-use super::syntax::{
-    BinOp, FnItem, ForallBound, Item, Module, Operand, Rhs, Stmt, TestItem, Type,
-};
+use super::syntax::{BinOp, FnItem, ForallBound, Item, Module, Operand, Rhs, Stmt, TestItem, Type};
 
 /// Checked module ready for lowering.
 #[derive(Clone, Debug, PartialEq)]
@@ -202,10 +200,16 @@ fn check_stmt(
                 types: ctx.types.clone(),
                 phi_gaps: ctx.phi_gaps.clone(),
             };
-            let param_names: HashSet<String> =
-                params.iter().map(|p| p.name.clone()).collect();
+            let param_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
             for p in params {
-                let ty = operand_ty(&p.init, &loop_ctx.types, &loop_ctx.phi_gaps, fns, None, diags);
+                let ty = operand_ty(
+                    &p.init,
+                    &loop_ctx.types,
+                    &loop_ctx.phi_gaps,
+                    fns,
+                    None,
+                    diags,
+                );
                 loop_ctx.bind(&p.name, ty, p.span.clone(), diags);
             }
             for s in body {
@@ -373,7 +377,8 @@ fn check_stmt_in_arm(
             if ctx.types.contains_key(binder) {
                 diags.push(shadow_diag(span.clone()));
             } else {
-                ctx.types.insert(binder.clone(), scalar("i64", span.clone()));
+                ctx.types
+                    .insert(binder.clone(), scalar("i64", span.clone()));
             }
             for s in body {
                 check_stmt_in_arm(s, ctx, pre, fns, in_fn, fn_ret, diags);
@@ -424,7 +429,11 @@ fn check_rhs(
     let gaps = HashSet::new();
     match rhs {
         Rhs::BinOp {
-            ty, lhs, rhs, span, op,
+            ty,
+            lhs,
+            rhs,
+            span,
+            op,
         } => {
             if matches!(op, BinOp::Eq | BinOp::Ne) && type_is_list(ty) {
                 diags.push(type_diag(span.clone()));
@@ -669,15 +678,19 @@ mod tests {
 
     #[test]
     fn hole_ship_rejected() {
-        let src = "strake 1\n\nfn f() -> i64\n  x = hole i64\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
+        let src =
+            "strake 1\n\nfn f() -> i64\n  x = hole i64\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
         let err = check(&m, false).unwrap_err();
-        assert!(err.iter().any(|d| d.code == Code::EHole && d.kind == Kind::Check));
+        assert!(err
+            .iter()
+            .any(|d| d.code == Code::EHole && d.kind == Kind::Check));
     }
 
     #[test]
     fn hole_draft_allowed_in_check() {
-        let src = "strake 1\n\nfn f() -> i64\n  x = hole i64\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
+        let src =
+            "strake 1\n\nfn f() -> i64\n  x = hole i64\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
         assert!(check(&m, true).is_ok());
     }

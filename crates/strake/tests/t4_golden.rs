@@ -70,7 +70,13 @@ fn priv_call_exits_3_plain() {
 #[test]
 fn check_draft_hole_exits_0_no_e_hole_check() {
     let path = golden("hole_ship.strake");
-    let exit = check(path.to_str().unwrap(), Opts { draft: true, ..Opts::default() });
+    let exit = check(
+        path.to_str().unwrap(),
+        Opts {
+            draft: true,
+            ..Opts::default()
+        },
+    );
     assert_eq!(exit.code, 0);
     assert!(!exit.stderr.contains("E_HOLE"));
 }
