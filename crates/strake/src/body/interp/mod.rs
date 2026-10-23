@@ -137,6 +137,13 @@ impl<'a> Machine<'a> {
                 };
                 self.write_reg(inst.dst, v)?;
             }
+            Op::ConstBool => {
+                let v = match inst.imm {
+                    Imm::Bool(b) => Value::Bool(b),
+                    _ => return Err(ExecFault::Codeless("bad const".into())),
+                };
+                self.write_reg(inst.dst, v)?;
+            }
             Op::Add => {
                 let (a, b) = self.two_i64(inst)?;
                 self.write_reg(inst.dst, Value::I64(a.wrapping_add(b)))?;
@@ -299,6 +306,10 @@ fn blocks_imm(imm: &Imm) -> Result<Vec<usize>, ExecFault> {
 }
 
 pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<ExportOutcome> {
+    #[cfg(test)]
+    {
+        crate::body::EXEC_ENTERED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     program
         .exports
         .iter()

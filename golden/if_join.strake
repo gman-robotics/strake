@@ -1,0 +1,15 @@
+strake 1
+
+fn join(c: bool) -> i64
+  if c
+    v = add i64 1 0
+  else
+    v = add i64 2 0
+  end
+  ret v
+end
+
+test if_join.ok
+  r = call join(true)
+  assert.eq r 1
+end

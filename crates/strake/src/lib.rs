@@ -5,7 +5,9 @@ pub const CHECK_USAGE: &str =
     "usage: strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>";
 
 use std::fs;
+use std::path::{Path, PathBuf};
 
+use body::check;
 use body::diag::{self, Diag, ExportOutcome};
 use body::host::EmptyHost;
 use body::syntax;
@@ -79,20 +81,51 @@ fn codeless_exit(msg: &str) -> Exit {
     }
 }
 
-/// `strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>`
-pub fn check(path: &str, _opts: Opts) -> Exit {
+fn collect_src_strake_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let src = dir.join("src");
+    if !src.is_dir() {
+        return out;
+    }
+    collect_strake_recursive(&src, &mut out);
+    out.sort();
+    out
+}
+
+fn collect_strake_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_strake_recursive(&path, out);
+        } else if path.extension().is_some_and(|e| e == "strake") {
+            out.push(path);
+        }
+    }
+}
+
+fn check_one_file(path: &str, opts: &Opts) -> Exit {
     let source = match read_source(path) {
         Ok(s) => s,
         Err(e) => return e,
     };
-    let module = match syntax::parse(&source, path) {
+    let mut module = match syntax::parse(&source, path) {
         Ok(m) => m,
         Err(diag) => return parse_fail(diag),
     };
     if let Some(msg) = syntax::codeless_rejection(&module) {
         return codeless_exit(msg);
     }
-    match compile_module(&module, _opts.draft) {
+    if let Some(name) = &opts.only_fn {
+        if !export_fn_exists(&module, name) {
+            return Exit {
+                code: 2,
+                stdout: String::new(),
+                stderr: format!("unknown export `{name}`\n"),
+            };
+        }
+        filter_tests_for_only_fn(&mut module, name);
+    }
+    match compile_module(&module, opts.draft) {
         Ok(_) => Exit {
             code: 0,
             stdout: String::new(),
@@ -105,6 +138,49 @@ pub fn check(path: &str, _opts: Opts) -> Exit {
             stderr: lower_abort_message(&err),
         },
     }
+}
+
+fn export_fn_exists(module: &syntax::Module, name: &str) -> bool {
+    module.items.iter().any(|item| {
+        matches!(
+            item,
+            syntax::Item::Fn(f) if f.name == name && !f.private
+        )
+    })
+}
+
+fn filter_tests_for_only_fn(module: &mut syntax::Module, only_fn: &str) {
+    let module_ro = module.clone();
+    module.items.retain(|item| match item {
+        syntax::Item::Test(t) => check::test_matches_only_fn(t, only_fn, &module_ro),
+        _ => true,
+    });
+}
+
+/// `strake check [--draft] [--fn NAME] [--blob-root DIR] <file|dir>`
+pub fn check(path: &str, opts: Opts) -> Exit {
+    let p = Path::new(path);
+    if p.is_dir() {
+        let files = collect_src_strake_files(p);
+        if files.is_empty() {
+            return usage("no src/**/*.strake files found in directory");
+        }
+        let mut last = Exit {
+            code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        for f in files {
+            let fp = f.to_str().unwrap();
+            let exit = check_one_file(fp, &opts);
+            if exit.code != 0 {
+                return exit;
+            }
+            last = exit;
+        }
+        return last;
+    }
+    check_one_file(path, &opts)
 }
 
 /// `strake fmt <file>`
