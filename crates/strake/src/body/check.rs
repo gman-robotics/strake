@@ -142,32 +142,14 @@ fn check_fn(f: &FnItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
         ctx.bind(&p.name, p.ty.clone(), p.span.clone(), diags);
     }
     for stmt in &f.body {
-        check_stmt(stmt, &mut ctx, fns, true, diags);
+        check_stmt(stmt, &mut ctx, fns, true, Some(&f.ret), diags);
     }
-    check_ret_type(f, &ctx.types, fns, diags);
 }
 
 fn check_test(t: &TestItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
     let mut ctx = Ctx::new();
     for stmt in &t.body {
-        check_stmt(stmt, &mut ctx, fns, false, diags);
-    }
-}
-
-fn check_ret_type(
-    f: &FnItem,
-    env: &HashMap<String, Type>,
-    fns: &[&FnItem],
-    diags: &mut Vec<Diag>,
-) {
-    let gaps = HashSet::new();
-    for stmt in &f.body {
-        if let Stmt::Ret { value, span } = stmt {
-            let got = operand_ty(value, env, &gaps, fns, None, diags);
-            if !types_compatible(&got, &f.ret) {
-                diags.push(type_diag(span.clone()));
-            }
-        }
+        check_stmt(stmt, &mut ctx, fns, false, None, diags);
     }
 }
 
@@ -176,6 +158,7 @@ fn check_stmt(
     ctx: &mut Ctx,
     fns: &[&FnItem],
     in_fn: bool,
+    fn_ret: Option<&Type>,
     diags: &mut Vec<Diag>,
 ) {
     match stmt {
@@ -183,8 +166,13 @@ fn check_stmt(
             let ty = check_rhs(rhs, &ctx.types, fns, diags);
             ctx.bind(name, ty, span.clone(), diags);
         }
-        Stmt::Ret { value, .. } => {
-            operand_ty(value, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+        Stmt::Ret { value, span } => {
+            let got = operand_ty(value, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+            if let Some(expected) = fn_ret {
+                if !types_compatible(&got, expected) {
+                    diags.push(type_diag(span.clone()));
+                }
+            }
         }
         Stmt::If {
             cond,
@@ -193,7 +181,7 @@ fn check_stmt(
             ..
         } => {
             operand_ty(cond, &ctx.types, &ctx.phi_gaps, fns, None, diags);
-            check_if(then_body, else_body, ctx, fns, in_fn, diags);
+            check_if(then_body, else_body, ctx, fns, in_fn, fn_ret, diags);
         }
         Stmt::For {
             span,
@@ -206,7 +194,7 @@ fn check_stmt(
             }
             ctx.bind(binder, scalar("i64", span.clone()), span.clone(), diags);
             for s in body {
-                check_stmt(s, ctx, fns, in_fn, diags);
+                check_stmt(s, ctx, fns, in_fn, fn_ret, diags);
             }
         }
         Stmt::Loop { params, body, .. } => {
@@ -221,7 +209,7 @@ fn check_stmt(
                 loop_ctx.bind(&p.name, ty, p.span.clone(), diags);
             }
             for s in body {
-                check_stmt_loop(s, &mut loop_ctx, &param_names, fns, in_fn, diags);
+                check_stmt_loop(s, &mut loop_ctx, &param_names, fns, in_fn, fn_ret, diags);
             }
         }
         Stmt::Forall {
@@ -238,7 +226,7 @@ fn check_stmt(
             };
             let forall_name = binder.clone();
             for s in body {
-                check_stmt_forall(s, &mut inner, &forall_name, fns, in_fn, diags);
+                check_stmt_forall(s, &mut inner, &forall_name, fns, in_fn, fn_ret, diags);
             }
         }
         Stmt::AssertEq { span, got, want } => {
@@ -262,6 +250,7 @@ fn check_stmt_loop(
     loop_params: &HashSet<String>,
     fns: &[&FnItem],
     in_fn: bool,
+    fn_ret: Option<&Type>,
     diags: &mut Vec<Diag>,
 ) {
     if let Stmt::Assign { span, name, .. } = stmt {
@@ -269,7 +258,7 @@ fn check_stmt_loop(
             diags.push(shadow_diag(span.clone()));
         }
     }
-    check_stmt(stmt, ctx, fns, in_fn, diags);
+    check_stmt(stmt, ctx, fns, in_fn, fn_ret, diags);
 }
 
 fn check_stmt_forall(
@@ -278,6 +267,7 @@ fn check_stmt_forall(
     binder: &str,
     fns: &[&FnItem],
     in_fn: bool,
+    fn_ret: Option<&Type>,
     diags: &mut Vec<Diag>,
 ) {
     if let Stmt::Assign { span, name, .. } = stmt {
@@ -285,7 +275,7 @@ fn check_stmt_forall(
             diags.push(shadow_diag(span.clone()));
         }
     }
-    check_stmt(stmt, ctx, fns, in_fn, diags);
+    check_stmt(stmt, ctx, fns, in_fn, fn_ret, diags);
 }
 
 fn check_if(
@@ -294,6 +284,7 @@ fn check_if(
     ctx: &mut Ctx,
     fns: &[&FnItem],
     in_fn: bool,
+    fn_ret: Option<&Type>,
     diags: &mut Vec<Diag>,
 ) {
     let pre = ctx.types.clone();
@@ -305,14 +296,14 @@ fn check_if(
         phi_gaps: ctx.phi_gaps.clone(),
     };
     for s in then_body {
-        check_stmt_in_arm(s, &mut then_ctx, &pre, fns, in_fn, diags);
+        check_stmt_in_arm(s, &mut then_ctx, &pre, fns, in_fn, fn_ret, diags);
     }
     let mut else_ctx = Ctx {
         types: pre.clone(),
         phi_gaps: ctx.phi_gaps.clone(),
     };
     for s in else_body {
-        check_stmt_in_arm(s, &mut else_ctx, &pre, fns, in_fn, diags);
+        check_stmt_in_arm(s, &mut else_ctx, &pre, fns, in_fn, fn_ret, diags);
     }
 
     for (name, (ty, span)) in &then_tops {
@@ -346,6 +337,7 @@ fn check_stmt_in_arm(
     pre: &HashMap<String, Type>,
     fns: &[&FnItem],
     in_fn: bool,
+    fn_ret: Option<&Type>,
     diags: &mut Vec<Diag>,
 ) {
     match stmt {
@@ -367,7 +359,7 @@ fn check_stmt_in_arm(
             ..
         } => {
             operand_ty(cond, &ctx.types, &ctx.phi_gaps, fns, None, diags);
-            check_if(then_body, else_body, ctx, fns, in_fn, diags);
+            check_if(then_body, else_body, ctx, fns, in_fn, fn_ret, diags);
         }
         Stmt::For {
             span,
@@ -384,11 +376,16 @@ fn check_stmt_in_arm(
                 ctx.types.insert(binder.clone(), scalar("i64", span.clone()));
             }
             for s in body {
-                check_stmt_in_arm(s, ctx, pre, fns, in_fn, diags);
+                check_stmt_in_arm(s, ctx, pre, fns, in_fn, fn_ret, diags);
             }
         }
-        Stmt::Ret { value, .. } => {
-            operand_ty(value, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+        Stmt::Ret { value, span } => {
+            let got = operand_ty(value, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+            if let Some(expected) = fn_ret {
+                if !types_compatible(&got, expected) {
+                    diags.push(type_diag(span.clone()));
+                }
+            }
         }
         _ => {}
     }
