@@ -150,8 +150,9 @@ fn export_fn_exists(module: &syntax::Module, name: &str) -> bool {
 }
 
 fn filter_tests_for_only_fn(module: &mut syntax::Module, only_fn: &str) {
+    let module_ro = module.clone();
     module.items.retain(|item| match item {
-        syntax::Item::Test(t) => check::test_matches_only_fn(t, only_fn),
+        syntax::Item::Test(t) => check::test_matches_only_fn(t, only_fn, &module_ro),
         _ => true,
     });
 }

@@ -3,7 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::diag::{Code, Diag, Kind, Span};
-use super::syntax::{BinOp, FnItem, ForallBound, Item, Module, Operand, Rhs, Stmt, TestItem, Type};
+use super::syntax::{
+    BinOp, FnItem, ForallBound, Item, Module, Operand, PropertyItem, Rhs, Stmt, TestItem, Type,
+};
 
 /// Checked module ready for lowering.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,6 +27,7 @@ pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, Vec<Diag>> {
         match item {
             Item::Fn(f) => check_fn(f, &fn_table, &mut diags),
             Item::Test(t) => check_test(t, &fn_table, &mut diags),
+            Item::Property(p) => check_property(p, &fn_table, &mut diags),
             _ => {}
         }
     }
@@ -41,19 +44,90 @@ pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, Vec<Diag>> {
 }
 
 /// Whether a test's direct `call` sites are only to `only_fn` (§2.15).
-pub(crate) fn test_matches_only_fn(test: &TestItem, only_fn: &str) -> bool {
-    for stmt in &test.body {
-        if let Stmt::Assign {
+pub(crate) fn test_matches_only_fn(test: &TestItem, only_fn: &str, module: &Module) -> bool {
+    let direct = direct_calls_in_block(&test.body);
+    if !direct.iter().all(|c| c == only_fn) {
+        return false;
+    }
+    if direct.is_empty() {
+        return true;
+    }
+    !fn_reaches_other_export_or_priv(only_fn, module)
+}
+
+fn direct_calls_in_block(stmts: &[Stmt]) -> Vec<String> {
+    let mut out = Vec::new();
+    for stmt in stmts {
+        collect_direct_calls_stmt(stmt, &mut out);
+    }
+    out
+}
+
+fn collect_direct_calls_stmt(stmt: &Stmt, out: &mut Vec<String>) {
+    match stmt {
+        Stmt::Assign {
             rhs: Rhs::Call { callee, .. },
             ..
-        } = stmt
-        {
-            if callee != only_fn {
-                return false;
+        } => out.push(callee.clone()),
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            for s in then_body {
+                collect_direct_calls_stmt(s, out);
+            }
+            for s in else_body {
+                collect_direct_calls_stmt(s, out);
+            }
+        }
+        Stmt::Loop { body, .. } | Stmt::For { body, .. } | Stmt::Forall { body, .. } => {
+            for s in body {
+                collect_direct_calls_stmt(s, out);
+            }
+        }
+        Stmt::Match { arms, .. } => {
+            for arm in arms {
+                for s in &arm.body {
+                    collect_direct_calls_stmt(s, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn fn_reaches_other_export_or_priv(fn_name: &str, module: &Module) -> bool {
+    let mut by_name: HashMap<String, &FnItem> = HashMap::new();
+    let mut priv_names = HashSet::new();
+    let mut export_names = HashSet::new();
+    for item in &module.items {
+        if let Item::Fn(f) = item {
+            by_name.insert(f.name.clone(), f);
+            if f.private {
+                priv_names.insert(f.name.clone());
+            } else {
+                export_names.insert(f.name.clone());
             }
         }
     }
-    true
+    let Some(root) = by_name.get(fn_name) else {
+        return false;
+    };
+    let mut stack: Vec<String> = direct_calls_in_block(&root.body);
+    let mut visited = HashSet::new();
+    while let Some(c) = stack.pop() {
+        if !visited.insert(c.clone()) {
+            continue;
+        }
+        if c != fn_name && (priv_names.contains(&c) || export_names.contains(&c)) {
+            return true;
+        }
+        if let Some(f) = by_name.get(&c) {
+            stack.extend(direct_calls_in_block(&f.body));
+        }
+    }
+    false
 }
 
 fn collect_holes_module(module: &Module, diags: &mut Vec<Diag>) {
@@ -66,6 +140,11 @@ fn collect_holes_module(module: &Module, diags: &mut Vec<Diag>) {
             }
             Item::Test(t) => {
                 for stmt in &t.body {
+                    walk_holes_stmt(stmt, diags);
+                }
+            }
+            Item::Property(p) => {
+                for stmt in &p.body {
                     walk_holes_stmt(stmt, diags);
                 }
             }
@@ -148,6 +227,31 @@ fn check_test(t: &TestItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
     let mut ctx = Ctx::new();
     for stmt in &t.body {
         check_stmt(stmt, &mut ctx, fns, false, None, diags);
+    }
+}
+
+fn check_property(p: &PropertyItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
+    let mut ctx = Ctx::new();
+    for stmt in &p.body {
+        check_stmt_property(stmt, &mut ctx, fns, diags);
+    }
+}
+
+fn check_stmt_property(stmt: &Stmt, ctx: &mut Ctx, fns: &[&FnItem], diags: &mut Vec<Diag>) {
+    match stmt {
+        Stmt::Forall {
+            span,
+            binder,
+            bound,
+            body,
+        } => {
+            let ty = forall_binder_ty(bound);
+            ctx.bind(binder, ty, span.clone(), diags);
+            for s in body {
+                check_stmt_forall(s, &mut *ctx, binder, fns, false, None, diags);
+            }
+        }
+        _ => check_stmt(stmt, ctx, fns, false, None, diags),
     }
 }
 
@@ -325,12 +429,9 @@ fn check_if(
             ctx.phi_gaps.insert(name.clone());
         }
     }
-    for (name, (_, span)) in &else_tops {
+    for name in else_tops.keys() {
         if !then_tops.contains_key(name) && !pre.contains_key(name) {
             ctx.phi_gaps.insert(name.clone());
-            if then_tops.is_empty() && else_tops.len() == 1 {
-                let _ = span;
-            }
         }
     }
 }
@@ -348,6 +449,7 @@ fn check_stmt_in_arm(
         Stmt::Assign { span, name, rhs } => {
             if pre.contains_key(name) {
                 diags.push(shadow_diag(span.clone()));
+                return;
             }
             let ty = check_rhs(rhs, &ctx.types, fns, diags);
             if ctx.types.contains_key(name) {
@@ -437,6 +539,7 @@ fn check_rhs(
         } => {
             if matches!(op, BinOp::Eq | BinOp::Ne) && type_is_list(ty) {
                 diags.push(type_diag(span.clone()));
+                return ty.clone();
             }
             let lt = operand_ty(lhs, env, &gaps, fns, Some(ty), diags);
             let rt = operand_ty(rhs, env, &gaps, fns, Some(ty), diags);
@@ -707,7 +810,46 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert!(test_matches_only_fn(tests[0], "a"));
-        assert!(!test_matches_only_fn(tests[1], "a"));
+        assert!(test_matches_only_fn(tests[0], "a", &m));
+        assert!(!test_matches_only_fn(tests[1], "a", &m));
+    }
+
+    #[test]
+    fn property_forall_binder_rebind_shadow() {
+        let src =
+            "strake 1\n\nproperty p\n  forall n: i64 in 0..1\n    n = add i64 n 1\n  end\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        let err = check(&m, false).unwrap_err();
+        assert!(err.iter().any(|d| d.code == Code::EShadow));
+    }
+
+    #[test]
+    fn only_fn_rejects_nested_call_in_if() {
+        let src = "strake 1\n\nfn a() -> i64\n  ret 1\nend\n\nfn b() -> i64\n  ret 2\nend\n\ntest nested\n  if true\n    x = call b()\n  end\n  ret 0\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        let tests: Vec<_> = m
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Test(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert!(!test_matches_only_fn(tests[0], "a", &m));
+    }
+
+    #[test]
+    fn only_fn_rejects_export_reaching_second_export_via_helper() {
+        let src = "strake 1\n\nfn other() -> i64\n  ret 9\nend\n\nfn helper() -> i64\n  r = call other()\n  ret r\nend\n\nfn target() -> i64\n  r = call helper()\n  ret r\nend\n\ntest ok\n  x = call target()\n  ret 0\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        let tests: Vec<_> = m
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Test(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert!(!test_matches_only_fn(tests[0], "target", &m));
     }
 }

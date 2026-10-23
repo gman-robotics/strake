@@ -10,5 +10,6 @@ fn join(c: bool) -> i64
 end
 
 test if_join.ok
-  ret 0
+  r = call join(true)
+  assert.eq r 1
 end

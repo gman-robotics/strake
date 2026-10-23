@@ -165,18 +165,20 @@ fn lower_if_arm(
 ) -> Result<(usize, u32), ()> {
     let mut env = outer_env.clone();
     let cur = block;
-    let mut last_v = None;
+    let mut join_v = None;
     for stmt in body {
         match stmt {
             Stmt::Assign { name, rhs, .. } => {
                 let v = lower_rhs(b, cur, rhs, &env).map_err(|_| ())?;
+                if join_v.is_none() {
+                    join_v = Some(v);
+                }
                 env.insert(name.clone(), v);
-                last_v = Some(v);
             }
             _ => return Err(()),
         }
     }
-    last_v.map(|v| (cur, v)).ok_or(())
+    join_v.map(|v| (cur, v)).ok_or(())
 }
 
 fn lower_stmt_test(
@@ -268,7 +270,7 @@ fn lower_operand(
             .ok_or_else(|| LowerError::unsupported("unbound name in lower")),
         Operand::Int(n, span) => Ok(b.const_i64(block, span.clone(), *n as i64)),
         Operand::Unit(span) => Ok(b.const_i64(block, span.clone(), 0)),
-        Operand::Bool(v, span) => Ok(b.const_i64(block, span.clone(), if *v { 1 } else { 0 })),
+        Operand::Bool(v, span) => Ok(b.const_bool(block, span.clone(), *v)),
         Operand::Float(_, _) | Operand::Bytes(_, _) => Err(LowerError::unsupported("operand type")),
     }
 }

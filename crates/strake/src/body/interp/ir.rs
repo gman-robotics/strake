@@ -113,6 +113,21 @@ impl Builder {
         self.functions[fn_idx].blocks[block].insts.push(inst);
     }
 
+    pub(crate) fn const_bool(&mut self, block: usize, span: Span, value: bool) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::ConstBool,
+                dst: Some(dst),
+                args: Vec::new(),
+                imm: Imm::Bool(value),
+                span,
+            },
+        );
+        dst
+    }
+
     pub(crate) fn const_i64(&mut self, block: usize, span: Span, value: i64) -> VReg {
         let dst = self.alloc_vreg();
         self.emit(
@@ -212,7 +227,7 @@ impl Builder {
         self.ret(block, span, v);
     }
 
-    pub(crate) fn br(&mut self, block: usize, span: Span, target: usize) {
+    fn br(&mut self, block: usize, span: Span, target: usize) {
         self.emit(
             block,
             Inst {
@@ -225,7 +240,7 @@ impl Builder {
         );
     }
 
-    pub(crate) fn phi(&mut self, block: usize, span: Span, dst: VReg, pairs: &[(usize, VReg)]) {
+    fn phi(&mut self, block: usize, span: Span, dst: VReg, pairs: &[(usize, VReg)]) {
         let mut args = Vec::new();
         let mut blocks = Vec::new();
         for (b, v) in pairs {

@@ -137,6 +137,13 @@ impl<'a> Machine<'a> {
                 };
                 self.write_reg(inst.dst, v)?;
             }
+            Op::ConstBool => {
+                let v = match inst.imm {
+                    Imm::Bool(b) => Value::Bool(b),
+                    _ => return Err(ExecFault::Codeless("bad const".into())),
+                };
+                self.write_reg(inst.dst, v)?;
+            }
             Op::Add => {
                 let (a, b) = self.two_i64(inst)?;
                 self.write_reg(inst.dst, Value::I64(a.wrapping_add(b)))?;
