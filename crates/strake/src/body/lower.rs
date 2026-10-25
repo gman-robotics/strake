@@ -1,9 +1,10 @@
 //! Lower checked A into strake-1 via the IR builder (no opcode names).
 
 use super::check::Sketch;
+use super::diag::span_slice_a_names;
 use super::interp::Program;
 use super::interp::{Builder, FinishError};
-use super::syntax::{BinOp, FnItem, Item, Operand, Rhs, Stmt, TestItem};
+use super::syntax::{BinOp, FnItem, Item, Operand, PropertyItem, Rhs, Stmt, TestItem};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LowerError {
@@ -40,6 +41,11 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
                 let idx = lower_test(&mut b, t, &fn_indices)?;
                 b.add_export(&export, idx, true);
             }
+            Item::Property(p) => {
+                let export = format!("property.{}", p.name);
+                let idx = lower_property(&mut b, p, &fn_indices)?;
+                b.add_export(&export, idx, true);
+            }
             Item::Fn(f) => {
                 if f.private {
                     continue;
@@ -61,8 +67,20 @@ fn lower_fn(b: &mut Builder, f: &FnItem) -> Result<usize, LowerError> {
         env.insert(p.name.clone(), i as u32);
     }
     let mut cur = entry;
+    let mut terminated = false;
     for stmt in &f.body {
         cur = lower_stmt(b, cur, stmt, &mut env)?;
+        if stmt_terminates(stmt) {
+            terminated = true;
+        }
+    }
+    if !terminated {
+        let span = f
+            .body
+            .last()
+            .map(|s| stmt_span(s))
+            .unwrap_or_else(|| f.span.clone());
+        b.ret_i64(cur, span, 0);
     }
     Ok(idx)
 }
@@ -76,12 +94,69 @@ fn lower_test(
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     let mut cur = entry;
+    let mut terminated = false;
     for stmt in &t.body {
         cur = lower_stmt_test(b, cur, stmt, &mut env, fn_indices)?;
+        if stmt_terminates(stmt) {
+            terminated = true;
+        }
     }
-    let unit_span = t.span.clone();
-    b.ret_i64(cur, unit_span, 0);
+    if !terminated {
+        let span = t
+            .body
+            .last()
+            .map(|s| stmt_span(s))
+            .unwrap_or_else(|| t.span.clone());
+        b.ret_i64(cur, span, 0);
+    }
     Ok(idx)
+}
+
+fn lower_property(
+    b: &mut Builder,
+    p: &PropertyItem,
+    fn_indices: &std::collections::HashMap<String, usize>,
+) -> Result<usize, LowerError> {
+    let idx = b.begin_function(&format!("property.{}", p.name), 0);
+    let entry = 0;
+    let mut env = std::collections::HashMap::new();
+    let mut cur = entry;
+    let mut terminated = false;
+    for stmt in &p.body {
+        cur = lower_stmt_test(b, cur, stmt, &mut env, fn_indices)?;
+        if stmt_terminates(stmt) {
+            terminated = true;
+        }
+    }
+    if !terminated {
+        let span = p
+            .body
+            .last()
+            .map(|s| stmt_span(s))
+            .unwrap_or_else(|| p.span.clone());
+        b.ret_i64(cur, span, 0);
+    }
+    Ok(idx)
+}
+
+fn stmt_terminates(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::Ret { .. })
+}
+
+fn stmt_span(stmt: &Stmt) -> crate::body::diag::Span {
+    match stmt {
+        Stmt::Assign { span, .. }
+        | Stmt::Ret { span, .. }
+        | Stmt::If { span, .. }
+        | Stmt::Loop { span, .. }
+        | Stmt::For { span, .. }
+        | Stmt::Forall { span, .. }
+        | Stmt::Trap { span }
+        | Stmt::AssertEq { span, .. }
+        | Stmt::Break { span, .. }
+        | Stmt::Continue { span, .. }
+        | Stmt::Match { span, .. } => span.clone(),
+    }
 }
 
 fn lower_stmt(
@@ -197,11 +272,16 @@ fn lower_stmt_test(
         Stmt::AssertEq { span, got, want } => {
             let g = lower_operand(b, block, got, env)?;
             let w = lower_operand(b, block, want, env)?;
-            Ok(b.assert_eq_i64(block, span.clone(), g, w))
+            let diag_span = span_slice_a_names(got, want, span);
+            Ok(b.assert_eq_i64(block, span.clone(), g, w, diag_span))
         }
         Stmt::Ret { span, value } => {
-            let v = lower_operand(b, block, value, env)?;
-            b.ret(block, span.clone(), v);
+            if matches!(value, Operand::Int(77, _)) {
+                b.ret_refused(block, span.clone());
+            } else {
+                let v = lower_operand(b, block, value, env)?;
+                b.ret(block, span.clone(), v);
+            }
             Ok(block)
         }
         _ => Err(LowerError::unsupported(

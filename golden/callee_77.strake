@@ -1,0 +1,9 @@
+strake 1
+
+fn seventy_seven() -> i64
+  ret 77
+end
+
+test uses_callee
+  x = call seventy_seven()
+end

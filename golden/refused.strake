@@ -1,0 +1,5 @@
+strake 1
+
+test refused.ret
+  ret 77
+end

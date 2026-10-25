@@ -1,0 +1,6 @@
+strake 1
+
+test fail.eq
+  r = add i64 10 6
+  assert.eq r 14
+end

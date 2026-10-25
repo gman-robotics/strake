@@ -6,11 +6,11 @@ mod op;
 pub(crate) use ir::{Builder, FinishError};
 pub use ir::{Inst, Program};
 
-use crate::body::diag::{Code, ExportOutcome};
+use crate::body::diag::{Code, Diag, ExportOutcome, Kind, render_scalar_i64};
 use crate::body::host::Host;
 use op::{Op, TrapImm};
 
-use ir::{Imm, VReg};
+use ir::{Imm, RetImm, VReg};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -27,6 +27,7 @@ pub(crate) struct Machine<'a> {
     fuel: i64,
     frames: Vec<Frame>,
     root_return: Option<i64>,
+    result_diags: Vec<Diag>,
 }
 
 struct Frame {
@@ -54,7 +55,14 @@ impl<'a> Machine<'a> {
             fuel,
             frames: Vec::new(),
             root_return: None,
+            result_diags: Vec::new(),
         }
+    }
+
+    pub(crate) fn take_result_diags(&mut self) -> Vec<Diag> {
+        let d = self.result_diags.clone();
+        self.result_diags.clear();
+        d
     }
 
     fn charge(&mut self, cost: i64) -> Result<(), ExecFault> {
@@ -174,8 +182,41 @@ impl<'a> Machine<'a> {
                 self.enter_function(callee, &args, dst, false)?;
             }
             Op::Ret => {
+                let ret_imm = match &inst.imm {
+                    Imm::Ret(r) => r.clone(),
+                    _ => RetImm::Normal,
+                };
                 let v = self.read_reg(inst.args[0])?;
                 let ret_i64 = value_as_i64(&v)?;
+                match ret_imm {
+                    RetImm::TestFail {
+                        want,
+                        got,
+                        diag_span,
+                    } => {
+                        let want_v = value_as_i64(&self.read_reg(want)?)?;
+                        let got_v = value_as_i64(&self.read_reg(got)?)?;
+                        self.result_diags.push(Diag {
+                            code: Code::ETest,
+                            kind: Kind::Result,
+                            span: diag_span,
+                            want: Some(render_scalar_i64(want_v)),
+                            got: Some(render_scalar_i64(got_v)),
+                            patch: None,
+                        });
+                    }
+                    RetImm::Refused => {
+                        self.result_diags.push(Diag {
+                            code: Code::ERefused,
+                            kind: Kind::Result,
+                            span: inst.span.clone(),
+                            want: None,
+                            got: None,
+                            patch: None,
+                        });
+                    }
+                    RetImm::Normal => {}
+                }
                 let call_dst = self.frames.last().unwrap().pending_call_dst;
                 self.frames.pop();
                 if let Some(dst) = call_dst {
@@ -305,7 +346,14 @@ fn blocks_imm(imm: &Imm) -> Result<Vec<usize>, ExecFault> {
     }
 }
 
-pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<ExportOutcome> {
+/// One test/property export run: status input plus any result-channel diags.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TestExportRun {
+    pub outcome: ExportOutcome,
+    pub diags: Vec<Diag>,
+}
+
+pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<TestExportRun> {
     #[cfg(test)]
     {
         crate::body::EXEC_ENTERED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -316,7 +364,7 @@ pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<Export
         .filter(|e| e.is_test)
         .map(|e| {
             let mut m = Machine::new(program, 100_000, host);
-            match m.run_root_function(e.fn_idx) {
+            let outcome = match m.run_root_function(e.fn_idx) {
                 Ok(ret) => ExportOutcome {
                     trapped: false,
                     ret,
@@ -329,7 +377,9 @@ pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<Export
                     trapped: true,
                     ret: 0,
                 },
-            }
+            };
+            let diags = m.take_result_diags();
+            TestExportRun { outcome, diags }
         })
         .collect()
 }
