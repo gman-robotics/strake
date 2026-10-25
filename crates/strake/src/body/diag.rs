@@ -193,31 +193,6 @@ pub(crate) fn render_scalar_i64(n: i64) -> String {
     n.to_string()
 }
 
-/// Narrow a diagnostic span to A-level name operands (invariant 6); no vreg `%` names.
-pub(crate) fn span_slice_a_names(
-    got: &crate::body::syntax::Operand,
-    want: &crate::body::syntax::Operand,
-    fallback: &Span,
-) -> Span {
-    let mut spans: Vec<&Span> = Vec::new();
-    if let crate::body::syntax::Operand::Name(_, s) = got {
-        spans.push(s);
-    }
-    if let crate::body::syntax::Operand::Name(_, s) = want {
-        spans.push(s);
-    }
-    if spans.is_empty() {
-        return fallback.clone();
-    }
-    let start = spans.iter().map(|s| s.start).min().unwrap();
-    let end = spans.iter().map(|s| s.end).max().unwrap();
-    Span {
-        file: fallback.file.clone(),
-        start,
-        end,
-    }
-}
-
 /// One catalog diagnostic before rendering.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diag {
@@ -405,35 +380,6 @@ mod tests {
             render_scalar_i64(-9223372036854775808),
             "-9223372036854775808"
         );
-    }
-
-    #[test]
-    fn span_slice_a_names_uses_name_operands_only() {
-        use crate::body::syntax::Operand;
-        let fallback = Span {
-            file: "t.strake".into(),
-            start: 0,
-            end: 100,
-        };
-        let got = Operand::Name(
-            "r".into(),
-            Span {
-                file: "t.strake".into(),
-                start: 40,
-                end: 41,
-            },
-        );
-        let want = Operand::Int(
-            14,
-            Span {
-                file: "t.strake".into(),
-                start: 42,
-                end: 44,
-            },
-        );
-        let sliced = span_slice_a_names(&got, &want, &fallback);
-        assert_eq!(sliced.start, 40);
-        assert_eq!(sliced.end, 41);
     }
 
     #[test]

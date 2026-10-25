@@ -39,6 +39,15 @@ fn refused_exits_77_e_refused() {
 }
 
 #[test]
+fn refused_computed_seventy_exits_77_e_refused() {
+    let path = golden("refused_computed.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(77));
+    assert!(stderr.contains("E_REFUSED"));
+    assert!(stderr.contains("\"kind\":\"result\""));
+}
+
+#[test]
 fn callee_77_exits_0_no_e_refused() {
     let path = golden("callee_77.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);

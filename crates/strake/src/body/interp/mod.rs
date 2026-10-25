@@ -28,6 +28,8 @@ pub(crate) struct Machine<'a> {
     frames: Vec<Frame>,
     root_return: Option<i64>,
     result_diags: Vec<Diag>,
+    /// When set, a root return of i64 77 is `E_REFUSED` (test/property export only).
+    test_channel: bool,
 }
 
 struct Frame {
@@ -49,6 +51,19 @@ pub(crate) enum ExecFault {
 
 impl<'a> Machine<'a> {
     pub(crate) fn new(program: &'a Program, fuel: i64, host: &'a dyn Host) -> Self {
+        Self::new_with_channel(program, fuel, host, false)
+    }
+
+    pub(crate) fn new_test_channel(program: &'a Program, fuel: i64, host: &'a dyn Host) -> Self {
+        Self::new_with_channel(program, fuel, host, true)
+    }
+
+    fn new_with_channel(
+        program: &'a Program,
+        fuel: i64,
+        host: &'a dyn Host,
+        test_channel: bool,
+    ) -> Self {
         Self {
             program,
             host,
@@ -56,6 +71,7 @@ impl<'a> Machine<'a> {
             frames: Vec::new(),
             root_return: None,
             result_diags: Vec::new(),
+            test_channel,
         }
     }
 
@@ -188,6 +204,7 @@ impl<'a> Machine<'a> {
                 };
                 let v = self.read_reg(inst.args[0])?;
                 let ret_i64 = value_as_i64(&v)?;
+                let is_normal_ret = matches!(&ret_imm, RetImm::Normal);
                 match ret_imm {
                     RetImm::TestFail {
                         want,
@@ -205,16 +222,6 @@ impl<'a> Machine<'a> {
                             patch: None,
                         });
                     }
-                    RetImm::Refused => {
-                        self.result_diags.push(Diag {
-                            code: Code::ERefused,
-                            kind: Kind::Result,
-                            span: inst.span.clone(),
-                            want: None,
-                            got: None,
-                            patch: None,
-                        });
-                    }
                     RetImm::Normal => {}
                 }
                 let call_dst = self.frames.last().unwrap().pending_call_dst;
@@ -225,6 +232,16 @@ impl<'a> Machine<'a> {
                         caller.regs[dst as usize] = Some(v);
                     }
                 } else if self.frames.is_empty() {
+                    if self.test_channel && ret_i64 == 77 && is_normal_ret {
+                        self.result_diags.push(Diag {
+                            code: Code::ERefused,
+                            kind: Kind::Result,
+                            span: inst.span.clone(),
+                            want: None,
+                            got: None,
+                            patch: None,
+                        });
+                    }
                     self.root_return = Some(ret_i64);
                     return Ok(true);
                 }
@@ -363,7 +380,7 @@ pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<TestEx
         .iter()
         .filter(|e| e.is_test)
         .map(|e| {
-            let mut m = Machine::new(program, 100_000, host);
+            let mut m = Machine::new_test_channel(program, 100_000, host);
             let outcome = match m.run_root_function(e.fn_idx) {
                 Ok(ret) => ExportOutcome {
                     trapped: false,

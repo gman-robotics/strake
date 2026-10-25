@@ -40,7 +40,6 @@ pub enum RetImm {
         got: VReg,
         diag_span: Span,
     },
-    Refused,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,18 +258,13 @@ impl Builder {
         );
     }
 
-    pub(crate) fn ret_refused(&mut self, block: usize, span: Span) {
-        let seventy_seven = self.const_i64(block, span.clone(), 77);
-        self.emit(
-            block,
-            Inst {
-                op: Op::Ret,
-                dst: None,
-                args: vec![seventy_seven],
-                imm: Imm::Ret(RetImm::Refused),
-                span,
-            },
-        );
+    pub(crate) fn block_ends_with_ret(&self, block: usize) -> bool {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        self.functions[fn_idx]
+            .blocks
+            .get(block)
+            .and_then(|b| b.insts.last())
+            .is_some_and(|inst| inst.op == Op::Ret)
     }
 
     pub(crate) fn ret_i64(&mut self, block: usize, span: Span, value: i64) {

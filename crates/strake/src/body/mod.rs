@@ -90,6 +90,17 @@ mod tests {
     }
 
     #[test]
+    fn property_export_named_property_dot_name() {
+        let src = "strake 1\n\nproperty smoke\n  ret 0\nend\n";
+        let module = syntax::parse(src, "t.strake").expect("parse");
+        let program = compile_module(&module, false).expect("compile");
+        assert!(program
+            .exports
+            .iter()
+            .any(|e| e.name == "property.smoke" && e.is_test));
+    }
+
+    #[test]
     fn unsupported_fn_call_lowering_returns_exit_70() {
         let src = "strake 1\n\nfn add2(a: i64, b: i64) -> i64\n  x = add i64 a b\n  y = mul i64 x 2\n  ret y\nend\n\nfn twice(a: i64) -> i64\n  r = call add2(a, a)\n  ret r\nend\n\ntest t\n  ret 0\nend\n";
         let tmp = std::env::temp_dir().join("strake_twice_lower.strake");
