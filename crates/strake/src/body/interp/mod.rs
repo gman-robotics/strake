@@ -6,7 +6,7 @@ mod op;
 pub(crate) use ir::{Builder, FinishError};
 pub use ir::{Inst, Program};
 
-use crate::body::diag::{Code, Diag, ExportOutcome, Kind, render_scalar_i64};
+use crate::body::diag::{render_scalar_i64, Code, Diag, ExportOutcome, Kind};
 use crate::body::host::Host;
 use op::{Op, TrapImm};
 

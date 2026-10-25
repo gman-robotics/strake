@@ -401,7 +401,10 @@ mod tests {
     #[test]
     fn render_scalar_i64_is_decimal_literal() {
         assert_eq!(render_scalar_i64(14), "14");
-        assert_eq!(render_scalar_i64(-9223372036854775808), "-9223372036854775808");
+        assert_eq!(
+            render_scalar_i64(-9223372036854775808),
+            "-9223372036854775808"
+        );
     }
 
     #[test]

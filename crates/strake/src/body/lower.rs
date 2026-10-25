@@ -78,7 +78,7 @@ fn lower_fn(b: &mut Builder, f: &FnItem) -> Result<usize, LowerError> {
         let span = f
             .body
             .last()
-            .map(|s| stmt_span(s))
+            .map(stmt_span)
             .unwrap_or_else(|| f.span.clone());
         b.ret_i64(cur, span, 0);
     }
@@ -105,7 +105,7 @@ fn lower_test(
         let span = t
             .body
             .last()
-            .map(|s| stmt_span(s))
+            .map(stmt_span)
             .unwrap_or_else(|| t.span.clone());
         b.ret_i64(cur, span, 0);
     }
@@ -132,7 +132,7 @@ fn lower_property(
         let span = p
             .body
             .last()
-            .map(|s| stmt_span(s))
+            .map(stmt_span)
             .unwrap_or_else(|| p.span.clone());
         b.ret_i64(cur, span, 0);
     }
