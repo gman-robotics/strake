@@ -225,12 +225,18 @@ pub fn test(path: &str, opts: Opts) -> Exit {
         }
     };
     let host = EmptyHost;
-    let outcomes: Vec<ExportOutcome> = body::interp::run_test_exports(&program, &host);
+    let runs = body::interp::run_test_exports(&program, &host);
+    let outcomes: Vec<ExportOutcome> = runs.iter().map(|r| r.outcome).collect();
     let code = diag::status(&outcomes);
+    let stderr = runs
+        .iter()
+        .flat_map(|r| r.diags.iter())
+        .map(diag_stderr)
+        .collect::<String>();
     Exit {
         code,
         stdout: String::new(),
-        stderr: String::new(),
+        stderr,
     }
 }
 

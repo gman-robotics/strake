@@ -188,6 +188,11 @@ pub struct Span {
     pub end: u32,
 }
 
+/// Render a scalar immediate for catalog `want`/`got` fields (§2.8, catalog `render`).
+pub(crate) fn render_scalar_i64(n: i64) -> String {
+    n.to_string()
+}
+
 /// One catalog diagnostic before rendering.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diag {
@@ -366,6 +371,15 @@ mod tests {
             },
         ];
         assert_eq!(status(&exports), 0);
+    }
+
+    #[test]
+    fn render_scalar_i64_is_decimal_literal() {
+        assert_eq!(render_scalar_i64(14), "14");
+        assert_eq!(
+            render_scalar_i64(-9223372036854775808),
+            "-9223372036854775808"
+        );
     }
 
     #[test]

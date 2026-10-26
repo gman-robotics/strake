@@ -33,6 +33,16 @@ pub struct Inst {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RetImm {
+    Normal,
+    TestFail {
+        want: VReg,
+        got: VReg,
+        diag_span: Span,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Imm {
     None,
@@ -45,6 +55,7 @@ pub enum Imm {
     Blocks(Vec<usize>),
     Fn(usize),
     Trap(TrapImm),
+    Ret(RetImm),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -216,10 +227,44 @@ impl Builder {
                 op: Op::Ret,
                 dst: None,
                 args: vec![value],
-                imm: Imm::None,
+                imm: Imm::Ret(RetImm::Normal),
                 span,
             },
         );
+    }
+
+    pub(crate) fn ret_test_fail(
+        &mut self,
+        block: usize,
+        span: Span,
+        want: VReg,
+        got: VReg,
+        diag_span: Span,
+    ) {
+        let one = self.const_i64(block, span.clone(), 1);
+        self.emit(
+            block,
+            Inst {
+                op: Op::Ret,
+                dst: None,
+                args: vec![one],
+                imm: Imm::Ret(RetImm::TestFail {
+                    want,
+                    got,
+                    diag_span,
+                }),
+                span,
+            },
+        );
+    }
+
+    pub(crate) fn block_ends_with_ret(&self, block: usize) -> bool {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        self.functions[fn_idx]
+            .blocks
+            .get(block)
+            .and_then(|b| b.insts.last())
+            .is_some_and(|inst| inst.op == Op::Ret)
     }
 
     pub(crate) fn ret_i64(&mut self, block: usize, span: Span, value: i64) {
@@ -279,19 +324,20 @@ impl Builder {
         );
     }
 
-    /// `assert.eq` desugar: on mismatch `ret 1`, else continue in the returned block.
+    /// `assert.eq` desugar: on mismatch `ret` with `TestFail` sidecar, else continue.
     pub(crate) fn assert_eq_i64(
         &mut self,
         block: usize,
         span: Span,
         got: VReg,
         want: VReg,
+        diag_span: Span,
     ) -> usize {
         let eq = self.eq_i64(block, span.clone(), got, want);
         let fail = self.new_block();
         let pass = self.new_block();
         self.br_if(block, span.clone(), eq, pass, fail);
-        self.ret_i64(fail, span.clone(), 1);
+        self.ret_test_fail(fail, span.clone(), want, got, diag_span);
         pass
     }
 

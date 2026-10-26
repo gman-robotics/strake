@@ -1,0 +1,6 @@
+strake 1
+
+test computed.seventy
+  x = add i64 70 7
+  ret x
+end

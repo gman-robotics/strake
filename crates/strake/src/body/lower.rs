@@ -1,9 +1,10 @@
 //! Lower checked A into strake-1 via the IR builder (no opcode names).
 
 use super::check::Sketch;
+use super::diag::Span;
 use super::interp::Program;
 use super::interp::{Builder, FinishError};
-use super::syntax::{BinOp, FnItem, Item, Operand, Rhs, Stmt, TestItem};
+use super::syntax::{BinOp, FnItem, Item, Operand, PropertyItem, Rhs, Stmt, TestItem};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LowerError {
@@ -40,6 +41,11 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
                 let idx = lower_test(&mut b, t, &fn_indices)?;
                 b.add_export(&export, idx, true);
             }
+            Item::Property(p) => {
+                let export = format!("property.{}", p.name);
+                let idx = lower_property(&mut b, p, &fn_indices)?;
+                b.add_export(&export, idx, true);
+            }
             Item::Fn(f) => {
                 if f.private {
                     continue;
@@ -73,15 +79,74 @@ fn lower_test(
     fn_indices: &std::collections::HashMap<String, usize>,
 ) -> Result<usize, LowerError> {
     let idx = b.begin_function(&format!("test.{}", t.name), 0);
+    lower_test_or_property_body(b, &t.body, t.span.clone(), fn_indices)?;
+    Ok(idx)
+}
+
+fn lower_property(
+    b: &mut Builder,
+    p: &PropertyItem,
+    fn_indices: &std::collections::HashMap<String, usize>,
+) -> Result<usize, LowerError> {
+    let idx = b.begin_function(&format!("property.{}", p.name), 0);
+    lower_test_or_property_body(b, &p.body, p.span.clone(), fn_indices)?;
+    Ok(idx)
+}
+
+fn lower_test_or_property_body(
+    b: &mut Builder,
+    body: &[Stmt],
+    default_span: Span,
+    fn_indices: &std::collections::HashMap<String, usize>,
+) -> Result<(), LowerError> {
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     let mut cur = entry;
-    for stmt in &t.body {
+    for stmt in body {
         cur = lower_stmt_test(b, cur, stmt, &mut env, fn_indices)?;
     }
-    let unit_span = t.span.clone();
-    b.ret_i64(cur, unit_span, 0);
-    Ok(idx)
+    if !b.block_ends_with_ret(cur) {
+        let span = body.last().map(stmt_span).unwrap_or(default_span);
+        b.ret_i64(cur, span, 0);
+    }
+    Ok(())
+}
+
+/// Narrow a diagnostic span to A-level name operands (invariant 6).
+fn span_slice_a_names(got: &Operand, want: &Operand, fallback: &Span) -> Span {
+    let mut spans: Vec<&Span> = Vec::new();
+    if let Operand::Name(_, s) = got {
+        spans.push(s);
+    }
+    if let Operand::Name(_, s) = want {
+        spans.push(s);
+    }
+    if spans.is_empty() {
+        return fallback.clone();
+    }
+    let start = spans.iter().map(|s| s.start).min().unwrap();
+    let end = spans.iter().map(|s| s.end).max().unwrap();
+    Span {
+        file: fallback.file.clone(),
+        start,
+        end,
+    }
+}
+
+fn stmt_span(stmt: &Stmt) -> Span {
+    match stmt {
+        Stmt::Assign { span, .. }
+        | Stmt::Ret { span, .. }
+        | Stmt::If { span, .. }
+        | Stmt::Loop { span, .. }
+        | Stmt::For { span, .. }
+        | Stmt::Forall { span, .. }
+        | Stmt::Trap { span }
+        | Stmt::AssertEq { span, .. }
+        | Stmt::Break { span, .. }
+        | Stmt::Continue { span, .. }
+        | Stmt::Match { span, .. } => span.clone(),
+    }
 }
 
 fn lower_stmt(
@@ -116,7 +181,7 @@ fn lower_stmt(
 fn lower_if(
     b: &mut Builder,
     block: usize,
-    span: &crate::body::diag::Span,
+    span: &Span,
     cond: &Operand,
     then_body: &[Stmt],
     else_body: &[Stmt],
@@ -197,7 +262,8 @@ fn lower_stmt_test(
         Stmt::AssertEq { span, got, want } => {
             let g = lower_operand(b, block, got, env)?;
             let w = lower_operand(b, block, want, env)?;
-            Ok(b.assert_eq_i64(block, span.clone(), g, w))
+            let diag_span = span_slice_a_names(got, want, span);
+            Ok(b.assert_eq_i64(block, span.clone(), g, w, diag_span))
         }
         Stmt::Ret { span, value } => {
             let v = lower_operand(b, block, value, env)?;
@@ -277,6 +343,9 @@ fn lower_operand(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::body::syntax::Operand;
+
     #[test]
     fn lower_source_never_names_branch_control() {
         let src = include_str!("lower.rs");
@@ -285,5 +354,33 @@ mod tests {
         assert!(!body.contains(".br("));
         assert!(!body.contains("br("));
         assert!(!body.contains("phi("));
+    }
+
+    #[test]
+    fn span_slice_a_names_uses_name_operands_only() {
+        let fallback = Span {
+            file: "t.strake".into(),
+            start: 0,
+            end: 100,
+        };
+        let got = Operand::Name(
+            "r".into(),
+            Span {
+                file: "t.strake".into(),
+                start: 40,
+                end: 41,
+            },
+        );
+        let want = Operand::Int(
+            14,
+            Span {
+                file: "t.strake".into(),
+                start: 42,
+                end: 44,
+            },
+        );
+        let sliced = span_slice_a_names(&got, &want, &fallback);
+        assert_eq!(sliced.start, 40);
+        assert_eq!(sliced.end, 41);
     }
 }
