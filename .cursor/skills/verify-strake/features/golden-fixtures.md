@@ -1,25 +1,26 @@
-# golden fixtures (extend when present)
+# golden fixtures
 
 ## Sub-features
 
-- Planned: `golden/*.strake` oracles for parse, check, fmt, test, run (see `docs/plans/phase1-architecture.md` minimum goldens).
-- Not on `main` until T2+ lands; `verify.sh` skips this block if `golden/` is missing.
+- `golden/*.strake` oracles for parse, fmt, check, test (T2–T4 on `main`).
+- Black-box coverage also lives in `crates/strake/tests/t2_golden.rs`, `t3_golden.rs`, and `t4_golden.rs`; this feature is the **CLI smoke** slice in `verify.sh`.
 
 ## How to get to it (user POV)
 
-After fixtures exist at the repository root, run e.g. `strake fmt golden/fuel_twice.strake` per the architecture doc.
+From the repo root after building `strake`:
+
+```bash
+strake test golden/add2_basic.strake
+strake check golden/priv.strake
+strake fmt golden/add2_worked.strake
+```
 
 ## Driving it with verify.sh
 
-When `golden/` exists, `verify.sh` runs the smoke list in `GOLDEN_SMOKE` inside the script (start with fmt idempotence on any `golden/*.strake` once T2 adds files). Add one row per architecture table entry as features become implemented.
-
-Example future row (do not enable until file exists):
-
-```bash
-strake fmt golden/fuel_twice.strake   # exit 0, stdout equals file bytes
-```
+When `golden/` exists, `verify.sh` runs `GOLDEN_SMOKE` (exit + subcommand args) and a fmt idempotence check on `golden/add2_worked.strake`. Add rows when new goldens ship on `main` (do not enable T5-only fixtures until that code merges).
 
 ## Gotchas
 
-- Do not commit verification edits to `golden/*.strake` in the verify-skill PR; only extend this map and `verify.sh` when those files are on your branch's base.
-- PR #5 (`tginter_ca/parse-fmt-b34d`) adds parse/fmt goldens; extend `GOLDEN_SMOKE` after merge without touching stubbed `crates/strake/src/**` in the verify PR.
+- Do not commit verification edits to `golden/*.strake` in verify-skill PRs; only extend this map and `verify.sh` when files are on your branch's base.
+- `fmt` prints formatted source on stdout; the smoke check diffs stdout against the committed golden bytes (does not rewrite files).
+- Codeless rejections (e.g. `fuel_twice.strake`) exit `3` with plain stderr — covered in crate tests, not the minimal smoke list.

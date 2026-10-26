@@ -114,19 +114,24 @@ pass "cargo test"
 if [[ -d "$ROOT/golden" ]]; then
   echo "== golden-smoke (golden/ present) ==" | tee -a "$SUMMARY"
   # Extend GOLDEN_SMOKE as T2+ features land; each entry: "exit:cmd args..."
+  # Each entry: "exit:subcommand args..." (strake binary is prepended).
   GOLDEN_SMOKE=(
-    # "0:fmt golden/example.strake"
+    "0:test golden/add2_basic.strake"
+    "0:check golden/priv.strake"
   )
-  if [[ ${#GOLDEN_SMOKE[@]} -eq 0 ]]; then
-    echo "golden/: present but GOLDEN_SMOKE empty — add cases in verify.sh" >>"$SUMMARY"
-  else
-    for entry in "${GOLDEN_SMOKE[@]}"; do
-      want_exit="${entry%%:*}"
-      cmd_rest="${entry#*:}"
-      # shellcheck disable=SC2086
-      assert_exit "golden-${cmd_rest// /-}" "$want_exit" $cmd_rest
-    done
-  fi
+  for entry in "${GOLDEN_SMOKE[@]}"; do
+    want_exit="${entry%%:*}"
+    cmd_rest="${entry#*:}"
+    safe_name="golden-${cmd_rest// /-}"
+    safe_name="${safe_name//\//-}"
+    # shellcheck disable=SC2086
+    assert_exit "$safe_name" "$want_exit" "$BIN" $cmd_rest
+  done
+  echo "== golden-fmt-idempotent ==" | tee -a "$SUMMARY"
+  assert_exit "golden-fmt-add2-worked" 0 "$BIN" fmt golden/add2_worked.strake
+  diff -q golden/add2_worked.strake "$EVID_DIR/golden-fmt-add2-worked.txt.stdout" >/dev/null \
+    || fail "golden fmt add2_worked stdout mismatch"
+  pass "golden fmt add2_worked idempotent"
 else
   echo "golden/: absent — skipped (see features/golden-fixtures.md)" >>"$SUMMARY"
 fi

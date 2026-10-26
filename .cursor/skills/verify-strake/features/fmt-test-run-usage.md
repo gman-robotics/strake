@@ -1,4 +1,4 @@
-# fmt, test, and run usage stubs
+# fmt, test, and run usage (and golden smoke)
 
 ## Sub-features
 
@@ -22,5 +22,5 @@ Each expects exit `2` and a usage line on stderr matching `main.rs` dispatch.
 
 ## Gotchas
 
-- `test` internally references `diag::status` for the status-guard test contract; that is not user-visible until real `test` runs.
-- When parse/exec land, replace these checks with golden-driven flows.
+- `verify.sh` still asserts **usage-only** for bare `fmt`, `test`, and `run` (exit `2`). Real `fmt`/`test` on goldens are in [golden-fixtures](golden-fixtures.md).
+- `run` remains a usage stub on `main` (`lib.rs`); do not add golden `run` rows until execution ships.
