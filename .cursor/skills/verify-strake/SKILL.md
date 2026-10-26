@@ -9,7 +9,7 @@ description: >-
 
 # verify-strake
 
-Drive the **Strake reference toolchain** the way a user does: compile the CLI, invoke subcommands, and assert exit codes and stdio. On `main` today the language pipeline is stubbed; this skill proves the **shipped CLI contract** (usage, `build` stub, diag wiring) and the crate test suite. When `golden/*.strake` lands (e.g. T2 parse/fmt), extend `features/golden-fixtures.md` and the optional block in `scripts/verify.sh`.
+Drive the **Strake reference toolchain** the way a user does: compile the CLI, invoke subcommands, and assert exit codes and stdio. On `main` today this skill proves the **shipped CLI contract** (usage, `build` stub, diag wiring), **golden smoke** (`golden/*.strake` via `verify.sh`), and the crate test suite. Extend `features/golden-fixtures.md` and `GOLDEN_SMOKE` in `scripts/verify.sh` when new goldens land (skip unmerged feature branches such as T5 test channel).
 
 ## Launch
 
@@ -43,9 +43,9 @@ Full product verification (build + doctor + CLI scenarios + `cargo test`):
 
 Harness: subprocess calls to the built `strake` binary plus `cargo test --locked -p strake`. Selectors are **argv and exit codes**, not coordinates.
 
-Optional golden pass (only when `golden/` exists at repo root):
+Golden pass (when `golden/` exists at repo root):
 
-- The script auto-runs `golden-smoke` cases listed in `features/golden-fixtures.md` if that directory is present.
+- `GOLDEN_SMOKE` CLI rows plus fmt idempotence on `golden/add2_worked.strake` (see `features/golden-fixtures.md`).
 
 ## Evidence
 

@@ -9,6 +9,6 @@ Index of user-facing surfaces to prove on the reference CLI. Each file is one fe
 | [check-usage-contract](check-usage-contract.md) | yes | add real `check` on files |
 | [fmt-test-run-usage](fmt-test-run-usage.md) | usage only | wire real commands |
 | [rust-test-suite](rust-test-suite.md) | yes | add golden black-box rows |
-| [golden-fixtures](golden-fixtures.md) | placeholder | yes (T2 / PR #5+) |
+| [golden-fixtures](golden-fixtures.md) | smoke (T2–T4) | extend with new goldens |
 
 Run all mapped features that apply: `.cursor/skills/verify-strake/scripts/verify.sh`.
