@@ -313,3 +313,38 @@ fn loop_dual_loop_join_exits_0() {
 fn if_nested_then_else_direct_check_e_if_phi() {
     check_e_if_phi(&golden("if_nested_then_else_direct_e_if_phi.strake"));
 }
+
+fn check_e_if_phi_no_lower_70(path: &Path) {
+    check_e_if_phi(path);
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(1), "stderr={stderr}");
+    assert!(
+        !stderr.contains("lower:") && !stderr.contains("unbound name in lower"),
+        "stderr={stderr}"
+    );
+}
+
+#[test]
+fn if_nested_inner_x_else_x3_check_e_if_phi_no_lower_70() {
+    check_e_if_phi_no_lower_70(&golden("if_nested_inner_x_else_x3_e_if_phi.strake"));
+}
+
+#[test]
+fn if_nested_inner_loop_x_else_x3_check_e_if_phi_no_lower_70() {
+    check_e_if_phi_no_lower_70(&golden("if_nested_inner_loop_x_else_x3_e_if_phi.strake"));
+}
+
+#[test]
+fn loop_zero_param_break_check_e_type() {
+    check_e_type(&golden("loop_zero_param_break_e_type.strake"));
+}
+
+#[test]
+fn loop_zero_param_continue_check_e_type() {
+    check_e_type(&golden("loop_zero_param_continue_e_type.strake"));
+}
+
+#[test]
+fn nested_loop_no_break_use_check_e_type() {
+    check_e_type(&golden("nested_loop_no_break_use_e_type.strake"));
+}

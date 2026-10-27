@@ -216,10 +216,16 @@ fn verify_function_ssa(func: &Function) -> Result<(), FinishError> {
             .filter(|i| i.op == Op::Phi)
             .map(|i| i.dst.unwrap_or(0))
             .collect();
-        let mut seen_phi = false;
+        let mut phi_prefix = true;
         for inst in &block.insts {
             if inst.op == Op::Phi {
-                seen_phi = true;
+                if !phi_prefix {
+                    return Err(FinishError::SsaBlockTerminator {
+                        fn_name: func.name.clone(),
+                        block: bi,
+                        detail: "phi is not a prefix of the block".into(),
+                    });
+                }
                 let dst = inst.dst.unwrap_or(0);
                 for &arg in &inst.args {
                     for &other in &phi_dsts {
@@ -232,12 +238,8 @@ fn verify_function_ssa(func: &Function) -> Result<(), FinishError> {
                         }
                     }
                 }
-            } else if seen_phi && !is_terminator(inst.op) {
-                return Err(FinishError::SsaBlockTerminator {
-                    fn_name: func.name.clone(),
-                    block: bi,
-                    detail: "phi is not a prefix of the block".into(),
-                });
+            } else if !is_terminator(inst.op) {
+                phi_prefix = false;
             }
         }
     }
@@ -706,22 +708,6 @@ impl Builder {
         );
     }
 
-    /// Rebuild tail as back-edge copies then `br header` (SSA: `back` defs live on tail).
-    pub(crate) fn refresh_tail_back_edge(
-        &mut self,
-        tail: usize,
-        header: usize,
-        span: Span,
-        pairs: &[(VReg, VReg)],
-    ) {
-        let fn_idx = self.cur_fn.expect("begin_function first");
-        self.functions[fn_idx].blocks[tail].insts.clear();
-        for (back, src) in pairs {
-            self.copy_i64(tail, span.clone(), *back, *src);
-        }
-        self.jump(tail, span, header);
-    }
-
     fn br(&mut self, block: usize, span: Span, target: usize) {
         self.emit(
             block,
@@ -1145,6 +1131,91 @@ mod tests {
                 phi_dst: 1,
                 ..
             } if fn_name == "bad_imm"
+        ));
+    }
+
+    #[test]
+    fn finish_rejects_ssa_phi_parallel_alias() {
+        let mut b = Builder::new();
+        b.begin_function("parallel_phi", 0);
+        let entry = 0;
+        let then_b = b.new_block();
+        let else_b = b.new_block();
+        let join = b.new_block();
+        let cond = b.const_i64(entry, span(), 1);
+        b.br_if(entry, span(), cond, then_b, else_b);
+        let v1 = b.const_i64(then_b, span(), 1);
+        let v2 = b.const_i64(else_b, span(), 2);
+        b.br(then_b, span(), join);
+        b.br(else_b, span(), join);
+        let phi1 = b.alloc_vreg();
+        b.phi(join, span(), phi1, &[(then_b, v1), (else_b, v2)]);
+        let phi2 = b.alloc_vreg();
+        b.phi(join, span(), phi2, &[(then_b, phi1), (else_b, phi1)]);
+        b.ret(join, span(), phi2);
+        let err = b.finish().unwrap_err();
+        assert!(matches!(
+            err,
+            FinishError::SsaPhiParallel {
+                fn_name,
+                block: 3,
+                phi_dst,
+                ..
+            } if fn_name == "parallel_phi" && phi_dst == phi2
+        ));
+    }
+
+    #[test]
+    fn finish_rejects_phi_after_non_phi() {
+        let s = span();
+        let func = Function {
+            name: "phi_not_prefix".into(),
+            param_count: 0,
+            blocks: vec![
+                Block {
+                    insts: vec![Inst {
+                        op: Op::Br,
+                        dst: None,
+                        args: vec![],
+                        imm: Imm::Block(1),
+                        span: s.clone(),
+                    }],
+                },
+                Block {
+                    insts: vec![
+                        Inst {
+                            op: Op::ConstI64,
+                            dst: Some(1),
+                            args: vec![],
+                            imm: Imm::I64(1),
+                            span: s.clone(),
+                        },
+                        Inst {
+                            op: Op::Phi,
+                            dst: Some(2),
+                            args: vec![1],
+                            imm: Imm::Blocks(vec![0]),
+                            span: s.clone(),
+                        },
+                        Inst {
+                            op: Op::Ret,
+                            dst: None,
+                            args: vec![2],
+                            imm: Imm::Ret(RetImm::Normal),
+                            span: s.clone(),
+                        },
+                    ],
+                },
+            ],
+        };
+        let err = verify_function_ssa(&func).unwrap_err();
+        assert!(matches!(
+            err,
+            FinishError::SsaBlockTerminator {
+                fn_name,
+                detail,
+                ..
+            } if fn_name == "phi_not_prefix" && detail.contains("phi is not a prefix")
         ));
     }
 }

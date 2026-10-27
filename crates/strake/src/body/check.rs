@@ -443,6 +443,10 @@ fn check_stmt(
         Stmt::Loop {
             span, params, body, ..
         } => {
+            if params.is_empty() {
+                diags.push(type_diag(span.clone()));
+                return;
+            }
             let site_idx = state.carry.loops.len();
             let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
             let site_id = state.alloc_site_id();
@@ -544,14 +548,6 @@ fn check_stmt(
         }
         _ => {}
     }
-}
-
-fn arm_supplies_loop_exit(arm: &[Stmt], other: &[Stmt], name: &str) -> bool {
-    let supplies = carry::join_name_supplies(arm, other);
-    supplies
-        .iter()
-        .find(|s| s.name == name)
-        .is_some_and(publishes_loop_join)
 }
 
 fn check_continue_edges(
@@ -667,6 +663,10 @@ fn check_nested_loop_in_loop_body(
     fn_ret: Option<&Type>,
     diags: &mut Vec<Diag>,
 ) {
+    if params.is_empty() {
+        diags.push(type_diag(span.clone()));
+        return;
+    }
     let site_idx = state.carry.loops.len();
     let param_names_vec: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
     let site_id = state.alloc_site_id();
@@ -717,11 +717,14 @@ fn check_nested_loop_in_loop_body(
         });
     }
     state.loop_stack.pop();
-    for p in params {
-        if let Some(ty) = loop_ctx.types.get(&p.name) {
-            loop_ctx.phi_gaps.remove(&p.name);
-            ctx.phi_gaps.remove(&p.name);
-            ctx.types.insert(p.name.clone(), ty.clone());
+    let site = &state.carry.loops[site_idx];
+    if !site.breaks.is_empty() {
+        for p in params {
+            if let Some(ty) = loop_ctx.types.get(&p.name) {
+                loop_ctx.phi_gaps.remove(&p.name);
+                ctx.phi_gaps.remove(&p.name);
+                ctx.types.insert(p.name.clone(), ty.clone());
+            }
         }
     }
 }
@@ -804,95 +807,75 @@ fn check_if(
         );
     }
 
-    for (name, (ty, span)) in &then_tops {
-        if else_tops.contains_key(name) {
-            if pre.contains_key(name) {
-                continue;
-            }
-            if ctx.types.contains_key(name) {
-                diags.push(shadow_diag(span.clone()));
-            } else {
-                ctx.types.insert(name.clone(), ty.clone());
-                ctx.phi_gaps.remove(name);
-            }
-        } else if arm_supplies_loop_exit(then_body, else_body, name) {
-            if pre.contains_key(name) {
-                continue;
-            }
-            if let Some(ety) = else_ctx.types.get(name) {
-                if ctx.types.contains_key(name) {
-                    diags.push(shadow_diag(span.clone()));
-                } else {
-                    ctx.types.insert(name.clone(), ety.clone());
-                    ctx.phi_gaps.remove(name);
-                }
-            } else {
-                ctx.phi_gaps.insert(name.clone());
-            }
-        } else {
-            ctx.phi_gaps.insert(name.clone());
-        }
-    }
-    for name in else_tops.keys() {
-        if !then_tops.contains_key(name) && !pre.contains_key(name) {
-            if then_ctx.types.contains_key(name) {
-                ctx.types.insert(name.clone(), then_ctx.types[name].clone());
-                ctx.phi_gaps.remove(name);
-            } else if arm_supplies_loop_exit(else_body, then_body, name) {
-                if let Some(ety) = else_ctx.types.get(name) {
-                    ctx.types.insert(name.clone(), ety.clone());
-                    ctx.phi_gaps.remove(name);
-                } else {
-                    ctx.phi_gaps.insert(name.clone());
-                }
-            } else {
-                ctx.phi_gaps.insert(name.clone());
-            }
-        }
-    }
-
     let site = &state.carry.joins[join_site_idx];
     for supply in &site.names {
-        if !publishes_loop_join(supply) {
-            continue;
-        }
         let name = &supply.name;
         if pre.contains_key(name) {
             continue;
         }
-        let t_ty = join_arm_type(
-            then_body,
-            &supply.then_arm,
-            name,
-            &then_tops,
-            &then_ctx.types,
-            &then_ctx.phi_gaps,
-            fns,
-            diags,
-        );
-        let e_ty = join_arm_type(
-            else_body,
-            &supply.else_arm,
-            name,
-            &else_tops,
-            &else_ctx.types,
-            &else_ctx.phi_gaps,
-            fns,
-            diags,
-        );
-        match (t_ty, e_ty) {
-            (Some(a), Some(b)) if types_compatible(&a, &b) => {
-                if let Some(existing) = ctx.types.get(name) {
-                    if !types_compatible(existing, &a) {
-                        diags.push(type_diag(span.clone()));
+        match (supply.then_arm, supply.else_arm) {
+            (ArmSrc::Assign, ArmSrc::Assign) => {
+                let ty = then_tops
+                    .get(name)
+                    .map(|(t, _)| t.clone())
+                    .or_else(|| else_tops.get(name).map(|(t, _)| t.clone()));
+                if let Some(ty) = ty {
+                    if ctx.types.contains_key(name) {
+                        diags.push(shadow_diag(span.clone()));
+                    } else {
+                        ctx.types.insert(name.clone(), ty);
+                        ctx.phi_gaps.remove(name);
                     }
-                } else {
-                    ctx.types.insert(name.clone(), a);
-                    ctx.phi_gaps.remove(name);
                 }
             }
-            (Some(_), Some(_)) => diags.push(type_diag(span.clone())),
-            _ => diags.push(type_diag(span.clone())),
+            (ArmSrc::Assign, ArmSrc::LoopExit)
+            | (ArmSrc::LoopExit, ArmSrc::Assign)
+            | (ArmSrc::LoopExit, ArmSrc::LoopExit) => {
+                if !publishes_loop_join(supply) {
+                    ctx.phi_gaps.insert(name.clone());
+                    continue;
+                }
+                let t_ty = join_arm_type(
+                    then_body,
+                    &supply.then_arm,
+                    name,
+                    &then_tops,
+                    &then_ctx.types,
+                    &then_ctx.phi_gaps,
+                    fns,
+                    diags,
+                );
+                let e_ty = join_arm_type(
+                    else_body,
+                    &supply.else_arm,
+                    name,
+                    &else_tops,
+                    &else_ctx.types,
+                    &else_ctx.phi_gaps,
+                    fns,
+                    diags,
+                );
+                match (t_ty, e_ty) {
+                    (Some(a), Some(b)) if types_compatible(&a, &b) => {
+                        if let Some(existing) = ctx.types.get(name) {
+                            if !types_compatible(existing, &a) {
+                                diags.push(type_diag(span.clone()));
+                            }
+                        } else {
+                            ctx.types.insert(name.clone(), a);
+                            ctx.phi_gaps.remove(name);
+                        }
+                    }
+                    (Some(_), Some(_)) => diags.push(type_diag(span.clone())),
+                    _ => {
+                        ctx.phi_gaps.insert(name.clone());
+                    }
+                }
+            }
+            (ArmSrc::Absent, ArmSrc::Absent) => {}
+            _ => {
+                ctx.phi_gaps.insert(name.clone());
+            }
         }
     }
 }
