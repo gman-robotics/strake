@@ -299,9 +299,8 @@ mod tests {
         let tmp = std::env::temp_dir().join("strake_lib_lower70.strake");
         std::fs::write(&tmp, src).expect("write");
         let exit = test(tmp.to_str().unwrap(), Opts::default());
-        assert_eq!(exit.code, body::LOWER_ABORT_EXIT);
-        assert!(!exit.stderr.contains("\"code\""));
-        assert!(exit.stderr.contains("lower:"));
+        assert_eq!(exit.code, 1);
+        assert!(exit.stderr.contains("E_SEQ"));
     }
 
     #[test]

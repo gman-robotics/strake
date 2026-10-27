@@ -2,7 +2,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use super::carry::{publishes_loop_join, shared_assign_join_name, JoinSite};
+use super::carry::{publishes_loop_join, shared_assign_join_name, JoinSite, LoopSite};
 use super::check::Sketch;
 use super::diag::Span;
 use super::interp::Program;
@@ -41,6 +41,61 @@ struct LoopFrame {
     header: usize,
     exit: usize,
     params: Vec<LoopParamLowering>,
+}
+
+fn verify_loop_frame_against_plan(
+    b: &Builder,
+    frame: &LoopFrame,
+    preheader: usize,
+    site: &LoopSite,
+) -> Result<(), LowerError> {
+    let first = frame
+        .params
+        .first()
+        .ok_or_else(|| LowerError::unsupported("empty loop frame"))?;
+    if first.header_edges.len() != 1 + site.backedges.len() {
+        return Err(LowerError::unsupported(
+            "carry plan backedge count mismatch",
+        ));
+    }
+    let header_preds: std::collections::HashSet<usize> =
+        first.header_edges.iter().map(|(blk, _)| *blk).collect();
+    if !header_preds.contains(&preheader) {
+        return Err(LowerError::unsupported("carry plan missing preheader edge"));
+    }
+    let back_count = header_preds.len() - 1;
+    if back_count != site.backedges.len() {
+        return Err(LowerError::unsupported("carry plan header pred mismatch"));
+    }
+    let mut cfg_hdr = b.cfg_predecessors(frame.header);
+    cfg_hdr.sort_unstable();
+    let mut hdr: Vec<usize> = header_preds.iter().copied().collect();
+    hdr.sort_unstable();
+    if cfg_hdr != hdr {
+        return Err(LowerError::unsupported("carry plan header cfg mismatch"));
+    }
+    if site.breaks.is_empty() {
+        if frame.params.iter().any(|p| !p.exit_edges.is_empty()) {
+            return Err(LowerError::unsupported("carry plan unexpected exit phis"));
+        }
+        return Ok(());
+    }
+    let exit_preds: std::collections::HashSet<usize> = frame
+        .params
+        .first()
+        .map(|p| p.exit_edges.iter().map(|(blk, _)| *blk).collect())
+        .unwrap_or_default();
+    if exit_preds.len() != site.breaks.len() {
+        return Err(LowerError::unsupported("carry plan break pred mismatch"));
+    }
+    let mut cfg_exit = b.cfg_predecessors(frame.exit);
+    cfg_exit.sort_unstable();
+    let mut ex: Vec<usize> = exit_preds.iter().copied().collect();
+    ex.sort_unstable();
+    if cfg_exit != ex {
+        return Err(LowerError::unsupported("carry plan exit cfg mismatch"));
+    }
+    Ok(())
 }
 
 fn finish_loop_frame(b: &mut Builder, frame: &LoopFrame, span: Span) {
@@ -170,6 +225,8 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
             lower_fn_body(&mut b, f, &mut plan, &maps)?;
         }
     }
+    let fn_loops = plan.loop_idx;
+    let fn_joins = plan.join_idx;
     plan.join_idx = 0;
     plan.loop_idx = 0;
     for item in &sketch.module.items {
@@ -193,6 +250,18 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
             }
             _ => {}
         }
+    }
+    let total_loops = sketch.carry.loops.len();
+    let total_joins = sketch.carry.joins.len();
+    if fn_loops + plan.loop_idx != total_loops {
+        return Err(LowerError::unsupported(
+            "carry plan loop site count mismatch",
+        ));
+    }
+    if fn_joins + plan.join_idx != total_joins {
+        return Err(LowerError::unsupported(
+            "carry plan join site count mismatch",
+        ));
     }
     b.finish().map_err(LowerError::Finish)
 }
@@ -386,7 +455,8 @@ fn lower_loop(
         .carry
         .loops
         .get(plan.loop_idx)
-        .ok_or_else(|| LowerError::unsupported("carry plan missing loop site"))?;
+        .ok_or_else(|| LowerError::unsupported("carry plan missing loop site"))?
+        .clone();
     plan.loop_idx += 1;
     if site.params.len() != params.len()
         || site
@@ -442,6 +512,7 @@ fn lower_loop(
         b.jump(cur, span.clone(), header);
     }
     let frame = loops.pop().expect("loop frame");
+    verify_loop_frame_against_plan(b, &frame, entry, &site)?;
     let has_exit_phis = frame.params.iter().any(|p| !p.exit_edges.is_empty());
     finish_loop_frame(b, &frame, span.clone());
     for p in &frame.params {
@@ -520,6 +591,12 @@ fn lower_if(
         phi_pairs.push((else_end, else_v));
     } else if b.block_branch_target(else_end) == Some(join_block) {
         phi_pairs.push((else_end, else_v));
+    }
+    if phi_pairs.is_empty() && b.block_terminates(then_end) && b.block_terminates(else_end) {
+        if !b.block_terminates(join_block) {
+            b.trap_fallthrough(join_block, span.clone());
+        }
+        return Ok(then_end);
     }
     let joined_v = if phi_pairs.is_empty() {
         b.alloc_vreg()

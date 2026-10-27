@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::carry::{
-    self, operands_for_continue, publishes_loop_join, BackEdge, BreakEdge, CarryPlan, JoinSite,
-    LoopSite,
+    self, operands_for_continue, publishes_loop_join, ArmSrc, BackEdge, BreakEdge, CarryPlan,
+    JoinSite, LoopSite,
 };
 use super::diag::{Code, Diag, Kind, Span};
 use super::syntax::{
@@ -304,8 +304,6 @@ fn stmt_seals_block(stmt: &Stmt) -> bool {
             else_body,
             ..
         } => !stmts_may_fall_through(then_body) && !stmts_may_fall_through(else_body),
-        Stmt::Loop { body, .. } => !stmts_may_fall_through(body),
-        Stmt::For { body, .. } | Stmt::Forall { body, .. } => !stmts_may_fall_through(body),
         Stmt::Match { arms, .. } => arms.iter().all(|a| !stmts_may_fall_through(&a.body)),
         _ => false,
     }
@@ -327,8 +325,13 @@ fn check_no_stmt_after_terminator(stmts: &[Stmt], diags: &mut Vec<Diag>) {
             } => {
                 check_no_stmt_after_terminator(then_body, diags);
                 check_no_stmt_after_terminator(else_body, diags);
+                if !stmts_may_fall_through(then_body) && !stmts_may_fall_through(else_body) {
+                    sealed = true;
+                }
             }
-            Stmt::Loop { body, .. } => check_no_stmt_after_terminator(body, diags),
+            Stmt::Loop { body, .. } => {
+                check_no_stmt_after_terminator(body, diags);
+            }
             Stmt::For { body, .. } | Stmt::Forall { body, .. } => {
                 check_no_stmt_after_terminator(body, diags);
             }
@@ -747,7 +750,7 @@ fn check_if(
     let else_tops = top_level_assigns(else_body);
 
     state.carry.joins.push(JoinSite {
-        span,
+        span: span.clone(),
         names: carry::join_name_supplies(then_body, else_body),
     });
 
@@ -832,6 +835,73 @@ fn check_if(
             }
         }
     }
+
+    let site = state.carry.joins.last().expect("join site");
+    for supply in &site.names {
+        if !publishes_loop_join(supply) {
+            continue;
+        }
+        let name = &supply.name;
+        if pre.contains_key(name) {
+            continue;
+        }
+        let t_ty = join_arm_type(then_body, &supply.then_arm, name, &then_tops, fns, diags);
+        let e_ty = join_arm_type(else_body, &supply.else_arm, name, &else_tops, fns, diags);
+        match (t_ty, e_ty) {
+            (Some(a), Some(b)) if types_compatible(&a, &b) => {
+                if let Some(existing) = ctx.types.get(name) {
+                    if !types_compatible(existing, &a) {
+                        diags.push(type_diag(span.clone()));
+                    }
+                } else {
+                    ctx.types.insert(name.clone(), a);
+                    ctx.phi_gaps.remove(name);
+                }
+            }
+            (Some(_), Some(_)) => diags.push(type_diag(span.clone())),
+            _ => diags.push(type_diag(span.clone())),
+        }
+    }
+}
+
+fn join_arm_type(
+    arm: &[Stmt],
+    src: &ArmSrc,
+    name: &str,
+    tops: &HashMap<String, (Type, Span)>,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Option<Type> {
+    match src {
+        ArmSrc::LoopExit => loop_param_init_ty(arm, name, fns, diags),
+        ArmSrc::Assign => tops.get(name).map(|(ty, _)| ty.clone()),
+        ArmSrc::Absent => None,
+    }
+}
+
+fn loop_param_init_ty(
+    arm: &[Stmt],
+    name: &str,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Option<Type> {
+    for stmt in arm {
+        if let Stmt::Loop { params, .. } = stmt {
+            for p in params {
+                if p.name == name {
+                    return Some(operand_ty(
+                        &p.init,
+                        &HashMap::new(),
+                        &HashSet::new(),
+                        fns,
+                        None,
+                        diags,
+                    ));
+                }
+            }
+        }
+    }
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
