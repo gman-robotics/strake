@@ -1,0 +1,12 @@
+strake 1
+
+fuel 5
+
+fn bare() -> i64
+  x = add i64 1 2
+end
+
+test bare_fuel5
+  r = call bare()
+  ret 0
+end

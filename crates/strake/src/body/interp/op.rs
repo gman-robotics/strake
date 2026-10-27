@@ -39,4 +39,6 @@ pub(crate) enum TrapImm {
     Div0,
     Fuel,
     User,
+    /// SSA terminator for “fall off end of block” (exec → codeless trap, exit 2).
+    Fallthrough,
 }

@@ -173,7 +173,11 @@ impl<'a> Machine<'a> {
 
     fn exec_inst(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
         let span = inst.span.clone();
-        if inst.op != Op::Call {
+        let skip_fuel = matches!(
+            inst.op,
+            Op::Trap if matches!(inst.imm, Imm::Trap(TrapImm::Fallthrough))
+        );
+        if inst.op != Op::Call && !skip_fuel {
             self.charge(1, span.clone())?;
         }
         match inst.op {
@@ -362,6 +366,9 @@ impl<'a> Machine<'a> {
                 let Imm::Trap(kind) = inst.imm else {
                     return Err(ExecFault::Codeless("bad trap imm".into()));
                 };
+                if matches!(kind, TrapImm::Fallthrough) {
+                    return Err(ExecFault::Codeless("fall off end of block".into()));
+                }
                 let code = match kind {
                     TrapImm::Fuel => Code::EFuel,
                     TrapImm::Stack => Code::EStack,
@@ -371,6 +378,7 @@ impl<'a> Machine<'a> {
                     TrapImm::Import => Code::EImport,
                     TrapImm::Oob => Code::EOob,
                     TrapImm::User => Code::EType,
+                    TrapImm::Fallthrough => Code::EType,
                 };
                 return Err(ExecFault::Trap { code, span });
             }

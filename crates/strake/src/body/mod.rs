@@ -22,6 +22,13 @@ pub(crate) enum CompileError {
 pub(crate) fn compile_module(module: &Module, draft: bool) -> Result<Program, CompileError> {
     let sketch = check::check(module, draft).map_err(CompileError::Check)?;
     let program = lower::lower(&sketch).map_err(CompileError::Lower)?;
+    #[cfg(debug_assertions)]
+    {
+        for func in &program.functions {
+            interp::ir::verify_function_ssa_public(func)
+                .map_err(|e| CompileError::Lower(LowerError::Finish(e)))?;
+        }
+    }
     Ok(program)
 }
 

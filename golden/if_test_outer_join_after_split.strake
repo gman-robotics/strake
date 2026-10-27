@@ -1,0 +1,13 @@
+strake 1
+
+test if_test_outer_join_after_split
+  c = true
+  if c
+    t = add i64 1 0
+    assert.eq t 1
+  else
+    t = add i64 2 0
+    assert.eq t 2
+  end
+  assert.eq t 1
+end
