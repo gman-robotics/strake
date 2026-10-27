@@ -1,0 +1,10 @@
+strake 1
+
+test if_arm_assert_pass
+  flag = true
+  if flag
+    assert.eq 1 1
+  else
+    assert.eq 0 1
+  end
+end

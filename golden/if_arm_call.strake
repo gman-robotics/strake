@@ -1,0 +1,16 @@
+strake 1
+
+fn helper() -> i64
+  ret 42
+end
+
+test if_arm_call
+  c = true
+  if c
+    x = call helper()
+    assert.eq x 42
+  else
+    x = add i64 0 0
+    assert.eq x 0
+  end
+end

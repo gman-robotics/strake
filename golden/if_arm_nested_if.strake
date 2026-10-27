@@ -1,0 +1,16 @@
+strake 1
+
+test if_arm_nested_if
+  c = true
+  if c
+    if false
+      x = add i64 0 0
+    else
+      x = add i64 1 0
+    end
+    assert.eq x 1
+  else
+    x = add i64 2 0
+    assert.eq x 2
+  end
+end

@@ -362,6 +362,9 @@ impl<'a> Machine<'a> {
                 let Imm::Trap(kind) = inst.imm else {
                     return Err(ExecFault::Codeless("bad trap imm".into()));
                 };
+                if matches!(kind, TrapImm::Fallthrough) {
+                    return Err(ExecFault::Codeless("fall off end of block".into()));
+                }
                 let code = match kind {
                     TrapImm::Fuel => Code::EFuel,
                     TrapImm::Stack => Code::EStack,
@@ -371,6 +374,7 @@ impl<'a> Machine<'a> {
                     TrapImm::Import => Code::EImport,
                     TrapImm::Oob => Code::EOob,
                     TrapImm::User => Code::EType,
+                    TrapImm::Fallthrough => Code::EType,
                 };
                 return Err(ExecFault::Trap { code, span });
             }

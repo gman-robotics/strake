@@ -105,6 +105,14 @@ fn lower_fn_body(b: &mut Builder, f: &FnItem, maps: &CalleeMaps) -> Result<(), L
     for stmt in &f.body {
         cur = lower_stmt(b, cur, stmt, &mut env, maps)?;
     }
+    if !b.block_ends_with_terminator(cur) {
+        let span = f
+            .body
+            .last()
+            .map(stmt_span)
+            .unwrap_or_else(|| f.span.clone());
+        b.trap_fallthrough(cur, span);
+    }
     Ok(())
 }
 
@@ -191,7 +199,7 @@ fn lower_stmt(
 ) -> Result<usize, LowerError> {
     match stmt {
         Stmt::Assign { name, rhs, .. } => {
-            let v = lower_rhs_call(b, block, rhs, env, maps)?;
+            let (block, v) = lower_assign_rhs(b, block, rhs, env, maps)?;
             env.insert(name.clone(), v);
             Ok(block)
         }
@@ -205,7 +213,7 @@ fn lower_stmt(
             cond,
             then_body,
             else_body,
-        } => lower_if(b, block, span, cond, then_body, else_body, env, maps),
+        } => lower_if(b, block, span, cond, then_body, else_body, env, maps, None),
         _ => Err(LowerError::unsupported(
             "statement not supported in this slice",
         )),
@@ -222,16 +230,39 @@ fn lower_if(
     else_body: &[Stmt],
     env: &mut std::collections::HashMap<String, u32>,
     maps: &CalleeMaps,
+    env_bool: Option<&mut std::collections::HashSet<String>>,
 ) -> Result<usize, LowerError> {
     let cond_v = lower_operand(b, block, cond, env)?;
     let join_name = if_join_name(then_body, else_body);
+    let bool_seed: Option<std::collections::HashSet<String>> =
+        env_bool.as_ref().map(|s| (*s).clone());
     let (join_block, joined_v) = b
         .if_join_i64(
             block,
             span.clone(),
             cond_v,
-            |bb, then_b| lower_if_arm(bb, then_b, then_body, env, maps),
-            |bb, else_b| lower_if_arm(bb, else_b, else_body, env, maps),
+            |bb, then_b| {
+                let mut arm_bool = bool_seed.clone().unwrap_or_default();
+                lower_if_arm(
+                    bb,
+                    then_b,
+                    then_body,
+                    env,
+                    maps,
+                    env_bool.is_some().then_some(&mut arm_bool),
+                )
+            },
+            |bb, else_b| {
+                let mut arm_bool = bool_seed.clone().unwrap_or_default();
+                lower_if_arm(
+                    bb,
+                    else_b,
+                    else_body,
+                    env,
+                    maps,
+                    env_bool.is_some().then_some(&mut arm_bool),
+                )
+            },
         )
         .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     if let Some(name) = join_name {
@@ -264,23 +295,79 @@ fn lower_if_arm(
     body: &[Stmt],
     outer_env: &std::collections::HashMap<String, u32>,
     maps: &CalleeMaps,
+    mut env_bool: Option<&mut std::collections::HashSet<String>>,
 ) -> Result<(usize, u32), ()> {
     let mut env = outer_env.clone();
-    let cur = block;
+    let mut cur = block;
     let mut join_v = None;
     for stmt in body {
-        match stmt {
+        cur = match stmt {
             Stmt::Assign { name, rhs, .. } => {
-                let v = lower_rhs_call(b, cur, rhs, &env, maps).map_err(|_| ())?;
+                let (next, v) = lower_assign_rhs(b, cur, rhs, &env, maps).map_err(|_| ())?;
+                cur = next;
                 if join_v.is_none() {
                     join_v = Some(v);
                 }
                 env.insert(name.clone(), v);
+                if let Some(env_bool) = env_bool.as_mut() {
+                    if rhs_is_bool(rhs) {
+                        env_bool.insert(name.clone());
+                    }
+                }
+                cur
+            }
+            Stmt::If {
+                span,
+                cond,
+                then_body,
+                else_body,
+            } => {
+                let joined = if_join_name(then_body, else_body);
+                cur = lower_if(
+                    b,
+                    cur,
+                    span,
+                    cond,
+                    then_body,
+                    else_body,
+                    &mut env,
+                    maps,
+                    env_bool.as_deref_mut(),
+                )
+                .map_err(|_| ())?;
+                if let Some(name) = joined {
+                    if let Some(&v) = env.get(&name) {
+                        join_v = Some(v);
+                    }
+                }
+                cur
+            }
+            Stmt::AssertEq { span, got, want } => {
+                let env_bool = env_bool.as_deref_mut().ok_or(())?;
+                let g = lower_operand(b, cur, got, &env).map_err(|_| ())?;
+                let w = lower_operand(b, cur, want, &env).map_err(|_| ())?;
+                let diag_span = span_slice_a_names(got, want, span);
+                if assert_operands_are_bool(got, want, env_bool) {
+                    b.assert_eq_bool(cur, span.clone(), g, w, diag_span)
+                } else {
+                    b.assert_eq_i64(cur, span.clone(), g, w, diag_span)
+                }
             }
             _ => return Err(()),
-        }
+        };
     }
-    join_v.map(|v| (cur, v)).ok_or(())
+    let v = match join_v {
+        Some(v) => v,
+        None => {
+            let span = Span {
+                file: "lower".into(),
+                start: 0,
+                end: 0,
+            };
+            b.const_i64(cur, span, 0)
+        }
+    };
+    Ok((cur, v))
 }
 
 fn lower_stmt_test(
@@ -294,7 +381,7 @@ fn lower_stmt_test(
 ) -> Result<usize, LowerError> {
     match stmt {
         Stmt::Assign { name, rhs, .. } => {
-            let v = lower_rhs_call(b, block, rhs, env, maps)?;
+            let (block, v) = lower_assign_rhs(b, block, rhs, env, maps)?;
             env.insert(name.clone(), v);
             if rhs_is_bool(rhs) {
                 env_bool.insert(name.clone());
@@ -316,6 +403,22 @@ fn lower_stmt_test(
             b.ret(block, span.clone(), v);
             Ok(block)
         }
+        Stmt::If {
+            span,
+            cond,
+            then_body,
+            else_body,
+        } => lower_if(
+            b,
+            block,
+            span,
+            cond,
+            then_body,
+            else_body,
+            env,
+            maps,
+            Some(env_bool),
+        ),
         _ => Err(LowerError::Unsupported(format!(
             "lower: statement not supported in {body_label}"
         ))),
@@ -382,7 +485,7 @@ fn lower_rhs(
             Ok(b.eq_bool(block, span.clone(), v, false_v))
         }
         Rhs::Operand(op) => Ok(lower_operand(b, block, op, env)?),
-        Rhs::Hole { span, .. } => Ok(b.trap_hole(block, span.clone())),
+        Rhs::Hole { .. } => Err(LowerError::unsupported("hole must be lowered via assign")),
         Rhs::Call { .. } => Err(LowerError::unsupported("call in rhs without indices")),
         _ => Err(LowerError::unsupported("rhs form")),
     }
@@ -406,6 +509,21 @@ fn lower_div(
         Type::Named(name, _) if name == "f64" => Ok(b.div_f64(block, span, l, r)),
         _ => Err(LowerError::unsupported("div type")),
     }
+}
+
+fn lower_assign_rhs(
+    b: &mut Builder,
+    block: usize,
+    rhs: &Rhs,
+    env: &std::collections::HashMap<String, u32>,
+    maps: &CalleeMaps,
+) -> Result<(usize, u32), LowerError> {
+    if let Rhs::Hole { span, .. } = rhs {
+        let (nb, v) = b.trap_hole(block, span.clone());
+        return Ok((nb, v));
+    }
+    let v = lower_rhs_call(b, block, rhs, env, maps)?;
+    Ok((block, v))
 }
 
 fn lower_rhs_call(

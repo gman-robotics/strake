@@ -1,0 +1,21 @@
+strake 1
+
+fn with_if(c: bool) -> i64
+  if c
+    v = add i64 1 0
+  else
+    v = add i64 2 0
+  end
+  ret v
+end
+
+fn plain() -> i64
+  ret 99
+end
+
+test if_nonlast_fn
+  r = call with_if(true)
+  assert.eq r 1
+  p = call plain()
+  assert.eq p 99
+end

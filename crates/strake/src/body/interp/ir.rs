@@ -79,8 +79,113 @@ pub struct Export {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FinishError {
-    InvalidBranchTarget { block: usize, target: usize },
-    InvalidPhi { block: usize, dst: VReg },
+    InvalidBranchTarget {
+        block: usize,
+        target: usize,
+    },
+    InvalidPhi {
+        block: usize,
+        dst: VReg,
+    },
+    SsaBlockTerminator {
+        fn_name: String,
+        block: usize,
+        detail: String,
+    },
+    SsaPhiPredecessor {
+        fn_name: String,
+        block: usize,
+        phi_dst: VReg,
+        pred_block: usize,
+    },
+}
+
+fn is_terminator(op: Op) -> bool {
+    matches!(op, Op::Br | Op::BrIf | Op::BrTable | Op::Ret | Op::Trap)
+}
+
+fn terminator_successors(inst: &Inst) -> Vec<usize> {
+    match inst.op {
+        Op::Br => {
+            if let Imm::Block(t) = inst.imm {
+                vec![t]
+            } else {
+                vec![]
+            }
+        }
+        Op::BrIf | Op::BrTable => {
+            if let Imm::Blocks(ts) = &inst.imm {
+                ts.clone()
+            } else {
+                vec![]
+            }
+        }
+        Op::Ret | Op::Trap => vec![],
+        _ => vec![],
+    }
+}
+
+pub(crate) fn verify_function_ssa_public(func: &Function) -> Result<(), FinishError> {
+    verify_function_ssa(func)
+}
+
+fn verify_function_ssa(func: &Function) -> Result<(), FinishError> {
+    let n = func.blocks.len();
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (bi, block) in func.blocks.iter().enumerate() {
+        if block.insts.is_empty() {
+            return Err(FinishError::SsaBlockTerminator {
+                fn_name: func.name.clone(),
+                block: bi,
+                detail: "block has no instructions".into(),
+            });
+        }
+        let last_idx = block.insts.len() - 1;
+        for (ii, inst) in block.insts.iter().enumerate() {
+            if is_terminator(inst.op) && ii != last_idx {
+                return Err(FinishError::SsaBlockTerminator {
+                    fn_name: func.name.clone(),
+                    block: bi,
+                    detail: "terminator is not the last instruction in the block".into(),
+                });
+            }
+        }
+        let last = &block.insts[last_idx];
+        if !is_terminator(last.op) {
+            return Err(FinishError::SsaBlockTerminator {
+                fn_name: func.name.clone(),
+                block: bi,
+                detail: "block does not end in a terminator".into(),
+            });
+        }
+        for t in terminator_successors(last) {
+            if t < n {
+                predecessors[t].push(bi);
+            }
+        }
+    }
+    for (bi, block) in func.blocks.iter().enumerate() {
+        for inst in &block.insts {
+            if inst.op != Op::Phi {
+                continue;
+            }
+            let Imm::Blocks(phi_preds) = &inst.imm else {
+                continue;
+            };
+            let dst = inst.dst.unwrap_or(0);
+            for pred in phi_preds {
+                if !predecessors[bi].contains(pred) {
+                    return Err(FinishError::SsaPhiPredecessor {
+                        fn_name: func.name.clone(),
+                        block: bi,
+                        phi_dst: dst,
+                        pred_block: *pred,
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(crate) struct Builder {
@@ -425,6 +530,29 @@ impl Builder {
             .is_some_and(|inst| inst.op == Op::Ret)
     }
 
+    pub(crate) fn block_ends_with_terminator(&self, block: usize) -> bool {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        self.functions[fn_idx]
+            .blocks
+            .get(block)
+            .and_then(|b| b.insts.last())
+            .is_some_and(|inst| is_terminator(inst.op))
+    }
+
+    pub(crate) fn trap_fallthrough(&mut self, block: usize, span: Span) {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Trap,
+                dst: Some(dst),
+                args: Vec::new(),
+                imm: Imm::Trap(TrapImm::Fallthrough),
+                span,
+            },
+        );
+    }
+
     pub(crate) fn ret_i64(&mut self, block: usize, span: Span, value: i64) {
         let v = self.const_i64(block, span.clone(), value);
         self.ret(block, span, v);
@@ -541,12 +669,12 @@ impl Builder {
             join_b,
             span.clone(),
             dst,
-            &[(then_b, then_v), (else_b, else_v)],
+            &[(then_end, then_v), (else_end, else_v)],
         );
         Ok((join_b, dst))
     }
 
-    pub(crate) fn trap_hole(&mut self, block: usize, span: Span) -> VReg {
+    pub(crate) fn trap_hole(&mut self, block: usize, span: Span) -> (usize, VReg) {
         let dst = self.alloc_vreg();
         self.emit(
             block,
@@ -558,7 +686,7 @@ impl Builder {
                 span,
             },
         );
-        dst
+        (self.new_block(), dst)
     }
 
     pub(crate) fn add_export(&mut self, name: &str, fn_idx: usize, is_test: bool) {
@@ -620,6 +748,9 @@ impl Builder {
                 }
             }
         }
+        for func in &self.functions {
+            verify_function_ssa(func)?;
+        }
         Ok(Program {
             functions: self.functions,
             exports: self.exports,
@@ -638,6 +769,23 @@ impl FinishError {
             }
             FinishError::InvalidPhi { block, dst } => {
                 format!("lower finish: block {block} phi %{dst} has mismatched predecessors")
+            }
+            FinishError::SsaBlockTerminator {
+                fn_name,
+                block,
+                detail,
+            } => {
+                format!("ssa verify: function `{fn_name}` block {block}: {detail}")
+            }
+            FinishError::SsaPhiPredecessor {
+                fn_name,
+                block,
+                phi_dst,
+                pred_block,
+            } => {
+                format!(
+                    "ssa verify: function `{fn_name}` block {block} phi %{phi_dst}: predecessor block {pred_block} is not a CFG predecessor"
+                )
             }
         }
     }
@@ -680,6 +828,31 @@ mod tests {
         assert!(matches!(
             err,
             FinishError::InvalidBranchTarget { target: 5, .. }
+        ));
+    }
+
+    #[test]
+    fn finish_rejects_phi_pred_not_cfg_edge() {
+        let mut b = Builder::new();
+        b.begin_function("bad_phi", 0);
+        let entry = 0;
+        let arm = b.new_block();
+        let join = b.new_block();
+        b.br(entry, span(), arm);
+        b.br(arm, span(), join);
+        let dst = b.alloc_vreg();
+        // entry branches to arm, not join — phi must not list entry as predecessor of join.
+        b.phi(join, span(), dst, &[(entry, 0)]);
+        b.ret(join, span(), dst);
+        let err = b.finish().unwrap_err();
+        assert!(matches!(
+            err,
+            FinishError::SsaPhiPredecessor {
+                fn_name,
+                block: 2,
+                pred_block: 0,
+                ..
+            } if fn_name == "bad_phi"
         ));
     }
 }
