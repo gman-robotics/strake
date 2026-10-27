@@ -487,6 +487,7 @@ fn if_join_name(then_body: &[Stmt], else_body: &[Stmt]) -> Option<String> {
     match (t, e) {
         (Some(a), Some(b)) if a == b => Some(a),
         (None, Some(name)) if loop_binds_name(then_body, &name) => Some(name),
+        (Some(name), None) if loop_binds_name(else_body, &name) => Some(name),
         _ => None,
     }
 }
