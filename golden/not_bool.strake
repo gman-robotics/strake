@@ -1,0 +1,6 @@
+strake 1
+
+test not.true
+  b = not true
+  assert.eq b false
+end

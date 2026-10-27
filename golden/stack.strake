@@ -1,0 +1,11 @@
+strake 1
+
+fn dive() -> i64
+  r = call dive()
+  ret r
+end
+
+test stack.depth
+  x = call dive()
+  ret 0
+end

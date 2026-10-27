@@ -566,6 +566,20 @@ fn check_rhs(
             }
             ret
         }
+        Rhs::Not { operand, span } => {
+            let t = operand_ty(
+                operand,
+                env,
+                &gaps,
+                fns,
+                Some(&scalar("bool", span.clone())),
+                diags,
+            );
+            if !types_compatible(&t, &scalar("bool", span.clone())) {
+                diags.push(type_diag(span.clone()));
+            }
+            scalar("bool", span.clone())
+        }
         Rhs::Operand(op) => operand_ty(op, env, &gaps, fns, None, diags),
         Rhs::Hole { ty, .. } => ty.clone(),
         _ => scalar("i64", empty_span()),

@@ -1207,7 +1207,7 @@ impl<'a> Parser<'a> {
         }
         if self.eat_ident("ret")? {
             let value = self.parse_operand()?;
-            let end = self.lex.byte_pos();
+            let end = operand_span_end(&value);
             return Ok(Stmt::Ret {
                 span: span(self.file, st, end),
                 value,
@@ -1745,6 +1745,17 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(Type::Named(name, span(self.file, st, en)))
+    }
+}
+
+fn operand_span_end(op: &Operand) -> u32 {
+    match op {
+        Operand::Int(_, s)
+        | Operand::Float(_, s)
+        | Operand::Bytes(_, s)
+        | Operand::Unit(s)
+        | Operand::Bool(_, s)
+        | Operand::Name(_, s) => s.end,
     }
 }
 

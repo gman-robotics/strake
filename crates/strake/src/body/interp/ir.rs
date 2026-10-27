@@ -6,9 +6,17 @@ use crate::body::diag::Span;
 pub type VReg = u32;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportStub {
+    pub path: String,
+    pub fuel_cost: i64,
+}
+
+#[derive(Debug)]
 pub struct Program {
     pub functions: Vec<Function>,
     pub exports: Vec<Export>,
+    pub fuel: i64,
+    pub imports: Vec<ImportStub>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,6 +62,8 @@ pub enum Imm {
     Block(usize),
     Blocks(Vec<usize>),
     Fn(usize),
+    Import(usize),
+    I32Width,
     Trap(TrapImm),
     Ret(RetImm),
 }
@@ -74,20 +84,38 @@ pub(crate) enum FinishError {
 pub(crate) struct Builder {
     functions: Vec<Function>,
     exports: Vec<Export>,
+    imports: Vec<ImportStub>,
+    fuel: i64,
     cur_fn: Option<usize>,
     next_vreg: VReg,
     next_block: usize,
 }
 
+#[allow(dead_code)]
 impl Builder {
     pub(crate) fn new() -> Self {
         Self {
             functions: Vec::new(),
             exports: Vec::new(),
+            imports: Vec::new(),
+            fuel: 100_000,
             cur_fn: None,
             next_vreg: 0,
             next_block: 0,
         }
+    }
+
+    pub(crate) fn set_fuel(&mut self, fuel: i64) {
+        self.fuel = fuel;
+    }
+
+    pub(crate) fn add_import(&mut self, path: &str) -> usize {
+        let idx = self.imports.len();
+        self.imports.push(ImportStub {
+            path: path.to_string(),
+            fuel_cost: 0,
+        });
+        idx
     }
 
     pub(crate) fn begin_function(&mut self, name: &str, params: usize) -> usize {
@@ -184,6 +212,66 @@ impl Builder {
         dst
     }
 
+    pub(crate) fn sub_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Sub,
+                dst: Some(dst),
+                args: vec![lhs, rhs],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn div_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Div,
+                dst: Some(dst),
+                args: vec![lhs, rhs],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn div_i32(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Div,
+                dst: Some(dst),
+                args: vec![lhs, rhs],
+                imm: Imm::I32Width,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn div_f64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Div,
+                dst: Some(dst),
+                args: vec![lhs, rhs],
+                imm: Imm::F64(0),
+                span,
+            },
+        );
+        dst
+    }
+
     pub(crate) fn eq_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
         let dst = self.alloc_vreg();
         self.emit(
@@ -193,6 +281,36 @@ impl Builder {
                 dst: Some(dst),
                 args: vec![lhs, rhs],
                 imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn eq_bool(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Eq,
+                dst: Some(dst),
+                args: vec![lhs, rhs],
+                imm: Imm::Bool(true),
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn const_f64(&mut self, block: usize, span: Span, bits: u64) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::ConstF64,
+                dst: Some(dst),
+                args: Vec::new(),
+                imm: Imm::F64(bits),
                 span,
             },
         );
@@ -214,6 +332,27 @@ impl Builder {
                 dst: Some(dst),
                 args: args.to_vec(),
                 imm: Imm::Fn(callee),
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn call_import(
+        &mut self,
+        block: usize,
+        span: Span,
+        import_idx: usize,
+        args: &[VReg],
+    ) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Call,
+                dst: Some(dst),
+                args: args.to_vec(),
+                imm: Imm::Import(import_idx),
                 span,
             },
         );
@@ -341,6 +480,22 @@ impl Builder {
         pass
     }
 
+    pub(crate) fn assert_eq_bool(
+        &mut self,
+        block: usize,
+        span: Span,
+        got: VReg,
+        want: VReg,
+        diag_span: Span,
+    ) -> usize {
+        let eq = self.eq_bool(block, span.clone(), got, want);
+        let fail = self.new_block();
+        let pass = self.new_block();
+        self.br_if(block, span.clone(), eq, pass, fail);
+        self.ret_test_fail(fail, span.clone(), want, got, diag_span);
+        pass
+    }
+
     /// Structured `if` with one i64 join value per arm (invariant 1).
     pub(crate) fn if_join_i64<F1, F2>(
         &mut self,
@@ -449,6 +604,8 @@ impl Builder {
         Ok(Program {
             functions: self.functions,
             exports: self.exports,
+            fuel: self.fuel,
+            imports: self.imports,
         })
     }
 }

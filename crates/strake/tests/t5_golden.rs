@@ -27,6 +27,8 @@ fn test_fail_exits_1_e_test_want_got() {
     assert!(stderr.contains("\"want\":\"14\""));
     assert!(stderr.contains("\"got\":\"16\""));
     assert!(!stderr.contains('%'));
+    assert!(stderr.contains("\"start\":54"));
+    assert!(stderr.contains("\"end\":55"));
 }
 
 #[test]
@@ -45,6 +47,25 @@ fn refused_computed_seventy_exits_77_e_refused() {
     assert_eq!(status.code(), Some(77));
     assert!(stderr.contains("E_REFUSED"));
     assert!(stderr.contains("\"kind\":\"result\""));
+}
+
+#[test]
+fn fn_without_ret_called_from_test_exits_2_empty_stderr() {
+    let src = "strake 1\n\nfn bare() -> i64\n  x = add i64 1 2\nend\n\ntest t\n  r = call bare()\n  ret 0\nend\n";
+    let tmp = std::env::temp_dir().join("strake_bare_fn.strake");
+    std::fs::write(&tmp, src).expect("write");
+    let (status, _stdout, stderr) = run(&["test", tmp.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(2));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn add2_worked_property_forall_exits_70() {
+    let path = golden("add2_worked.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(70));
+    assert!(stderr.contains("property body"));
+    assert!(!stderr.contains("\"code\""));
 }
 
 #[test]

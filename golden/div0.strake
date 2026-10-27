@@ -1,0 +1,11 @@
+strake 1
+
+test div0.zero
+  x = div i64 1 0
+  ret 0
+end
+
+test div0.min
+  x = div i64 -9223372036854775808 -1
+  ret 0
+end
