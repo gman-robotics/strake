@@ -7,7 +7,8 @@ use super::diag::Span;
 use super::interp::Program;
 use super::interp::{Builder, FinishError};
 use super::syntax::{
-    BinOp, FnItem, ImportSig, Item, LoopParam, Operand, PropertyItem, Rhs, Stmt, TestItem, Type,
+    BinOp, ContinueEdge, FnItem, ImportSig, Item, LoopParam, Operand, PropertyItem, Rhs, Stmt,
+    TestItem, Type,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -21,57 +22,78 @@ struct CalleeMaps<'a> {
     import_indices: &'a std::collections::HashMap<String, usize>,
 }
 
+struct LoopParamLowering {
+    name: String,
+    header_phi: u32,
+    exit_phi: u32,
+    header_edges: Vec<(usize, u32)>,
+    exit_edges: Vec<(usize, u32)>,
+}
+
 struct LoopFrame {
-    exit: usize,
     header: usize,
-    tail: usize,
-    back: std::collections::HashMap<String, u32>,
-    /// Same names/RHS as the loop body's `continue` (for `break` carry-out probes).
-    continue_edges: Vec<(String, Operand)>,
-    /// Apply those carries on `break` only when `continue` immediately follows the loop's `if`.
-    break_carry_on_exit: bool,
+    exit: usize,
+    params: Vec<LoopParamLowering>,
+    param_index: std::collections::HashMap<String, usize>,
 }
 
-fn continue_directly_after_if(body: &[Stmt]) -> bool {
-    body.iter()
-        .enumerate()
-        .find_map(|(i, stmt)| {
-            if matches!(stmt, Stmt::If { .. }) {
-                Some(matches!(body.get(i + 1), Some(Stmt::Continue { .. })))
-            } else {
-                None
-            }
-        })
-        .unwrap_or(false)
-}
-
-fn loop_continue_edges(body: &[Stmt]) -> Vec<(String, Operand)> {
-    for stmt in body.iter().rev() {
-        if let Stmt::Continue { edges, .. } = stmt {
-            return edges
-                .iter()
-                .map(|e| (e.name.clone(), e.value.clone()))
-                .collect();
-        }
+fn finish_loop_frame(b: &mut Builder, frame: &LoopFrame, span: Span) {
+    let header_phis: Vec<(u32, Vec<(usize, u32)>)> = frame
+        .params
+        .iter()
+        .map(|p| (p.header_phi, p.header_edges.clone()))
+        .collect();
+    if !header_phis.is_empty() {
+        b.prepend_merge_regs(frame.header, span.clone(), &header_phis);
     }
-    Vec::new()
+    let exit_phis: Vec<(u32, Vec<(usize, u32)>)> = frame
+        .params
+        .iter()
+        .filter(|p| !p.exit_edges.is_empty())
+        .map(|p| (p.exit_phi, p.exit_edges.clone()))
+        .collect();
+    if !exit_phis.is_empty() {
+        b.prepend_merge_regs(frame.exit, span.clone(), &exit_phis);
+    }
 }
 
-fn apply_break_carries(
+fn record_continue(
     b: &mut Builder,
     block: usize,
     span: Span,
-    frame: &LoopFrame,
+    edges: &[ContinueEdge],
+    frame: &mut LoopFrame,
     env: &std::collections::HashMap<String, u32>,
 ) -> Result<(), LowerError> {
-    if frame.break_carry_on_exit {
-        for (name, op) in &frame.continue_edges {
-            let v = lower_operand(b, block, op, env)?;
-            if let Some(dest) = env.get(name) {
-                b.copy_i64(block, span.clone(), *dest, v);
-            }
-        }
+    let pred = block;
+    for e in edges {
+        let v = lower_operand(b, block, &e.value, env)?;
+        let idx = frame
+            .param_index
+            .get(&e.name)
+            .ok_or_else(|| LowerError::unsupported("continue names unknown loop param"))?;
+        frame.params[*idx].header_edges.push((pred, v));
     }
+    b.jump(block, span, frame.header);
+    Ok(())
+}
+
+fn record_break(
+    b: &mut Builder,
+    block: usize,
+    span: Span,
+    frame: &mut LoopFrame,
+    env: &std::collections::HashMap<String, u32>,
+) -> Result<(), LowerError> {
+    let pred = block;
+    for p in &mut frame.params {
+        let v = env
+            .get(&p.name)
+            .copied()
+            .ok_or_else(|| LowerError::unsupported("unbound loop param on break"))?;
+        p.exit_edges.push((pred, v));
+    }
+    b.jump(block, span, frame.exit);
     Ok(())
 }
 
@@ -287,25 +309,16 @@ fn lower_stmt(
         }
         Stmt::Break { span } => {
             let frame = loops
-                .last()
+                .last_mut()
                 .ok_or_else(|| LowerError::unsupported("break outside loop"))?;
-            apply_break_carries(b, block, span.clone(), frame, env)?;
-            b.jump(block, span.clone(), frame.exit);
+            record_break(b, block, span.clone(), frame, env)?;
             Ok(block)
         }
         Stmt::Continue { span, edges } => {
             let frame = loops
-                .last()
+                .last_mut()
                 .ok_or_else(|| LowerError::unsupported("continue outside loop"))?;
-            let mut pairs: Vec<(u32, u32)> = Vec::new();
-            for e in edges {
-                let v = lower_operand(b, block, &e.value, env)?;
-                if let Some(back) = frame.back.get(&e.name) {
-                    pairs.push((*back, v));
-                }
-            }
-            b.jump(block, span.clone(), frame.tail);
-            b.refresh_tail_back_edge(frame.tail, frame.header, span.clone(), &pairs);
+            record_continue(b, block, span.clone(), edges, frame, env)?;
             Ok(block)
         }
         _ => Err(LowerError::unsupported(
@@ -328,28 +341,32 @@ fn lower_loop(
     let entry = block;
     let header = b.new_block();
     let body_block = b.new_block();
-    let tail = b.new_block();
     let exit = b.new_block();
-    let mut back: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for p in params {
+    let mut frame_params: Vec<LoopParamLowering> = Vec::new();
+    let mut param_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (i, p) in params.iter().enumerate() {
         let init = lower_operand(b, entry, &p.init, env)?;
-        let back_v = b.alloc_vreg();
-        let phi = b.alloc_vreg();
-        b.merge_regs(header, span.clone(), phi, &[(entry, init), (tail, back_v)]);
-        env.insert(p.name.clone(), phi);
-        back.insert(p.name.clone(), back_v);
+        let header_phi = b.alloc_vreg();
+        let exit_phi = b.alloc_vreg();
+        param_index.insert(p.name.clone(), i);
+        frame_params.push(LoopParamLowering {
+            name: p.name.clone(),
+            header_phi,
+            exit_phi,
+            header_edges: vec![(entry, init)],
+            exit_edges: Vec::new(),
+        });
+        env.insert(p.name.clone(), header_phi);
     }
     b.jump(entry, span.clone(), header);
     b.jump(header, span.clone(), body_block);
     loops.push(LoopFrame {
-        exit,
         header,
-        tail,
-        back,
-        continue_edges: loop_continue_edges(body),
-        break_carry_on_exit: continue_directly_after_if(body),
+        exit,
+        params: frame_params,
+        param_index,
     });
-    b.refresh_tail_back_edge(tail, header, span.clone(), &[]);
     let mut cur = body_block;
     for stmt in body {
         cur = match &mut env_bool {
@@ -358,10 +375,22 @@ fn lower_loop(
         };
     }
     if !b.block_terminates(cur) {
-        b.jump(cur, span.clone(), tail);
-        b.refresh_tail_back_edge(tail, header, span.clone(), &[]);
+        let pred = cur;
+        let frame = loops.last_mut().expect("loop frame");
+        for p in &mut frame.params {
+            let v = env
+                .get(&p.name)
+                .copied()
+                .ok_or_else(|| LowerError::unsupported("unbound loop param at fallthrough"))?;
+            p.header_edges.push((pred, v));
+        }
+        b.jump(cur, span.clone(), header);
     }
-    loops.pop();
+    let frame = loops.pop().expect("loop frame");
+    finish_loop_frame(b, &frame, span.clone());
+    for p in &frame.params {
+        env.insert(p.name.clone(), p.exit_phi);
+    }
     Ok(exit)
 }
 
@@ -442,7 +471,9 @@ fn if_join_is_bool(then_body: &[Stmt], else_body: &[Stmt], name: &str) -> bool {
     fn arm_join_bool(body: &[Stmt], name: &str) -> bool {
         for stmt in body {
             if let Stmt::Assign { name: n, rhs, .. } = stmt {
-                return n == name && rhs_is_bool(rhs);
+                if n == name {
+                    return rhs_is_bool(rhs);
+                }
             }
         }
         false
@@ -542,22 +573,13 @@ fn lower_if_arm(
                 cur
             }
             Stmt::Break { span } => {
-                let frame = loops.last().ok_or(())?;
-                apply_break_carries(b, cur, span.clone(), frame, &env).map_err(|_| ())?;
-                b.jump(cur, span.clone(), frame.exit);
+                let frame = loops.last_mut().ok_or(())?;
+                record_break(b, cur, span.clone(), frame, &env).map_err(|_| ())?;
                 cur
             }
             Stmt::Continue { span, edges } => {
-                let frame = loops.last().ok_or(())?;
-                let mut pairs: Vec<(u32, u32)> = Vec::new();
-                for e in edges {
-                    let v = lower_operand(b, cur, &e.value, &env).map_err(|_| ())?;
-                    if let Some(back) = frame.back.get(&e.name) {
-                        pairs.push((*back, v));
-                    }
-                }
-                b.jump(cur, span.clone(), frame.tail);
-                b.refresh_tail_back_edge(frame.tail, frame.header, span.clone(), &pairs);
+                let frame = loops.last_mut().ok_or(())?;
+                record_continue(b, cur, span.clone(), edges, frame, &env).map_err(|_| ())?;
                 cur
             }
             Stmt::AssertEq { span, got, want } => {
@@ -664,10 +686,9 @@ fn lower_stmt_test(
                 return Ok(block);
             }
             let frame = loops
-                .last()
+                .last_mut()
                 .ok_or_else(|| LowerError::unsupported("break outside loop"))?;
-            apply_break_carries(b, block, span.clone(), frame, env)?;
-            b.jump(block, span.clone(), frame.exit);
+            record_break(b, block, span.clone(), frame, env)?;
             Ok(block)
         }
         Stmt::Continue { span, edges } => {
@@ -675,17 +696,9 @@ fn lower_stmt_test(
                 return Ok(block);
             }
             let frame = loops
-                .last()
+                .last_mut()
                 .ok_or_else(|| LowerError::unsupported("continue outside loop"))?;
-            let mut pairs: Vec<(u32, u32)> = Vec::new();
-            for e in edges {
-                let v = lower_operand(b, block, &e.value, env)?;
-                if let Some(back) = frame.back.get(&e.name) {
-                    pairs.push((*back, v));
-                }
-            }
-            b.jump(block, span.clone(), frame.tail);
-            b.refresh_tail_back_edge(frame.tail, frame.header, span.clone(), &pairs);
+            record_continue(b, block, span.clone(), edges, frame, env)?;
             Ok(block)
         }
         _ => Err(LowerError::Unsupported(format!(
