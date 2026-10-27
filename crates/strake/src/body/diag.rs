@@ -27,6 +27,7 @@ impl Kind {
 #[allow(dead_code)]
 pub enum Code {
     EParse,
+    ESeq,
     EType,
     EShadow,
     EForall,
@@ -48,9 +49,10 @@ pub enum Code {
 impl Code {
     /// Every constructable catalog code, derived from an exhaustive [`Code`] match.
     #[allow(dead_code)]
-    pub(crate) fn constructable() -> [Code; 17] {
+    pub(crate) fn constructable() -> [Code; 18] {
         let codes = [
             Code::EParse,
+            Code::ESeq,
             Code::EType,
             Code::EShadow,
             Code::EForall,
@@ -78,6 +80,7 @@ impl Code {
     pub(crate) fn exhaustive_catalog_name(code: Code) -> &'static str {
         match code {
             Code::EParse => "E_PARSE",
+            Code::ESeq => "E_SEQ",
             Code::EType => "E_TYPE",
             Code::EShadow => "E_SHADOW",
             Code::EForall => "E_FORALL",
@@ -102,6 +105,7 @@ impl Code {
     pub fn from_catalog_name(name: &str) -> Option<Code> {
         match name {
             "E_PARSE" => Some(Code::EParse),
+            "E_SEQ" => Some(Code::ESeq),
             "E_TYPE" => Some(Code::EType),
             "E_SHADOW" => Some(Code::EShadow),
             "E_FORALL" => Some(Code::EForall),
@@ -126,6 +130,7 @@ impl Code {
     pub fn as_str(self) -> &'static str {
         match self {
             Code::EParse => "E_PARSE",
+            Code::ESeq => "E_SEQ",
             Code::EType => "E_TYPE",
             Code::EShadow => "E_SHADOW",
             Code::EForall => "E_FORALL",
@@ -148,6 +153,7 @@ impl Code {
     pub fn msg(self) -> &'static str {
         match self {
             Code::EParse => "token stream is not v0 A",
+            Code::ESeq => "statement follows ret, break, or continue in the same block",
             Code::EType => {
                 "operand type, arity, compare family, or eq on list/record/sum"
             }
@@ -528,6 +534,7 @@ mod tests {
             assert_eq!(Code::exhaustive_catalog_name(c), c.as_str());
         }
         must_include(Code::EParse, list);
+        must_include(Code::ESeq, list);
         must_include(Code::EType, list);
         must_include(Code::EShadow, list);
         must_include(Code::EForall, list);
