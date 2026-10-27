@@ -1,3 +1,4 @@
+pub mod carry;
 pub mod check;
 pub mod diag;
 pub mod host;
