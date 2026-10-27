@@ -1,0 +1,14 @@
+strake 1
+
+test loop_break_carry
+  acc0 = 0
+  loop acc = acc0
+    n = add i64 acc 1
+    done = eq i64 n 5
+    if done
+      break
+    end
+    continue acc = n
+  end
+  assert.eq acc 5
+end

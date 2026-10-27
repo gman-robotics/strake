@@ -378,7 +378,7 @@ impl<'a> Machine<'a> {
                     TrapImm::Import => Code::EImport,
                     TrapImm::Oob => Code::EOob,
                     TrapImm::User => Code::EType,
-                    TrapImm::Fallthrough => Code::EType,
+                    TrapImm::Fallthrough => unreachable!("handled above"),
                 };
                 return Err(ExecFault::Trap { code, span });
             }
@@ -529,10 +529,6 @@ pub(crate) struct TestExportRun {
 }
 
 pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<TestExportRun> {
-    #[cfg(test)]
-    {
-        crate::body::EXEC_ENTERED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
     program
         .exports
         .iter()

@@ -224,6 +224,8 @@ pub fn test(path: &str, opts: Opts) -> Exit {
             };
         }
     };
+    #[cfg(test)]
+    body::exec_entered_mark();
     let host = EmptyHost;
     let runs = body::interp::run_test_exports(&program, &host);
     let outcomes: Vec<ExportOutcome> = runs.iter().map(|r| r.outcome).collect();
@@ -295,8 +297,7 @@ mod tests {
 
     #[test]
     fn lower_abort_exit_is_plain_70() {
-        let src =
-            "strake 1\n\nfn f() -> i64\n  loop\n    break\n  end\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let src = "strake 1\n\ntest t\n  trap\nend\n";
         let tmp = std::env::temp_dir().join("strake_lib_lower70.strake");
         std::fs::write(&tmp, src).expect("write");
         let exit = test(tmp.to_str().unwrap(), Opts::default());

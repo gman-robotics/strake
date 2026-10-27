@@ -1,0 +1,13 @@
+strake 1
+
+test loop_continue_carry
+  loop i = 0
+    next = add i64 i 1
+    stop = eq i64 next 4
+    if stop
+      break
+    end
+    continue i = next
+  end
+  assert.eq i 4
+end

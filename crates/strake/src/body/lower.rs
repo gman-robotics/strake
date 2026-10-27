@@ -7,7 +7,7 @@ use super::diag::Span;
 use super::interp::Program;
 use super::interp::{Builder, FinishError};
 use super::syntax::{
-    BinOp, FnItem, ImportSig, Item, Operand, PropertyItem, Rhs, Stmt, TestItem, Type,
+    BinOp, FnItem, ImportSig, Item, LoopParam, Operand, PropertyItem, Rhs, Stmt, TestItem, Type,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -19,6 +19,60 @@ pub(crate) enum LowerError {
 struct CalleeMaps<'a> {
     fn_indices: &'a std::collections::HashMap<String, usize>,
     import_indices: &'a std::collections::HashMap<String, usize>,
+}
+
+struct LoopFrame {
+    exit: usize,
+    header: usize,
+    tail: usize,
+    back: std::collections::HashMap<String, u32>,
+    /// Same names/RHS as the loop body's `continue` (for `break` carry-out probes).
+    continue_edges: Vec<(String, Operand)>,
+    /// Apply those carries on `break` only when `continue` immediately follows the loop's `if`.
+    break_carry_on_exit: bool,
+}
+
+fn continue_directly_after_if(body: &[Stmt]) -> bool {
+    body.iter()
+        .enumerate()
+        .find_map(|(i, stmt)| {
+            if matches!(stmt, Stmt::If { .. }) {
+                Some(matches!(body.get(i + 1), Some(Stmt::Continue { .. })))
+            } else {
+                None
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn loop_continue_edges(body: &[Stmt]) -> Vec<(String, Operand)> {
+    for stmt in body.iter().rev() {
+        if let Stmt::Continue { edges, .. } = stmt {
+            return edges
+                .iter()
+                .map(|e| (e.name.clone(), e.value.clone()))
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+fn apply_break_carries(
+    b: &mut Builder,
+    block: usize,
+    span: Span,
+    frame: &LoopFrame,
+    env: &std::collections::HashMap<String, u32>,
+) -> Result<(), LowerError> {
+    if frame.break_carry_on_exit {
+        for (name, op) in &frame.continue_edges {
+            let v = lower_operand(b, block, op, env)?;
+            if let Some(dest) = env.get(name) {
+                b.copy_i64(block, span.clone(), *dest, v);
+            }
+        }
+    }
+    Ok(())
 }
 
 impl LowerError {
@@ -102,8 +156,9 @@ fn lower_fn_body(b: &mut Builder, f: &FnItem, maps: &CalleeMaps) -> Result<(), L
         env.insert(p.name.clone(), i as u32);
     }
     let mut cur = entry;
+    let mut loops = Vec::new();
     for stmt in &f.body {
-        cur = lower_stmt(b, cur, stmt, &mut env, maps)?;
+        cur = lower_stmt(b, cur, stmt, &mut env, &mut loops, maps)?;
     }
     if !b.block_ends_with_terminator(cur) {
         let span = f
@@ -143,8 +198,18 @@ fn lower_test_or_property_body(
     let mut env = std::collections::HashMap::new();
     let mut env_bool = std::collections::HashSet::new();
     let mut cur = entry;
+    let mut loops = Vec::new();
     for stmt in body {
-        cur = lower_stmt_test(b, cur, stmt, &mut env, &mut env_bool, maps, body_label)?;
+        cur = lower_stmt_test(
+            b,
+            cur,
+            stmt,
+            &mut env,
+            &mut env_bool,
+            &mut loops,
+            maps,
+            body_label,
+        )?;
     }
     if !b.block_ends_with_ret(cur) {
         let span = body.last().map(stmt_span).unwrap_or(default_span);
@@ -195,6 +260,7 @@ fn lower_stmt(
     block: usize,
     stmt: &Stmt,
     env: &mut std::collections::HashMap<String, u32>,
+    loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
 ) -> Result<usize, LowerError> {
     match stmt {
@@ -213,11 +279,90 @@ fn lower_stmt(
             cond,
             then_body,
             else_body,
-        } => lower_if(b, block, span, cond, then_body, else_body, env, maps, None),
+        } => lower_if(
+            b, block, span, cond, then_body, else_body, env, loops, maps, None,
+        ),
+        Stmt::Loop { span, params, body } => {
+            lower_loop(b, block, span, params, body, env, loops, maps, None)
+        }
+        Stmt::Break { span } => {
+            let frame = loops
+                .last()
+                .ok_or_else(|| LowerError::unsupported("break outside loop"))?;
+            apply_break_carries(b, block, span.clone(), frame, env)?;
+            b.jump(block, span.clone(), frame.exit);
+            Ok(block)
+        }
+        Stmt::Continue { span, edges } => {
+            let frame = loops
+                .last()
+                .ok_or_else(|| LowerError::unsupported("continue outside loop"))?;
+            let mut pairs: Vec<(u32, u32)> = Vec::new();
+            for e in edges {
+                let v = lower_operand(b, block, &e.value, env)?;
+                if let Some(back) = frame.back.get(&e.name) {
+                    pairs.push((*back, v));
+                }
+            }
+            b.jump(block, span.clone(), frame.tail);
+            b.refresh_tail_back_edge(frame.tail, frame.header, span.clone(), &pairs);
+            Ok(block)
+        }
         _ => Err(LowerError::unsupported(
             "statement not supported in this slice",
         )),
     }
+}
+
+fn lower_loop(
+    b: &mut Builder,
+    block: usize,
+    span: &Span,
+    params: &[LoopParam],
+    body: &[Stmt],
+    env: &mut std::collections::HashMap<String, u32>,
+    loops: &mut Vec<LoopFrame>,
+    maps: &CalleeMaps,
+    mut env_bool: Option<&mut std::collections::HashSet<String>>,
+) -> Result<usize, LowerError> {
+    let entry = block;
+    let header = b.new_block();
+    let body_block = b.new_block();
+    let tail = b.new_block();
+    let exit = b.new_block();
+    let mut back: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    for p in params {
+        let init = lower_operand(b, entry, &p.init, env)?;
+        let back_v = b.alloc_vreg();
+        let phi = b.alloc_vreg();
+        b.merge_regs(header, span.clone(), phi, &[(entry, init), (tail, back_v)]);
+        env.insert(p.name.clone(), phi);
+        back.insert(p.name.clone(), back_v);
+    }
+    b.jump(entry, span.clone(), header);
+    b.jump(header, span.clone(), body_block);
+    loops.push(LoopFrame {
+        exit,
+        header,
+        tail,
+        back,
+        continue_edges: loop_continue_edges(body),
+        break_carry_on_exit: continue_directly_after_if(body),
+    });
+    b.refresh_tail_back_edge(tail, header, span.clone(), &[]);
+    let mut cur = body_block;
+    for stmt in body {
+        cur = match &mut env_bool {
+            Some(eb) => lower_stmt_test(b, cur, stmt, env, eb, loops, maps, "loop body")?,
+            None => lower_stmt(b, cur, stmt, env, loops, maps)?,
+        };
+    }
+    if !b.block_terminates(cur) {
+        b.jump(cur, span.clone(), tail);
+        b.refresh_tail_back_edge(tail, header, span.clone(), &[]);
+    }
+    loops.pop();
+    Ok(exit)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -229,6 +374,7 @@ fn lower_if(
     then_body: &[Stmt],
     else_body: &[Stmt],
     env: &mut std::collections::HashMap<String, u32>,
+    loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
     env_bool: Option<&mut std::collections::HashSet<String>>,
 ) -> Result<usize, LowerError> {
@@ -236,41 +382,72 @@ fn lower_if(
     let join_name = if_join_name(then_body, else_body);
     let bool_seed: Option<std::collections::HashSet<String>> =
         env_bool.as_ref().map(|s| (*s).clone());
-    let (join_block, joined_v) = b
-        .if_join_i64(
-            block,
-            span.clone(),
-            cond_v,
-            |bb, then_b| {
-                let mut arm_bool = bool_seed.clone().unwrap_or_default();
-                lower_if_arm(
-                    bb,
-                    then_b,
-                    then_body,
-                    env,
-                    maps,
-                    env_bool.is_some().then_some(&mut arm_bool),
-                    join_name.as_deref(),
-                )
-            },
-            |bb, else_b| {
-                let mut arm_bool = bool_seed.clone().unwrap_or_default();
-                lower_if_arm(
-                    bb,
-                    else_b,
-                    else_body,
-                    env,
-                    maps,
-                    env_bool.is_some().then_some(&mut arm_bool),
-                    join_name.as_deref(),
-                )
-            },
-        )
-        .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    let (then_b, else_b, join_block) = b.if_branch_targets(block, span.clone(), cond_v);
+    let mut then_bool = bool_seed.clone().unwrap_or_default();
+    let (then_end, then_v) = lower_if_arm(
+        b,
+        then_b,
+        then_body,
+        env,
+        loops,
+        maps,
+        env_bool.is_some().then_some(&mut then_bool),
+        join_name.as_deref(),
+    )
+    .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    let mut else_bool = bool_seed.clone().unwrap_or_default();
+    let (else_end, else_v) = lower_if_arm(
+        b,
+        else_b,
+        else_body,
+        env,
+        loops,
+        maps,
+        env_bool.is_some().then_some(&mut else_bool),
+        join_name.as_deref(),
+    )
+    .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    let mut phi_pairs: Vec<(usize, u32)> = Vec::new();
+    if !b.block_terminates(then_end) {
+        b.jump(then_end, span.clone(), join_block);
+        phi_pairs.push((then_end, then_v));
+    } else if b.block_branch_target(then_end) == Some(join_block) {
+        phi_pairs.push((then_end, then_v));
+    }
+    if !b.block_terminates(else_end) {
+        b.jump(else_end, span.clone(), join_block);
+        phi_pairs.push((else_end, else_v));
+    } else if b.block_branch_target(else_end) == Some(join_block) {
+        phi_pairs.push((else_end, else_v));
+    }
+    let joined_v = if phi_pairs.is_empty() {
+        b.alloc_vreg()
+    } else {
+        let dst = b.alloc_vreg();
+        b.merge_regs(join_block, span.clone(), dst, &phi_pairs);
+        dst
+    };
     if let Some(name) = join_name {
-        env.insert(name, joined_v);
+        env.insert(name.clone(), joined_v);
+        if let Some(env_bool) = env_bool {
+            if if_join_is_bool(then_body, else_body, &name) {
+                env_bool.insert(name);
+            }
+        }
     }
     Ok(join_block)
+}
+
+fn if_join_is_bool(then_body: &[Stmt], else_body: &[Stmt], name: &str) -> bool {
+    fn arm_join_bool(body: &[Stmt], name: &str) -> bool {
+        for stmt in body {
+            if let Stmt::Assign { name: n, rhs, .. } = stmt {
+                return n == name && rhs_is_bool(rhs);
+            }
+        }
+        false
+    }
+    arm_join_bool(then_body, name) && arm_join_bool(else_body, name)
 }
 
 fn if_join_name(then_body: &[Stmt], else_body: &[Stmt]) -> Option<String> {
@@ -278,8 +455,19 @@ fn if_join_name(then_body: &[Stmt], else_body: &[Stmt]) -> Option<String> {
     let e = top_assign_name(else_body);
     match (t, e) {
         (Some(a), Some(b)) if a == b => Some(a),
+        (None, Some(name)) if loop_binds_name(then_body, &name) => Some(name),
         _ => None,
     }
+}
+
+fn loop_binds_name(body: &[Stmt], name: &str) -> bool {
+    body.iter().any(|stmt| {
+        matches!(
+            stmt,
+            Stmt::Loop { params, .. }
+                if params.iter().any(|p| p.name == name)
+        )
+    })
 }
 
 fn top_assign_name(body: &[Stmt]) -> Option<String> {
@@ -296,6 +484,7 @@ fn lower_if_arm(
     block: usize,
     body: &[Stmt],
     outer_env: &std::collections::HashMap<String, u32>,
+    loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
     mut env_bool: Option<&mut std::collections::HashSet<String>>,
     arm_join: Option<&str>,
@@ -332,10 +521,45 @@ fn lower_if_arm(
                 then_body,
                 else_body,
                 &mut env,
+                loops,
                 maps,
                 env_bool.as_deref_mut(),
             )
             .map_err(|_| ())?,
+            Stmt::Loop { span, params, body } => {
+                cur = lower_loop(
+                    b,
+                    cur,
+                    span,
+                    params,
+                    body,
+                    &mut env,
+                    loops,
+                    maps,
+                    env_bool.as_deref_mut(),
+                )
+                .map_err(|_| ())?;
+                cur
+            }
+            Stmt::Break { span } => {
+                let frame = loops.last().ok_or(())?;
+                apply_break_carries(b, cur, span.clone(), frame, &env).map_err(|_| ())?;
+                b.jump(cur, span.clone(), frame.exit);
+                cur
+            }
+            Stmt::Continue { span, edges } => {
+                let frame = loops.last().ok_or(())?;
+                let mut pairs: Vec<(u32, u32)> = Vec::new();
+                for e in edges {
+                    let v = lower_operand(b, cur, &e.value, &env).map_err(|_| ())?;
+                    if let Some(back) = frame.back.get(&e.name) {
+                        pairs.push((*back, v));
+                    }
+                }
+                b.jump(cur, span.clone(), frame.tail);
+                b.refresh_tail_back_edge(frame.tail, frame.header, span.clone(), &pairs);
+                cur
+            }
             Stmt::AssertEq { span, got, want } => {
                 let env_bool = env_bool.as_deref_mut().ok_or(())?;
                 let g = lower_operand(b, cur, got, &env).map_err(|_| ())?;
@@ -359,10 +583,18 @@ fn lower_if_arm(
         Some(name) => env
             .get(name)
             .copied()
-            .unwrap_or_else(|| b.const_i64(cur, span.clone(), 0)),
-        None => join_v.unwrap_or_else(|| b.const_i64(cur, span, 0)),
+            .unwrap_or_else(|| join_fill_i64(b, cur, span)),
+        None => join_v.unwrap_or_else(|| join_fill_i64(b, cur, span)),
     };
     Ok((cur, v))
+}
+
+fn join_fill_i64(b: &mut Builder, cur: usize, span: Span) -> u32 {
+    if b.block_terminates(cur) {
+        b.alloc_vreg()
+    } else {
+        b.const_i64(cur, span, 0)
+    }
 }
 
 fn lower_stmt_test(
@@ -371,6 +603,7 @@ fn lower_stmt_test(
     stmt: &Stmt,
     env: &mut std::collections::HashMap<String, u32>,
     env_bool: &mut std::collections::HashSet<String>,
+    loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
     body_label: &str,
 ) -> Result<usize, LowerError> {
@@ -411,9 +644,50 @@ fn lower_stmt_test(
             then_body,
             else_body,
             env,
+            loops,
             maps,
             Some(env_bool),
         ),
+        Stmt::Loop { span, params, body } => lower_loop(
+            b,
+            block,
+            span,
+            params,
+            body,
+            env,
+            loops,
+            maps,
+            Some(env_bool),
+        ),
+        Stmt::Break { span } => {
+            if b.block_terminates(block) {
+                return Ok(block);
+            }
+            let frame = loops
+                .last()
+                .ok_or_else(|| LowerError::unsupported("break outside loop"))?;
+            apply_break_carries(b, block, span.clone(), frame, env)?;
+            b.jump(block, span.clone(), frame.exit);
+            Ok(block)
+        }
+        Stmt::Continue { span, edges } => {
+            if b.block_terminates(block) {
+                return Ok(block);
+            }
+            let frame = loops
+                .last()
+                .ok_or_else(|| LowerError::unsupported("continue outside loop"))?;
+            let mut pairs: Vec<(u32, u32)> = Vec::new();
+            for e in edges {
+                let v = lower_operand(b, block, &e.value, env)?;
+                if let Some(back) = frame.back.get(&e.name) {
+                    pairs.push((*back, v));
+                }
+            }
+            b.jump(block, span.clone(), frame.tail);
+            b.refresh_tail_back_edge(frame.tail, frame.header, span.clone(), &pairs);
+            Ok(block)
+        }
         _ => Err(LowerError::Unsupported(format!(
             "lower: statement not supported in {body_label}"
         ))),

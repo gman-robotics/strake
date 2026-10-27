@@ -33,17 +33,23 @@ pub(crate) fn compile_module(module: &Module, draft: bool) -> Result<Program, Co
 }
 
 #[cfg(test)]
-pub(crate) static EXEC_ENTERED: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+std::thread_local! {
+    static EXEC_ENTERED_THIS_THREAD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[cfg(test)]
 pub(crate) fn exec_entered_count() -> usize {
-    EXEC_ENTERED.load(std::sync::atomic::Ordering::SeqCst)
+    EXEC_ENTERED_THIS_THREAD.get()
 }
 
 #[cfg(test)]
 pub(crate) fn reset_exec_entered() {
-    EXEC_ENTERED.store(0, std::sync::atomic::Ordering::SeqCst);
+    EXEC_ENTERED_THIS_THREAD.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn exec_entered_mark() {
+    EXEC_ENTERED_THIS_THREAD.set(EXEC_ENTERED_THIS_THREAD.get() + 1);
 }
 
 pub(crate) fn lower_abort_message(err: &LowerError) -> String {
@@ -55,7 +61,6 @@ mod tests {
     use super::*;
     use crate::body::syntax;
     use crate::{test as strake_test, Opts};
-
     #[test]
     fn catalog_check_failures_do_not_enter_exec() {
         reset_exec_entered();
@@ -64,7 +69,7 @@ mod tests {
         std::fs::write(&tmp, src).expect("write");
         let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
         assert_eq!(exit.code, 1);
-        assert_eq!(exec_entered_count(), 0);
+        assert_eq!(exec_entered_count(), 0, "shadow check must not run exec");
 
         reset_exec_entered();
         let src = include_str!("../../../../golden/priv_call.strake");
@@ -72,7 +77,7 @@ mod tests {
         std::fs::write(&tmp, src).expect("write");
         let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
         assert_eq!(exit.code, 3);
-        assert_eq!(exec_entered_count(), 0);
+        assert_eq!(exec_entered_count(), 0, "priv_call must not run exec");
     }
 
     #[test]
@@ -96,12 +101,12 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_loop_in_fn_body_returns_exit_70() {
+    fn loop_in_fn_body_runs() {
+        reset_exec_entered();
         let src = "strake 1\n\nfn bad() -> i64\n  loop\n    break\n  end\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
         let tmp = std::env::temp_dir().join("strake_loop_fn_lower.strake");
         std::fs::write(&tmp, src).expect("write");
         let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
-        assert_eq!(exit.code, LOWER_ABORT_EXIT);
-        assert!(!exit.stderr.contains("\"code\""));
+        assert_eq!(exit.code, 0);
     }
 }

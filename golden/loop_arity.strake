@@ -1,0 +1,8 @@
+strake 1
+
+test loop_arity
+  loop a = 0 b = 1
+    break
+  end
+  ret 0
+end

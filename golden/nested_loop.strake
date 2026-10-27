@@ -1,0 +1,31 @@
+strake 1
+
+fn outer() -> i64
+  loop oi = 0
+    inner = add i64 oi 1
+    stop_o = eq i64 inner 2
+    if stop_o
+      break
+    end
+    loop ii = 0
+      one = add i64 ii 1
+      stop_i = eq i64 one 2
+      if stop_i
+        break
+      end
+      continue ii = one
+    end
+    continue oi = inner
+  end
+  ret oi
+end
+
+fn later() -> i64
+  ret 0
+end
+
+test nested_loop
+  r = call outer()
+  assert.eq r 1
+  ret 0
+end

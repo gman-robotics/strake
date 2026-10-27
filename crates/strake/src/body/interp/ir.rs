@@ -583,6 +583,66 @@ impl Builder {
         self.ret(block, span, v);
     }
 
+    pub(crate) fn block_terminates(&self, block: usize) -> bool {
+        self.block_ends_with_terminator(block)
+    }
+
+    pub(crate) fn block_branch_target(&self, block: usize) -> Option<usize> {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        let block = self.functions[fn_idx].blocks.get(block)?;
+        let last = block.insts.last()?;
+        if last.op == Op::Br {
+            if let Imm::Block(t) = last.imm {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn jmp(&mut self, block: usize, span: Span, target: usize) {
+        self.br(block, span, target);
+    }
+
+    pub(crate) fn merge_regs(
+        &mut self,
+        block: usize,
+        span: Span,
+        dst: VReg,
+        pairs: &[(usize, VReg)],
+    ) {
+        self.phi(block, span, dst, pairs);
+    }
+
+    pub(crate) fn copy_i64(&mut self, block: usize, span: Span, dst: VReg, src: VReg) {
+        let z = self.const_i64(block, span.clone(), 0);
+        self.emit(
+            block,
+            Inst {
+                op: Op::Add,
+                dst: Some(dst),
+                args: vec![src, z],
+                imm: Imm::None,
+                span,
+            },
+        );
+    }
+
+    /// Rebuild tail as back-edge copies then `br header` (SSA: `back` defs live on tail).
+    pub(crate) fn refresh_tail_back_edge(
+        &mut self,
+        tail: usize,
+        header: usize,
+        span: Span,
+        pairs: &[(VReg, VReg)],
+    ) {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        self.functions[fn_idx].blocks[tail].insts.clear();
+        for (back, src) in pairs {
+            self.copy_i64(tail, span.clone(), *back, *src);
+        }
+        self.jump(tail, span, header);
+    }
+
     fn br(&mut self, block: usize, span: Span, target: usize) {
         self.emit(
             block,
@@ -615,7 +675,7 @@ impl Builder {
         );
     }
 
-    fn br_if(
+    pub(crate) fn br_if(
         &mut self,
         block: usize,
         span: Span,
@@ -666,6 +726,42 @@ impl Builder {
         self.br_if(block, span.clone(), eq, pass, fail);
         self.ret_test_fail(fail, span.clone(), want, got, diag_span);
         pass
+    }
+
+    pub(crate) fn if_branch_targets(
+        &mut self,
+        block: usize,
+        span: Span,
+        cond: VReg,
+    ) -> (usize, usize, usize) {
+        let then_b = self.new_block();
+        let else_b = self.new_block();
+        let join_b = self.new_block();
+        self.br_if(block, span, cond, then_b, else_b);
+        (then_b, else_b, join_b)
+    }
+
+    pub(crate) fn if_join_merge(
+        &mut self,
+        join_b: usize,
+        span: Span,
+        then_end: usize,
+        then_v: VReg,
+        else_end: usize,
+        else_v: VReg,
+    ) -> VReg {
+        self.br(then_end, span.clone(), join_b);
+        self.br(else_end, span.clone(), join_b);
+        let dst = self.alloc_vreg();
+        self.phi(join_b, span, dst, &[(then_end, then_v), (else_end, else_v)]);
+        dst
+    }
+
+    pub(crate) fn jump(&mut self, block: usize, span: Span, target: usize) {
+        if self.block_terminates(block) {
+            return;
+        }
+        self.jmp(block, span, target);
     }
 
     /// Structured `if` with one i64 join value per arm (invariant 1).

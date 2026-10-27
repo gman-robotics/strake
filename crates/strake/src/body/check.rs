@@ -214,6 +214,7 @@ impl Ctx {
 }
 
 fn check_fn(f: &FnItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
+    check_no_stmt_after_terminator(&f.body, diags);
     let mut ctx = Ctx::new();
     for p in &f.params {
         ctx.bind(&p.name, p.ty.clone(), p.span.clone(), diags);
@@ -224,6 +225,7 @@ fn check_fn(f: &FnItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
 }
 
 fn check_test(t: &TestItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
+    check_no_stmt_after_terminator(&t.body, diags);
     let mut ctx = Ctx::new();
     for stmt in &t.body {
         check_stmt(stmt, &mut ctx, fns, false, None, diags);
@@ -231,9 +233,57 @@ fn check_test(t: &TestItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
 }
 
 fn check_property(p: &PropertyItem, fns: &[&FnItem], diags: &mut Vec<Diag>) {
+    check_no_stmt_after_terminator(&p.body, diags);
     let mut ctx = Ctx::new();
     for stmt in &p.body {
         check_stmt_property(stmt, &mut ctx, fns, diags);
+    }
+}
+
+fn stmt_check_span(stmt: &Stmt) -> Span {
+    match stmt {
+        Stmt::Assign { span, .. }
+        | Stmt::Ret { span, .. }
+        | Stmt::If { span, .. }
+        | Stmt::Loop { span, .. }
+        | Stmt::Break { span, .. }
+        | Stmt::Continue { span, .. }
+        | Stmt::For { span, .. }
+        | Stmt::Forall { span, .. }
+        | Stmt::Trap { span }
+        | Stmt::AssertEq { span, .. }
+        | Stmt::Match { span, .. } => span.clone(),
+    }
+}
+
+fn check_no_stmt_after_terminator(stmts: &[Stmt], diags: &mut Vec<Diag>) {
+    let mut sealed = false;
+    for stmt in stmts {
+        if sealed {
+            diags.push(parse_diag(stmt_check_span(stmt)));
+            return;
+        }
+        match stmt {
+            Stmt::Ret { .. } | Stmt::Break { .. } => sealed = true,
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                check_no_stmt_after_terminator(then_body, diags);
+                check_no_stmt_after_terminator(else_body, diags);
+            }
+            Stmt::Loop { body, .. } => check_no_stmt_after_terminator(body, diags),
+            Stmt::For { body, .. } | Stmt::Forall { body, .. } => {
+                check_no_stmt_after_terminator(body, diags);
+            }
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    check_no_stmt_after_terminator(&arm.body, diags);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -319,6 +369,12 @@ fn check_stmt(
             for s in body {
                 check_stmt_loop(s, &mut loop_ctx, &param_names, fns, in_fn, fn_ret, diags);
             }
+            for p in params {
+                if let Some(ty) = loop_ctx.types.get(&p.name) {
+                    ctx.phi_gaps.remove(&p.name);
+                    ctx.types.insert(p.name.clone(), ty.clone());
+                }
+            }
         }
         Stmt::Forall {
             span,
@@ -364,7 +420,19 @@ fn check_stmt_loop(
     if let Stmt::Assign { span, name, .. } = stmt {
         if loop_params.contains(name) {
             diags.push(shadow_diag(span.clone()));
+            return;
         }
+    }
+    if let Stmt::Continue { edges, .. } = stmt {
+        for e in edges {
+            if !loop_params.contains(&e.name) {
+                continue;
+            }
+            let ty = operand_ty(&e.value, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+            ctx.types.insert(e.name.clone(), ty);
+            ctx.phi_gaps.remove(&e.name);
+        }
+        return;
     }
     check_stmt(stmt, ctx, fns, in_fn, fn_ret, diags);
 }
@@ -431,7 +499,12 @@ fn check_if(
     }
     for name in else_tops.keys() {
         if !then_tops.contains_key(name) && !pre.contains_key(name) {
-            ctx.phi_gaps.insert(name.clone());
+            if then_ctx.types.contains_key(name) {
+                ctx.types.insert(name.clone(), then_ctx.types[name].clone());
+                ctx.phi_gaps.remove(name);
+            } else {
+                ctx.phi_gaps.insert(name.clone());
+            }
         }
     }
 }
@@ -484,6 +557,34 @@ fn check_stmt_in_arm(
             }
             for s in body {
                 check_stmt_in_arm(s, ctx, pre, fns, in_fn, fn_ret, diags);
+            }
+        }
+        Stmt::Loop { params, body, .. } => {
+            let mut loop_ctx = Ctx {
+                types: ctx.types.clone(),
+                phi_gaps: ctx.phi_gaps.clone(),
+            };
+            let param_names: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+            for p in params {
+                let ty = operand_ty(
+                    &p.init,
+                    &loop_ctx.types,
+                    &loop_ctx.phi_gaps,
+                    fns,
+                    None,
+                    diags,
+                );
+                loop_ctx.bind(&p.name, ty, p.span.clone(), diags);
+            }
+            for s in body {
+                check_stmt_loop(s, &mut loop_ctx, &param_names, fns, in_fn, fn_ret, diags);
+            }
+            for p in params {
+                if let Some(ty) = loop_ctx.types.get(&p.name) {
+                    loop_ctx.phi_gaps.remove(&p.name);
+                    ctx.phi_gaps.remove(&p.name);
+                    ctx.types.insert(p.name.clone(), ty.clone());
+                }
             }
         }
         Stmt::Ret { value, span } => {
@@ -762,6 +863,17 @@ fn parse_diag(span: Span) -> Diag {
 mod tests {
     use super::*;
     use crate::body::syntax;
+
+    #[test]
+    fn stmt_after_ret_is_eparse_at_check() {
+        let src =
+            "strake 1\n\nfn f() -> i64\n  ret 1\n  x = add i64 1 2\nend\n\ntest t\n  ret 0\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        let sketch = check(&m, false);
+        assert!(sketch.is_err());
+        let diags = sketch.unwrap_err();
+        assert!(diags.iter().any(|d| d.code == Code::EParse));
+    }
 
     #[test]
     fn call_i32_param_accepts_small_literal() {
