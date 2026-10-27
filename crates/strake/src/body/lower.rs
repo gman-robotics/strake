@@ -1,15 +1,24 @@
 //! Lower checked A into strake-1 via the IR builder (no opcode names).
 
+#![allow(clippy::too_many_arguments)]
+
 use super::check::Sketch;
 use super::diag::Span;
 use super::interp::Program;
 use super::interp::{Builder, FinishError};
-use super::syntax::{BinOp, FnItem, Item, Operand, PropertyItem, Rhs, Stmt, TestItem};
+use super::syntax::{
+    BinOp, FnItem, ImportSig, Item, Operand, PropertyItem, Rhs, Stmt, TestItem, Type,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LowerError {
     Unsupported(String),
     Finish(FinishError),
+}
+
+struct CalleeMaps<'a> {
+    fn_indices: &'a std::collections::HashMap<String, usize>,
+    import_indices: &'a std::collections::HashMap<String, usize>,
 }
 
 impl LowerError {
@@ -27,23 +36,48 @@ impl LowerError {
 
 pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
     let mut b = Builder::new();
+    b.set_entry_charge_span(sketch.module.span.clone());
+    for item in &sketch.module.items {
+        if let Item::Fuel(n, span) = item {
+            b.set_fuel(*n as i64);
+            b.set_entry_charge_span(span.clone());
+        }
+    }
+    let mut import_indices = std::collections::HashMap::new();
+    for item in &sketch.module.items {
+        if let Item::Import(im) = item {
+            if matches!(im.sig, ImportSig::Fn { .. }) {
+                let idx = b.add_import(&im.path);
+                import_indices.insert(im.path.clone(), idx);
+            }
+        }
+    }
     let mut fn_indices = std::collections::HashMap::new();
     for item in &sketch.module.items {
         if let Item::Fn(f) = item {
-            let idx = lower_fn(&mut b, f)?;
+            let idx = b.begin_function(&f.name, f.params.len());
             fn_indices.insert(f.name.clone(), idx);
+        }
+    }
+    let maps = CalleeMaps {
+        fn_indices: &fn_indices,
+        import_indices: &import_indices,
+    };
+    for item in &sketch.module.items {
+        if let Item::Fn(f) = item {
+            lower_fn_body(&mut b, f, &maps)?;
         }
     }
     for item in &sketch.module.items {
         match item {
             Item::Test(t) => {
                 let export = format!("test.{}", t.name);
-                let idx = lower_test(&mut b, t, &fn_indices)?;
+                let idx = lower_test(&mut b, t, &maps)?;
                 b.add_export(&export, idx, true);
             }
             Item::Property(p) => {
                 let export = format!("property.{}", p.name);
-                let idx = lower_property(&mut b, p, &fn_indices)?;
+                let idx = lower_property(&mut b, p, &maps)?;
                 b.add_export(&export, idx, true);
             }
             Item::Fn(f) => {
@@ -59,8 +93,9 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
     b.finish().map_err(LowerError::Finish)
 }
 
-fn lower_fn(b: &mut Builder, f: &FnItem) -> Result<usize, LowerError> {
-    let idx = b.begin_function(&f.name, f.params.len());
+fn lower_fn_body(b: &mut Builder, f: &FnItem, maps: &CalleeMaps) -> Result<(), LowerError> {
+    let fn_idx = maps.fn_indices[&f.name];
+    b.select_function(fn_idx);
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     for (i, p) in f.params.iter().enumerate() {
@@ -68,28 +103,24 @@ fn lower_fn(b: &mut Builder, f: &FnItem) -> Result<usize, LowerError> {
     }
     let mut cur = entry;
     for stmt in &f.body {
-        cur = lower_stmt(b, cur, stmt, &mut env)?;
+        cur = lower_stmt(b, cur, stmt, &mut env, maps)?;
     }
-    Ok(idx)
+    Ok(())
 }
 
-fn lower_test(
-    b: &mut Builder,
-    t: &TestItem,
-    fn_indices: &std::collections::HashMap<String, usize>,
-) -> Result<usize, LowerError> {
+fn lower_test(b: &mut Builder, t: &TestItem, maps: &CalleeMaps) -> Result<usize, LowerError> {
     let idx = b.begin_function(&format!("test.{}", t.name), 0);
-    lower_test_or_property_body(b, &t.body, t.span.clone(), fn_indices)?;
+    lower_test_or_property_body(b, &t.body, t.span.clone(), maps, "test body")?;
     Ok(idx)
 }
 
 fn lower_property(
     b: &mut Builder,
     p: &PropertyItem,
-    fn_indices: &std::collections::HashMap<String, usize>,
+    maps: &CalleeMaps,
 ) -> Result<usize, LowerError> {
     let idx = b.begin_function(&format!("property.{}", p.name), 0);
-    lower_test_or_property_body(b, &p.body, p.span.clone(), fn_indices)?;
+    lower_test_or_property_body(b, &p.body, p.span.clone(), maps, "property body")?;
     Ok(idx)
 }
 
@@ -97,13 +128,15 @@ fn lower_test_or_property_body(
     b: &mut Builder,
     body: &[Stmt],
     default_span: Span,
-    fn_indices: &std::collections::HashMap<String, usize>,
+    maps: &CalleeMaps,
+    body_label: &str,
 ) -> Result<(), LowerError> {
     let entry = 0;
     let mut env = std::collections::HashMap::new();
+    let mut env_bool = std::collections::HashSet::new();
     let mut cur = entry;
     for stmt in body {
-        cur = lower_stmt_test(b, cur, stmt, &mut env, fn_indices)?;
+        cur = lower_stmt_test(b, cur, stmt, &mut env, &mut env_bool, maps, body_label)?;
     }
     if !b.block_ends_with_ret(cur) {
         let span = body.last().map(stmt_span).unwrap_or(default_span);
@@ -154,10 +187,11 @@ fn lower_stmt(
     block: usize,
     stmt: &Stmt,
     env: &mut std::collections::HashMap<String, u32>,
+    maps: &CalleeMaps,
 ) -> Result<usize, LowerError> {
     match stmt {
         Stmt::Assign { name, rhs, .. } => {
-            let v = lower_rhs(b, block, rhs, env)?;
+            let v = lower_rhs_call(b, block, rhs, env, maps)?;
             env.insert(name.clone(), v);
             Ok(block)
         }
@@ -171,13 +205,14 @@ fn lower_stmt(
             cond,
             then_body,
             else_body,
-        } => lower_if(b, block, span, cond, then_body, else_body, env),
+        } => lower_if(b, block, span, cond, then_body, else_body, env, maps),
         _ => Err(LowerError::unsupported(
             "statement not supported in this slice",
         )),
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lower_if(
     b: &mut Builder,
     block: usize,
@@ -186,6 +221,7 @@ fn lower_if(
     then_body: &[Stmt],
     else_body: &[Stmt],
     env: &mut std::collections::HashMap<String, u32>,
+    maps: &CalleeMaps,
 ) -> Result<usize, LowerError> {
     let cond_v = lower_operand(b, block, cond, env)?;
     let join_name = if_join_name(then_body, else_body);
@@ -194,8 +230,8 @@ fn lower_if(
             block,
             span.clone(),
             cond_v,
-            |bb, then_b| lower_if_arm(bb, then_b, then_body, env),
-            |bb, else_b| lower_if_arm(bb, else_b, else_body, env),
+            |bb, then_b| lower_if_arm(bb, then_b, then_body, env, maps),
+            |bb, else_b| lower_if_arm(bb, else_b, else_body, env, maps),
         )
         .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     if let Some(name) = join_name {
@@ -227,6 +263,7 @@ fn lower_if_arm(
     block: usize,
     body: &[Stmt],
     outer_env: &std::collections::HashMap<String, u32>,
+    maps: &CalleeMaps,
 ) -> Result<(usize, u32), ()> {
     let mut env = outer_env.clone();
     let cur = block;
@@ -234,7 +271,7 @@ fn lower_if_arm(
     for stmt in body {
         match stmt {
             Stmt::Assign { name, rhs, .. } => {
-                let v = lower_rhs(b, cur, rhs, &env).map_err(|_| ())?;
+                let v = lower_rhs_call(b, cur, rhs, &env, maps).map_err(|_| ())?;
                 if join_v.is_none() {
                     join_v = Some(v);
                 }
@@ -251,29 +288,64 @@ fn lower_stmt_test(
     block: usize,
     stmt: &Stmt,
     env: &mut std::collections::HashMap<String, u32>,
-    fn_indices: &std::collections::HashMap<String, usize>,
+    env_bool: &mut std::collections::HashSet<String>,
+    maps: &CalleeMaps,
+    body_label: &str,
 ) -> Result<usize, LowerError> {
     match stmt {
         Stmt::Assign { name, rhs, .. } => {
-            let v = lower_rhs_call(b, block, rhs, env, fn_indices)?;
+            let v = lower_rhs_call(b, block, rhs, env, maps)?;
             env.insert(name.clone(), v);
+            if rhs_is_bool(rhs) {
+                env_bool.insert(name.clone());
+            }
             Ok(block)
         }
         Stmt::AssertEq { span, got, want } => {
             let g = lower_operand(b, block, got, env)?;
             let w = lower_operand(b, block, want, env)?;
             let diag_span = span_slice_a_names(got, want, span);
-            Ok(b.assert_eq_i64(block, span.clone(), g, w, diag_span))
+            if assert_operands_are_bool(got, want, env_bool) {
+                Ok(b.assert_eq_bool(block, span.clone(), g, w, diag_span))
+            } else {
+                Ok(b.assert_eq_i64(block, span.clone(), g, w, diag_span))
+            }
         }
         Stmt::Ret { span, value } => {
             let v = lower_operand(b, block, value, env)?;
             b.ret(block, span.clone(), v);
             Ok(block)
         }
-        _ => Err(LowerError::unsupported(
-            "statement not supported in test body",
-        )),
+        _ => Err(LowerError::Unsupported(format!(
+            "lower: statement not supported in {body_label}"
+        ))),
     }
+}
+
+fn operand_is_bool(op: &Operand) -> bool {
+    matches!(op, Operand::Bool(_, _))
+}
+
+fn rhs_is_bool(rhs: &Rhs) -> bool {
+    match rhs {
+        Rhs::Not { .. } => true,
+        Rhs::Operand(Operand::Bool(_, _)) => true,
+        Rhs::BinOp {
+            ty, op: BinOp::Eq, ..
+        } if type_is_bool(ty) => true,
+        _ => false,
+    }
+}
+
+fn assert_operands_are_bool(
+    got: &Operand,
+    want: &Operand,
+    env_bool: &std::collections::HashSet<String>,
+) -> bool {
+    let got_b = operand_is_bool(got) || matches!(got, Operand::Name(n, _) if env_bool.contains(n));
+    let want_b =
+        operand_is_bool(want) || matches!(want, Operand::Name(n, _) if env_bool.contains(n));
+    got_b && want_b
 }
 
 fn lower_rhs(
@@ -284,22 +356,55 @@ fn lower_rhs(
 ) -> Result<u32, LowerError> {
     match rhs {
         Rhs::BinOp {
-            span, op, lhs, rhs, ..
+            span,
+            op,
+            ty,
+            lhs,
+            rhs,
         } => {
             let l = lower_operand(b, block, lhs, env)?;
             let r = lower_operand(b, block, rhs, env)?;
             match op {
                 BinOp::Add => Ok(b.add_i64(block, span.clone(), l, r)),
+                BinOp::Sub => Ok(b.sub_i64(block, span.clone(), l, r)),
                 BinOp::Mul => Ok(b.mul_i64(block, span.clone(), l, r)),
+                BinOp::Div => lower_div(block, span.clone(), ty, l, r, b),
+                BinOp::Eq if type_is_bool(ty) => Ok(b.eq_bool(block, span.clone(), l, r)),
+                BinOp::Eq => Ok(b.eq_i64(block, span.clone(), l, r)),
                 _ => Err(LowerError::unsupported(
                     "binary operator not lowered in this slice",
                 )),
             }
         }
+        Rhs::Not { operand, span } => {
+            let v = lower_operand(b, block, operand, env)?;
+            let false_v = b.const_bool(block, span.clone(), false);
+            Ok(b.eq_bool(block, span.clone(), v, false_v))
+        }
         Rhs::Operand(op) => Ok(lower_operand(b, block, op, env)?),
         Rhs::Hole { span, .. } => Ok(b.trap_hole(block, span.clone())),
-        Rhs::Call { .. } => Err(LowerError::unsupported("call in function body")),
+        Rhs::Call { .. } => Err(LowerError::unsupported("call in rhs without indices")),
         _ => Err(LowerError::unsupported("rhs form")),
+    }
+}
+
+fn type_is_bool(ty: &Type) -> bool {
+    matches!(ty, Type::Named(n, _) if n == "bool")
+}
+
+fn lower_div(
+    block: usize,
+    span: Span,
+    ty: &Type,
+    l: u32,
+    r: u32,
+    b: &mut Builder,
+) -> Result<u32, LowerError> {
+    match ty {
+        Type::Named(name, _) if name == "i32" => Ok(b.div_i32(block, span, l, r)),
+        Type::Named(name, _) if name == "i64" => Ok(b.div_i64(block, span, l, r)),
+        Type::Named(name, _) if name == "f64" => Ok(b.div_f64(block, span, l, r)),
+        _ => Err(LowerError::unsupported("div type")),
     }
 }
 
@@ -308,17 +413,20 @@ fn lower_rhs_call(
     block: usize,
     rhs: &Rhs,
     env: &std::collections::HashMap<String, u32>,
-    fn_indices: &std::collections::HashMap<String, usize>,
+    maps: &CalleeMaps,
 ) -> Result<u32, LowerError> {
     if let Rhs::Call { span, callee, args } = rhs {
-        let callee_idx = fn_indices
-            .get(callee)
-            .ok_or_else(|| LowerError::unsupported("unknown callee"))?;
         let argv: Vec<u32> = args
             .iter()
             .map(|a| lower_operand(b, block, a, env))
             .collect::<Result<Vec<_>, _>>()?;
-        return Ok(b.call_fn(block, span.clone(), *callee_idx, &argv));
+        if let Some(callee_idx) = maps.fn_indices.get(callee) {
+            return Ok(b.call_fn(block, span.clone(), *callee_idx, &argv));
+        }
+        if let Some(import_idx) = maps.import_indices.get(callee) {
+            return Ok(b.call_import(block, span.clone(), *import_idx, &argv));
+        }
+        return Err(LowerError::unsupported("unknown callee"));
     }
     lower_rhs(b, block, rhs, env)
 }

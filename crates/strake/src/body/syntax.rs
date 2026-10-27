@@ -1207,7 +1207,7 @@ impl<'a> Parser<'a> {
         }
         if self.eat_ident("ret")? {
             let value = self.parse_operand()?;
-            let end = self.lex.byte_pos();
+            let end = operand_span_end(&value);
             return Ok(Stmt::Ret {
                 span: span(self.file, st, end),
                 value,
@@ -1620,8 +1620,9 @@ impl<'a> Parser<'a> {
                     let (s, e) = self.span_of();
                     return Err(e_parse(self.file, s, e));
                 }
+                let end = operand_span_end(&rhs);
                 return Ok(Rhs::BinOp {
-                    span: span(self.file, hst, self.lex.byte_pos()),
+                    span: span(self.file, hst, end),
                     op,
                     ty,
                     lhs,
@@ -1657,8 +1658,9 @@ impl<'a> Parser<'a> {
         if !self.eat_tok(Tok::RParen)? {
             return Err(self.err_here());
         }
+        let end = self.lex.byte_pos();
         Ok(Rhs::Call {
-            span: span(self.file, start, self.lex.byte_pos()),
+            span: span(self.file, start, end),
             callee,
             args,
         })
@@ -1745,6 +1747,17 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(Type::Named(name, span(self.file, st, en)))
+    }
+}
+
+fn operand_span_end(op: &Operand) -> u32 {
+    match op {
+        Operand::Int(_, s)
+        | Operand::Float(_, s)
+        | Operand::Bytes(_, s)
+        | Operand::Unit(s)
+        | Operand::Bool(_, s)
+        | Operand::Name(_, s) => s.end,
     }
 }
 

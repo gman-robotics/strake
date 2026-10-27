@@ -189,6 +189,25 @@ pub struct Span {
 }
 
 /// Render a scalar immediate for catalog `want`/`got` fields (§2.8, catalog `render`).
+pub(crate) fn trap_diag(code: Code, span: Span) -> Diag {
+    Diag {
+        code,
+        kind: Kind::Trap,
+        span,
+        want: None,
+        got: None,
+        patch: None,
+    }
+}
+
+pub(crate) fn render_scalar_bool(b: bool) -> String {
+    if b {
+        "true".to_string()
+    } else {
+        "false".to_string()
+    }
+}
+
 pub(crate) fn render_scalar_i64(n: i64) -> String {
     n.to_string()
 }

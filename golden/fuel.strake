@@ -1,0 +1,7 @@
+strake 1
+fuel 0
+
+test fuel.zero
+  x = add i64 1 2
+  ret 0
+end
