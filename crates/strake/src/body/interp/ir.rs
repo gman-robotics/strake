@@ -98,6 +98,17 @@ pub(crate) enum FinishError {
         phi_dst: VReg,
         pred_block: usize,
     },
+    SsaPhiMissingPredecessor {
+        fn_name: String,
+        block: usize,
+        phi_dst: VReg,
+        pred_block: usize,
+    },
+    SsaPhiImmediate {
+        fn_name: String,
+        block: usize,
+        phi_dst: VReg,
+    },
 }
 
 fn is_terminator(op: Op) -> bool {
@@ -169,13 +180,27 @@ fn verify_function_ssa(func: &Function) -> Result<(), FinishError> {
             if inst.op != Op::Phi {
                 continue;
             }
-            let Imm::Blocks(phi_preds) = &inst.imm else {
-                continue;
-            };
             let dst = inst.dst.unwrap_or(0);
+            let Imm::Blocks(phi_preds) = &inst.imm else {
+                return Err(FinishError::SsaPhiImmediate {
+                    fn_name: func.name.clone(),
+                    block: bi,
+                    phi_dst: dst,
+                });
+            };
             for pred in phi_preds {
                 if !predecessors[bi].contains(pred) {
                     return Err(FinishError::SsaPhiPredecessor {
+                        fn_name: func.name.clone(),
+                        block: bi,
+                        phi_dst: dst,
+                        pred_block: *pred,
+                    });
+                }
+            }
+            for pred in &predecessors[bi] {
+                if !phi_preds.contains(pred) {
+                    return Err(FinishError::SsaPhiMissingPredecessor {
                         fn_name: func.name.clone(),
                         block: bi,
                         phi_dst: dst,
@@ -787,6 +812,25 @@ impl FinishError {
                     "ssa verify: function `{fn_name}` block {block} phi %{phi_dst}: predecessor block {pred_block} is not a CFG predecessor"
                 )
             }
+            FinishError::SsaPhiMissingPredecessor {
+                fn_name,
+                block,
+                phi_dst,
+                pred_block,
+            } => {
+                format!(
+                    "ssa verify: function `{fn_name}` block {block} phi %{phi_dst}: missing incoming for CFG predecessor block {pred_block}"
+                )
+            }
+            FinishError::SsaPhiImmediate {
+                fn_name,
+                block,
+                phi_dst,
+            } => {
+                format!(
+                    "ssa verify: function `{fn_name}` block {block} phi %{phi_dst}: immediate is not a block list"
+                )
+            }
         }
     }
 }
@@ -853,6 +897,81 @@ mod tests {
                 pred_block: 0,
                 ..
             } if fn_name == "bad_phi"
+        ));
+    }
+
+    #[test]
+    fn finish_rejects_phi_missing_cfg_predecessor() {
+        let mut b = Builder::new();
+        b.begin_function("missing_pred", 0);
+        let entry = 0;
+        let then_b = b.new_block();
+        let else_b = b.new_block();
+        let join = b.new_block();
+        let cond = b.const_i64(entry, span(), 1);
+        b.br_if(entry, span(), cond, then_b, else_b);
+        b.br(then_b, span(), join);
+        b.br(else_b, span(), join);
+        let dst = b.alloc_vreg();
+        b.phi(join, span(), dst, &[(then_b, 0)]);
+        b.ret(join, span(), dst);
+        let err = b.finish().unwrap_err();
+        assert!(matches!(
+            err,
+            FinishError::SsaPhiMissingPredecessor {
+                fn_name,
+                block: 3,
+                pred_block: 2,
+                ..
+            } if fn_name == "missing_pred"
+        ));
+    }
+
+    #[test]
+    fn finish_rejects_phi_non_block_immediate() {
+        let s = span();
+        let func = Function {
+            name: "bad_imm".into(),
+            param_count: 0,
+            blocks: vec![
+                Block {
+                    insts: vec![Inst {
+                        op: Op::Br,
+                        dst: None,
+                        args: vec![],
+                        imm: Imm::Block(1),
+                        span: s.clone(),
+                    }],
+                },
+                Block {
+                    insts: vec![
+                        Inst {
+                            op: Op::Phi,
+                            dst: Some(1),
+                            args: vec![0],
+                            imm: Imm::None,
+                            span: s.clone(),
+                        },
+                        Inst {
+                            op: Op::Ret,
+                            dst: None,
+                            args: vec![1],
+                            imm: Imm::Ret(RetImm::Normal),
+                            span: s.clone(),
+                        },
+                    ],
+                },
+            ],
+        };
+        let err = verify_function_ssa(&func).unwrap_err();
+        assert!(matches!(
+            err,
+            FinishError::SsaPhiImmediate {
+                fn_name,
+                block: 1,
+                phi_dst: 1,
+                ..
+            } if fn_name == "bad_imm"
         ));
     }
 }

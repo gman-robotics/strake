@@ -56,3 +56,35 @@ fn if_nonlast_fn_exits_0() {
     assert_eq!(status.code(), Some(0));
     assert!(stderr.is_empty());
 }
+
+#[test]
+fn if_fn_nested_outer_join_exits_0() {
+    let path = golden("if_fn_nested_outer_join.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn if_fn_nested_outer_join_first_exits_0() {
+    let path = golden("if_fn_nested_outer_join_first.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn if_test_outer_join_after_split_exits_0() {
+    let path = golden("if_test_outer_join_after_split.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn fn_no_ret_fuel5_exits_2_empty_stderr() {
+    let path = golden("fn_no_ret_fuel5.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(2));
+    assert!(stderr.is_empty());
+}

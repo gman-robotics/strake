@@ -1,0 +1,20 @@
+strake 1
+
+fn f(c: bool) -> i64
+  if c
+    v = add i64 1 0
+    if false
+      w = add i64 9 0
+    else
+      w = add i64 8 0
+    end
+  else
+    v = add i64 2 0
+  end
+  ret v
+end
+
+test if_fn_nested_outer_join
+  r = call f(true)
+  assert.eq r 1
+end

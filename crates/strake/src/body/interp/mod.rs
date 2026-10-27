@@ -173,7 +173,11 @@ impl<'a> Machine<'a> {
 
     fn exec_inst(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
         let span = inst.span.clone();
-        if inst.op != Op::Call {
+        let skip_fuel = matches!(
+            inst.op,
+            Op::Trap if matches!(inst.imm, Imm::Trap(TrapImm::Fallthrough))
+        );
+        if inst.op != Op::Call && !skip_fuel {
             self.charge(1, span.clone())?;
         }
         match inst.op {

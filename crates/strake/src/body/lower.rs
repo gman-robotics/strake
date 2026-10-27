@@ -250,6 +250,7 @@ fn lower_if(
                     env,
                     maps,
                     env_bool.is_some().then_some(&mut arm_bool),
+                    join_name.as_deref(),
                 )
             },
             |bb, else_b| {
@@ -261,6 +262,7 @@ fn lower_if(
                     env,
                     maps,
                     env_bool.is_some().then_some(&mut arm_bool),
+                    join_name.as_deref(),
                 )
             },
         )
@@ -296,6 +298,7 @@ fn lower_if_arm(
     outer_env: &std::collections::HashMap<String, u32>,
     maps: &CalleeMaps,
     mut env_bool: Option<&mut std::collections::HashSet<String>>,
+    arm_join: Option<&str>,
 ) -> Result<(usize, u32), ()> {
     let mut env = outer_env.clone();
     let mut cur = block;
@@ -321,27 +324,18 @@ fn lower_if_arm(
                 cond,
                 then_body,
                 else_body,
-            } => {
-                let joined = if_join_name(then_body, else_body);
-                cur = lower_if(
-                    b,
-                    cur,
-                    span,
-                    cond,
-                    then_body,
-                    else_body,
-                    &mut env,
-                    maps,
-                    env_bool.as_deref_mut(),
-                )
-                .map_err(|_| ())?;
-                if let Some(name) = joined {
-                    if let Some(&v) = env.get(&name) {
-                        join_v = Some(v);
-                    }
-                }
-                cur
-            }
+            } => lower_if(
+                b,
+                cur,
+                span,
+                cond,
+                then_body,
+                else_body,
+                &mut env,
+                maps,
+                env_bool.as_deref_mut(),
+            )
+            .map_err(|_| ())?,
             Stmt::AssertEq { span, got, want } => {
                 let env_bool = env_bool.as_deref_mut().ok_or(())?;
                 let g = lower_operand(b, cur, got, &env).map_err(|_| ())?;
@@ -356,16 +350,17 @@ fn lower_if_arm(
             _ => return Err(()),
         };
     }
-    let v = match join_v {
-        Some(v) => v,
-        None => {
-            let span = Span {
-                file: "lower".into(),
-                start: 0,
-                end: 0,
-            };
-            b.const_i64(cur, span, 0)
-        }
+    let span = Span {
+        file: "lower".into(),
+        start: 0,
+        end: 0,
+    };
+    let v = match arm_join {
+        Some(name) => env
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| b.const_i64(cur, span.clone(), 0)),
+        None => join_v.unwrap_or_else(|| b.const_i64(cur, span, 0)),
     };
     Ok((cur, v))
 }
