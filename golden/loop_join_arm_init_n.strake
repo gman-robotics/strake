@@ -1,0 +1,15 @@
+strake 1
+
+test loop_join_arm_init_n
+  n = 5
+  c = true
+  if c
+    loop x = n
+      break
+    end
+  else
+    x = 2
+  end
+  assert.eq x 5
+  ret 0
+end

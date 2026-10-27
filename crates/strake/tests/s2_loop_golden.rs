@@ -8,6 +8,7 @@ fn golden(name: &str) -> PathBuf {
 }
 
 const E_SEQ_MSG: &str = "statement follows ret, break, or continue in the same block";
+const E_IF_PHI_MSG: &str = "a name used after if is missing from one arm";
 
 fn run(args: &[&str]) -> (std::process::ExitStatus, String, String) {
     let bin = env!("CARGO_BIN_EXE_strake");
@@ -36,6 +37,13 @@ fn check_e_seq(path: &Path) {
     assert_eq!(status.code(), Some(1));
     assert!(stderr.contains("E_SEQ"), "stderr={stderr}");
     assert!(stderr.contains(E_SEQ_MSG), "stderr={stderr}");
+}
+
+fn check_e_if_phi(path: &Path) {
+    let (status, _stdout, stderr) = run(&["check", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(1));
+    assert!(stderr.contains("E_IF_PHI"), "stderr={stderr}");
+    assert!(stderr.contains(E_IF_PHI_MSG), "stderr={stderr}");
 }
 
 fn test_exits_70_contains(path: &Path, needle: &str) {
@@ -274,4 +282,34 @@ fn loop_seq_continue_in_if_check_e_seq() {
 #[test]
 fn loop_seq_both_arms_terminate_check_e_seq() {
     check_e_seq(&golden("loop_seq_both_arms_terminate.strake"));
+}
+
+#[test]
+fn loop_init_ba_exits_0() {
+    test_exits_0(&golden("loop_init_ba.strake"));
+}
+
+#[test]
+fn loop_both_arms_nested_if_exits_0() {
+    test_exits_0(&golden("loop_both_arms_nested_if.strake"));
+}
+
+#[test]
+fn loop_join_arm_init_n_exits_0() {
+    test_exits_0(&golden("loop_join_arm_init_n.strake"));
+}
+
+#[test]
+fn loop_fn_and_test_loops_exits_0() {
+    test_exits_0(&golden("loop_fn_and_test_loops.strake"));
+}
+
+#[test]
+fn loop_dual_loop_join_exits_0() {
+    test_exits_0(&golden("loop_dual_loop_join.strake"));
+}
+
+#[test]
+fn if_nested_then_else_direct_check_e_if_phi() {
+    check_e_if_phi(&golden("if_nested_then_else_direct_e_if_phi.strake"));
 }
