@@ -2947,7 +2947,6 @@ end
     }
 
     #[test]
-    #[test]
     fn parse_forall_list_local_name() {
         let src =
             "strake 1\n\nproperty p\n  t0 = list.empty i64\n  forall n: i64 in t0\n  end\nend\n";
