@@ -60,12 +60,11 @@ fn fn_without_ret_called_from_test_exits_2_empty_stderr() {
 }
 
 #[test]
-fn add2_worked_property_forall_exits_70() {
+fn add2_worked_property_forall_exits_0() {
     let path = golden("add2_worked.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(70));
-    assert!(stderr.contains("property body"));
-    assert!(!stderr.contains("\"code\""));
+    assert_eq!(status.code(), Some(0));
+    assert!(stderr.is_empty());
 }
 
 #[test]

@@ -306,6 +306,176 @@ impl Builder {
         dst
     }
 
+    pub(crate) fn copy_i64(&mut self, block: usize, span: Span, dst: VReg, src: VReg) {
+        let z = self.const_i64(block, span.clone(), 0);
+        self.emit(
+            block,
+            Inst {
+                op: Op::Add,
+                dst: Some(dst),
+                args: vec![src, z],
+                imm: Imm::None,
+                span,
+            },
+        );
+    }
+
+    pub(crate) fn ge_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Ge,
+                dst: Some(dst),
+                args: vec![lhs, rhs],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn list_empty(&mut self, block: usize, span: Span, type_id: i32) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::ListEmpty,
+                dst: Some(dst),
+                args: Vec::new(),
+                imm: Imm::I32(type_id),
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn list_cons(&mut self, block: usize, span: Span, head: VReg, tail: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::ListCons,
+                dst: Some(dst),
+                args: vec![head, tail],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn list_len(&mut self, block: usize, span: Span, list: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::ListLen,
+                dst: Some(dst),
+                args: vec![list],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn list_get(&mut self, block: usize, span: Span, list: VReg, index: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::ListGet,
+                dst: Some(dst),
+                args: vec![list, index],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn sum_new(&mut self, block: usize, span: Span, tag: i32, payload: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::SumNew,
+                dst: Some(dst),
+                args: vec![payload],
+                imm: Imm::I32(tag),
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn sum_tag(&mut self, block: usize, span: Span, sum: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::SumTag,
+                dst: Some(dst),
+                args: vec![sum],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn sum_payload(&mut self, block: usize, span: Span, sum: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::SumPayload,
+                dst: Some(dst),
+                args: vec![sum],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn trap_lower(&mut self, block: usize, span: Span) {
+        self.emit(
+            block,
+            Inst {
+                op: Op::Trap,
+                dst: None,
+                args: Vec::new(),
+                imm: Imm::Trap(TrapImm::Lower),
+                span,
+            },
+        );
+    }
+
+    pub(crate) fn dispatch_table(
+        &mut self,
+        block: usize,
+        span: Span,
+        tag: VReg,
+        targets: &[usize],
+    ) {
+        self.br_table(block, span, tag, targets);
+    }
+
+    fn br_table(&mut self, block: usize, span: Span, tag: VReg, targets: &[usize]) {
+        self.emit(
+            block,
+            Inst {
+                op: Op::BrTable,
+                dst: None,
+                args: vec![tag],
+                imm: Imm::Blocks(targets.to_vec()),
+                span,
+            },
+        );
+    }
+
     pub(crate) fn eq_bool(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
         let dst = self.alloc_vreg();
         self.emit(
@@ -430,6 +600,20 @@ impl Builder {
         self.ret(block, span, v);
     }
 
+    pub(crate) fn jmp(&mut self, block: usize, span: Span, target: usize) {
+        self.br(block, span, target);
+    }
+
+    pub(crate) fn merge_regs(
+        &mut self,
+        block: usize,
+        span: Span,
+        dst: VReg,
+        pairs: &[(usize, VReg)],
+    ) {
+        self.phi(block, span, dst, pairs);
+    }
+
     fn br(&mut self, block: usize, span: Span, target: usize) {
         self.emit(
             block,
@@ -443,7 +627,7 @@ impl Builder {
         );
     }
 
-    fn phi(&mut self, block: usize, span: Span, dst: VReg, pairs: &[(usize, VReg)]) {
+    pub(crate) fn phi(&mut self, block: usize, span: Span, dst: VReg, pairs: &[(usize, VReg)]) {
         let mut args = Vec::new();
         let mut blocks = Vec::new();
         for (b, v) in pairs {
@@ -462,7 +646,7 @@ impl Builder {
         );
     }
 
-    fn br_if(
+    pub(crate) fn cond_branch(
         &mut self,
         block: usize,
         span: Span,
@@ -492,9 +676,9 @@ impl Builder {
         diag_span: Span,
     ) -> usize {
         let eq = self.eq_i64(block, span.clone(), got, want);
-        let fail = self.new_block();
         let pass = self.new_block();
-        self.br_if(block, span.clone(), eq, pass, fail);
+        let fail = self.new_block();
+        self.cond_branch(block, span.clone(), eq, pass, fail);
         self.ret_test_fail(fail, span.clone(), want, got, diag_span);
         pass
     }
@@ -508,14 +692,44 @@ impl Builder {
         diag_span: Span,
     ) -> usize {
         let eq = self.eq_bool(block, span.clone(), got, want);
-        let fail = self.new_block();
         let pass = self.new_block();
-        self.br_if(block, span.clone(), eq, pass, fail);
+        let fail = self.new_block();
+        self.cond_branch(block, span.clone(), eq, pass, fail);
         self.ret_test_fail(fail, span.clone(), want, got, diag_span);
         pass
     }
 
     /// Structured `if` with one i64 join value per arm (invariant 1).
+    pub(crate) fn if_join_bool<F1, F2>(
+        &mut self,
+        block: usize,
+        span: Span,
+        cond: VReg,
+        then_fn: F1,
+        else_fn: F2,
+    ) -> Result<(usize, VReg), ()>
+    where
+        F1: FnOnce(&mut Builder, usize) -> Result<(usize, VReg), ()>,
+        F2: FnOnce(&mut Builder, usize) -> Result<(usize, VReg), ()>,
+    {
+        let then_b = self.new_block();
+        let else_b = self.new_block();
+        let join_b = self.new_block();
+        self.cond_branch(block, span.clone(), cond, then_b, else_b);
+        let (then_end, then_v) = then_fn(self, then_b)?;
+        self.br(then_end, span.clone(), join_b);
+        let (else_end, else_v) = else_fn(self, else_b)?;
+        self.br(else_end, span.clone(), join_b);
+        let dst = self.alloc_vreg();
+        self.phi(
+            join_b,
+            span.clone(),
+            dst,
+            &[(then_b, then_v), (else_b, else_v)],
+        );
+        Ok((join_b, dst))
+    }
+
     pub(crate) fn if_join_i64<F1, F2>(
         &mut self,
         block: usize,
@@ -531,7 +745,7 @@ impl Builder {
         let then_b = self.new_block();
         let else_b = self.new_block();
         let join_b = self.new_block();
-        self.br_if(block, span.clone(), cond, then_b, else_b);
+        self.cond_branch(block, span.clone(), cond, then_b, else_b);
         let (then_end, then_v) = then_fn(self, then_b)?;
         self.br(then_end, span.clone(), join_b);
         let (else_end, else_v) = else_fn(self, else_b)?;
@@ -585,7 +799,7 @@ impl Builder {
                                 }
                             }
                         }
-                        Op::BrIf => {
+                        Op::BrIf | Op::BrTable => {
                             if let Imm::Blocks(ts) = &inst.imm {
                                 for t in ts {
                                     if *t >= n {
@@ -667,6 +881,19 @@ mod tests {
             err,
             FinishError::InvalidBranchTarget { target: 99, .. }
         ));
+    }
+
+    #[test]
+    fn trap_lower_emits_trap_opcode() {
+        let mut b = Builder::new();
+        b.begin_function("f", 0);
+        let entry = 0;
+        b.trap_lower(entry, span());
+        let program = b.finish().expect("finish");
+        assert!(program.functions[0].blocks[0]
+            .insts
+            .iter()
+            .any(|i| i.op == Op::Trap));
     }
 
     #[test]

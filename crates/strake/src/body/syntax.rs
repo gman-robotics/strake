@@ -20,6 +20,16 @@ pub enum Item {
     Use(UseDecl),
     Fuel(i128, Span),
     Pages(i128, Span),
+    Bind {
+        span: Span,
+        name: String,
+        value: i128,
+    },
+    ListBind {
+        span: Span,
+        name: String,
+        rhs: Rhs,
+    },
     Fn(FnItem),
     Test(TestItem),
     Property(PropertyItem),
@@ -189,12 +199,18 @@ pub struct MatchArm {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum StaticI64 {
+    Lit(i128, Span),
+    Name(String, Span),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ForallBound {
     Range {
         span: Span,
         ty: Type,
-        lo: i128,
-        hi: i128,
+        lo: StaticI64,
+        hi: StaticI64,
     },
     List {
         span: Span,
@@ -322,6 +338,14 @@ pub fn format(module: &Module) -> String {
 pub fn codeless_rejection(module: &Module) -> Option<&'static str> {
     let mut fuel = 0u32;
     let mut pages = 0u32;
+    let module_list_names: std::collections::HashSet<String> = module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::ListBind { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
     let priv_fns: std::collections::HashSet<String> = module
         .items
         .iter()
@@ -344,12 +368,210 @@ pub fn codeless_rejection(module: &Module) -> Option<&'static str> {
                     return Some("module may contain at most one pages directive");
                 }
             }
+            Item::Fn(f) => {
+                if fn_has_match_join_gap(&f.body) {
+                    return Some("match arms must agree on join bindings");
+                }
+            }
             Item::Test(t) => {
                 if test_calls_priv(t, &priv_fns) {
                     return Some("tests must call exported functions only");
                 }
+                if block_has_match_join_gap(&t.body) {
+                    return Some("match arms must agree on join bindings");
+                }
+            }
+            Item::Property(p) => {
+                if block_has_forall_list_bad(&p.body, &module_list_names) {
+                    return Some("list forall must use a module-level list literal binding");
+                }
+                if block_has_match_join_gap(&p.body) {
+                    return Some("match arms must agree on join bindings");
+                }
             }
             _ => {}
+        }
+    }
+    None
+}
+
+fn block_has_forall_list_bad(
+    stmts: &[Stmt],
+    module_list_names: &std::collections::HashSet<String>,
+) -> bool {
+    for stmt in stmts {
+        if let Stmt::Forall {
+            bound: ForallBound::List { name, .. },
+            ..
+        } = stmt
+        {
+            if !module_list_names.contains(name) {
+                return true;
+            }
+        }
+        if walk_stmt_forall_list(stmt, module_list_names) {
+            return true;
+        }
+    }
+    false
+}
+
+fn walk_stmt_forall_list(
+    stmt: &Stmt,
+    module_list_names: &std::collections::HashSet<String>,
+) -> bool {
+    match stmt {
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            block_has_forall_list_bad(then_body, module_list_names)
+                || block_has_forall_list_bad(else_body, module_list_names)
+        }
+        Stmt::Loop { body, .. } | Stmt::For { body, .. } | Stmt::Forall { body, .. } => {
+            block_has_forall_list_bad(body, module_list_names)
+        }
+        Stmt::Match { arms, .. } => arms
+            .iter()
+            .any(|a| block_has_forall_list_bad(&a.body, module_list_names)),
+        _ => false,
+    }
+}
+
+fn fn_has_match_join_gap(stmts: &[Stmt]) -> bool {
+    block_has_match_join_gap(stmts)
+}
+
+fn block_has_match_join_gap(stmts: &[Stmt]) -> bool {
+    let mut i = 0;
+    while i < stmts.len() {
+        if let Stmt::Match { arms, .. } = &stmts[i] {
+            let rest = &stmts[i + 1..];
+            let join_names = names_used_after_match(rest);
+            for name in join_names {
+                let arm_count = arms.len();
+                let assigns = arms
+                    .iter()
+                    .filter(|a| arm_top_assign_name(&a.body) == Some(name.clone()))
+                    .count();
+                if assigns > 0 && assigns < arm_count {
+                    return true;
+                }
+            }
+            for arm in arms {
+                if block_has_match_join_gap(&arm.body) {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn names_used_after_match(stmts: &[Stmt]) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for stmt in stmts {
+        collect_name_uses_stmt(stmt, &mut out);
+    }
+    out
+}
+
+fn collect_name_uses_stmt(stmt: &Stmt, out: &mut std::collections::HashSet<String>) {
+    match stmt {
+        Stmt::Assign { rhs, .. } => collect_name_uses_rhs(rhs, out),
+        Stmt::Ret { value, .. } => collect_name_uses_operand(value, out),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            collect_name_uses_operand(cond, out);
+            for s in then_body {
+                collect_name_uses_stmt(s, out);
+            }
+            for s in else_body {
+                collect_name_uses_stmt(s, out);
+            }
+        }
+        Stmt::AssertEq { got, want, .. } => {
+            collect_name_uses_operand(got, out);
+            collect_name_uses_operand(want, out);
+        }
+        Stmt::Continue { edges, .. } => {
+            for e in edges {
+                collect_name_uses_operand(&e.value, out);
+            }
+        }
+        Stmt::Loop { params, body, .. } => {
+            for p in params {
+                collect_name_uses_operand(&p.init, out);
+            }
+            for s in body {
+                collect_name_uses_stmt(s, out);
+            }
+        }
+        Stmt::For { body, .. } | Stmt::Forall { body, .. } => {
+            for s in body {
+                collect_name_uses_stmt(s, out);
+            }
+        }
+        Stmt::Match { arms, .. } => {
+            for arm in arms {
+                for s in &arm.body {
+                    collect_name_uses_stmt(s, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_name_uses_rhs(rhs: &Rhs, out: &mut std::collections::HashSet<String>) {
+    match rhs {
+        Rhs::BinOp { lhs, rhs, .. } => {
+            collect_name_uses_operand(lhs, out);
+            collect_name_uses_operand(rhs, out);
+        }
+        Rhs::Not { operand, .. } => collect_name_uses_operand(operand, out),
+        Rhs::Call { args, .. } => {
+            for a in args {
+                collect_name_uses_operand(a, out);
+            }
+        }
+        Rhs::Ok { value, .. } | Rhs::Err { value, .. } => collect_name_uses_operand(value, out),
+        Rhs::ListCons { head, tail, .. } => {
+            collect_name_uses_operand(head, out);
+            collect_name_uses_operand(tail, out);
+        }
+        Rhs::ListLen { list, .. } => collect_name_uses_operand(list, out),
+        Rhs::ListGet { list, index, .. } => {
+            collect_name_uses_operand(list, out);
+            collect_name_uses_operand(index, out);
+        }
+        Rhs::BytesLen { bytes, .. } => collect_name_uses_operand(bytes, out),
+        Rhs::Load { addr, .. } => collect_name_uses_operand(addr, out),
+        Rhs::Store { addr, value, .. } => {
+            collect_name_uses_operand(addr, out);
+            collect_name_uses_operand(value, out);
+        }
+        Rhs::Operand(op) => collect_name_uses_operand(op, out),
+        _ => {}
+    }
+}
+
+fn collect_name_uses_operand(op: &Operand, out: &mut std::collections::HashSet<String>) {
+    if let Operand::Name(n, _) = op {
+        out.insert(n.clone());
+    }
+}
+
+fn arm_top_assign_name(body: &[Stmt]) -> Option<String> {
+    for stmt in body {
+        if let Stmt::Assign { name, .. } = stmt {
+            return Some(name.clone());
         }
     }
     None
@@ -918,6 +1140,51 @@ impl<'a> Parser<'a> {
         if self.eat_ident("property")? {
             return Ok(Item::Property(self.parse_property(s)?));
         }
+        if let Some(item) = self.try_parse_module_bind(s)? {
+            return Ok(item);
+        }
+        Err(self.err_here())
+    }
+
+    fn try_parse_module_bind(&mut self, start: u32) -> Result<Option<Item>, Diag> {
+        let Some((Tok::Ident(name), nst, nen)) = self.cur.clone() else {
+            return Ok(None);
+        };
+        if matches!(
+            name.as_str(),
+            "type" | "import" | "use" | "fuel" | "pages" | "priv" | "fn" | "test" | "property"
+        ) {
+            return Ok(None);
+        }
+        Self::check_user_name(&name, (nst, nen), self.file)?;
+        match self.peek_token_at(nen) {
+            Ok(Some((Tok::Eq, _, _))) => {}
+            _ => return Ok(None),
+        }
+        self.bump()?;
+        if !self.eat_tok(Tok::Eq)? {
+            return Ok(None);
+        }
+        if let Some((Tok::Int(v), _, ven)) = self.cur.clone() {
+            self.bump()?;
+            return Ok(Some(Item::Bind {
+                span: span(self.file, start, ven),
+                name,
+                value: v,
+            }));
+        }
+        if self.cur_ident() == Some("list.empty") || self.cur_ident() == Some("list.cons") {
+            let rhs = self.parse_rhs(start)?;
+            if !rhs_is_list_literal(&rhs) {
+                return Err(self.err_here());
+            }
+            let end = self.lex.byte_pos();
+            return Ok(Some(Item::ListBind {
+                span: span(self.file, start, end),
+                name,
+                rhs,
+            }));
+        }
         Err(self.err_here())
     }
 
@@ -1401,25 +1668,61 @@ impl<'a> Parser<'a> {
             return Err(self.err_here());
         }
         let bound = if matches!(&self.cur, Some((Tok::Int(_), _, _))) {
-            let (lo, lst, _len) = self.expect_int()?;
+            let (lo_n, lst, len) = self.expect_int()?;
+            let lo = StaticI64::Lit(lo_n, span(self.file, lst, len));
             if !self.eat_tok(Tok::DotDot)? {
                 return Err(self.err_here());
             }
-            let (hi, _hst, hen) = self.expect_int()?;
+            let hi = if matches!(&self.cur, Some((Tok::Int(_), _, _))) {
+                let (n, hst, hen) = self.expect_int()?;
+                StaticI64::Lit(n, span(self.file, hst, hen))
+            } else {
+                let (name, hst, hen) = self.expect_ident()?;
+                Self::check_user_name(&name, (hst, hen), self.file)?;
+                StaticI64::Name(name, span(self.file, hst, hen))
+            };
+            let bound_span = match &hi {
+                StaticI64::Lit(_, s) => s.clone(),
+                StaticI64::Name(_, s) => s.clone(),
+            };
             ForallBound::Range {
-                span: span(self.file, lst, hen),
+                span: bound_span,
                 ty,
                 lo,
                 hi,
             }
-        } else {
+        } else if matches!(&self.cur, Some((Tok::Ident(_), _, _))) {
             let (name, nst, nen) = self.expect_ident()?;
             Self::check_user_name(&name, (nst, nen), self.file)?;
-            ForallBound::List {
-                span: span(self.file, nst, nen),
-                ty,
-                name,
+            if self.eat_tok(Tok::DotDot)? {
+                let lo = StaticI64::Name(name, span(self.file, nst, nen));
+                let hi = if matches!(&self.cur, Some((Tok::Int(_), _, _))) {
+                    let (n, hst, hen) = self.expect_int()?;
+                    StaticI64::Lit(n, span(self.file, hst, hen))
+                } else {
+                    let (hi_name, hst, hen) = self.expect_ident()?;
+                    Self::check_user_name(&hi_name, (hst, hen), self.file)?;
+                    StaticI64::Name(hi_name, span(self.file, hst, hen))
+                };
+                let bound_span = match &hi {
+                    StaticI64::Lit(_, s) => s.clone(),
+                    StaticI64::Name(_, s) => s.clone(),
+                };
+                ForallBound::Range {
+                    span: bound_span,
+                    ty,
+                    lo,
+                    hi,
+                }
+            } else {
+                ForallBound::List {
+                    span: span(self.file, nst, nen),
+                    ty,
+                    name,
+                }
             }
+        } else {
+            return Err(self.err_here());
         };
         let body = self.parse_block(ctx)?;
         let end = self.lex.byte_pos();
@@ -1655,12 +1958,15 @@ impl<'a> Parser<'a> {
                 break;
             }
         }
+        let (_, _, rpen) = match self.cur.clone() {
+            Some((Tok::RParen, s, e)) => (Tok::RParen, s, e),
+            _ => return Err(self.err_here()),
+        };
         if !self.eat_tok(Tok::RParen)? {
             return Err(self.err_here());
         }
-        let end = self.lex.byte_pos();
         Ok(Rhs::Call {
-            span: span(self.file, start, end),
+            span: span(self.file, start, rpen),
             callee,
             args,
         })
@@ -1759,6 +2065,17 @@ fn operand_span_end(op: &Operand) -> u32 {
         | Operand::Bool(_, s)
         | Operand::Name(_, s) => s.end,
     }
+}
+
+fn format_static_i64(b: &StaticI64) -> String {
+    match b {
+        StaticI64::Lit(n, _) => n.to_string(),
+        StaticI64::Name(name, _) => name.clone(),
+    }
+}
+
+fn rhs_is_list_literal(rhs: &Rhs) -> bool {
+    matches!(rhs, Rhs::ListEmpty { .. } | Rhs::ListCons { .. })
 }
 
 fn span(file: &str, start: u32, end: u32) -> Span {
@@ -1941,6 +2258,12 @@ impl Fmt {
             Item::Use(u) => self.format_use(u),
             Item::Fuel(n, _) => self.writeln(&format!("fuel {}", n)),
             Item::Pages(n, _) => self.writeln(&format!("pages {}", n)),
+            Item::Bind { name, value, .. } => {
+                self.writeln(&format!("{name} = {value}"));
+            }
+            Item::ListBind { name, rhs, .. } => {
+                self.writeln(&format!("{name} = {}", self.format_rhs(rhs)));
+            }
             Item::Fn(f) => self.format_fn(f),
             Item::Test(t) => self.format_test(t),
             Item::Property(p) => self.format_property(p),
@@ -2167,8 +2490,8 @@ impl Fmt {
                             "forall {}: {} in {}..{}",
                             binder,
                             self.type_string(ty),
-                            lo,
-                            hi
+                            format_static_i64(lo),
+                            format_static_i64(hi)
                         )
                     }
                     ForallBound::List { ty, name, .. } => {
@@ -2621,6 +2944,14 @@ end
     fn e_parse_keyword_nested_call_operand() {
         let src = "strake 1\n\nfn f() -> i64\n  x = add i64 call g(1) 2\n  ret x\nend\n";
         assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    #[test]
+    fn parse_forall_list_local_name() {
+        let src =
+            "strake 1\n\nproperty p\n  t0 = list.empty i64\n  forall n: i64 in t0\n  end\nend\n";
+        parse(src, "t.strake").expect("parse forall list");
     }
 
     #[test]

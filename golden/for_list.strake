@@ -1,0 +1,18 @@
+strake 1
+
+fn probe() -> unit
+  t0 = list.empty i64
+  t1 = list.cons 1 t0
+  r = list.get t1 9
+  match r
+    ok v ->
+      trap
+    err _ ->
+      ret unit
+  end
+end
+
+test for_list
+  x = call probe()
+  ret 0
+end

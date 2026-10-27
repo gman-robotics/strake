@@ -20,8 +20,14 @@ pub enum Value {
     I32(i32),
     Bool(bool),
     F64(f64),
-    #[allow(dead_code)]
     Unit,
+    Handle(usize),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum HeapVal {
+    List(Vec<Value>),
+    Sum { tag: u32, payload: Value },
 }
 
 pub(crate) struct Machine<'a> {
@@ -29,6 +35,7 @@ pub(crate) struct Machine<'a> {
     host: &'a dyn Host,
     fuel: i64,
     frames: Vec<Frame>,
+    heap: Vec<HeapVal>,
     root_return: Option<i64>,
     result_diags: Vec<Diag>,
     test_channel: bool,
@@ -71,6 +78,7 @@ impl<'a> Machine<'a> {
             host,
             fuel,
             frames: Vec::new(),
+            heap: Vec::new(),
             root_return: None,
             result_diags: Vec::new(),
             test_channel,
@@ -291,7 +299,6 @@ impl<'a> Machine<'a> {
                     _ => RetImm::Normal,
                 };
                 let v = self.read_reg(inst.args[0])?;
-                let ret_i64 = value_as_i64(&v)?;
                 let is_normal_ret = matches!(&ret_imm, RetImm::Normal);
                 match ret_imm {
                     RetImm::TestFail {
@@ -321,6 +328,7 @@ impl<'a> Machine<'a> {
                         caller.regs[dst as usize] = Some(v);
                     }
                 } else if self.frames.is_empty() {
+                    let ret_i64 = value_as_i64(&v)?;
                     if self.test_channel && ret_i64 == 77 && is_normal_ret {
                         self.result_diags.push(Diag {
                             code: Code::ERefused,
@@ -373,6 +381,72 @@ impl<'a> Machine<'a> {
                     TrapImm::User => Code::EType,
                 };
                 return Err(ExecFault::Trap { code, span });
+            }
+            Op::Ge => {
+                let (a, b) = self.two_i64(inst)?;
+                self.write_reg(inst.dst, Value::Bool(a >= b))?;
+            }
+            Op::BrTable => {
+                let tag = value_as_i64(&self.read_reg(inst.args[0])?)? as usize;
+                let targets = blocks_imm(&inst.imm)?;
+                let t = targets
+                    .get(tag)
+                    .copied()
+                    .ok_or_else(|| ExecFault::Codeless("br_table tag out of range".into()))?;
+                self.jump(t, 0)?;
+            }
+            Op::ListEmpty => {
+                let Imm::I32(type_id) = inst.imm else {
+                    return Err(ExecFault::Codeless("bad list.empty imm".into()));
+                };
+                let _ = type_id;
+                let idx = self.heap.len();
+                self.heap.push(HeapVal::List(Vec::new()));
+                self.write_reg(inst.dst, Value::Handle(idx))?;
+            }
+            Op::ListCons => {
+                let head = self.read_reg(inst.args[0])?;
+                let tail_h = self.read_reg(inst.args[1])?;
+                let tail_list = self.heap_list_mut(&tail_h)?;
+                let mut new_list = tail_list.clone();
+                new_list.insert(0, head);
+                let idx = self.heap.len();
+                self.heap.push(HeapVal::List(new_list));
+                self.write_reg(inst.dst, Value::Handle(idx))?;
+            }
+            Op::ListLen => {
+                let list_h = self.read_reg(inst.args[0])?;
+                let len = self.heap_list(&list_h)?.len() as i64;
+                self.write_reg(inst.dst, Value::I64(len))?;
+            }
+            Op::ListGet => {
+                let list_h = self.read_reg(inst.args[0])?;
+                let idx = value_as_i64(&self.read_reg(inst.args[1])?)?;
+                let list = self.heap_list(&list_h)?;
+                let sum_h = if idx < 0 || idx as usize >= list.len() {
+                    self.alloc_sum(1, Value::Unit)
+                } else {
+                    self.alloc_sum(0, list[idx as usize].clone())
+                };
+                self.write_reg(inst.dst, Value::Handle(sum_h))?;
+            }
+            Op::SumNew => {
+                let Imm::I32(tag) = inst.imm else {
+                    return Err(ExecFault::Codeless("bad sum.new imm".into()));
+                };
+                let payload = self.read_reg(inst.args[0])?;
+                let idx = self.alloc_sum(tag as u32, payload);
+                self.write_reg(inst.dst, Value::Handle(idx))?;
+            }
+            Op::SumTag => {
+                let sum_h = self.read_reg(inst.args[0])?;
+                let (tag, _) = self.heap_sum(&sum_h)?;
+                self.write_reg(inst.dst, Value::I64(tag as i64))?;
+            }
+            Op::SumPayload => {
+                let sum_h = self.read_reg(inst.args[0])?;
+                let (_, payload) = self.heap_sum(&sum_h)?;
+                self.write_reg(inst.dst, payload)?;
             }
             _ => {
                 return Err(ExecFault::Codeless(format!(
@@ -434,6 +508,43 @@ impl<'a> Machine<'a> {
         ensure_reg(&mut frame.regs, r as usize);
         frame.regs[r as usize] = Some(v);
         Ok(())
+    }
+
+    fn alloc_sum(&mut self, tag: u32, payload: Value) -> usize {
+        let idx = self.heap.len();
+        self.heap.push(HeapVal::Sum { tag, payload });
+        idx
+    }
+
+    fn heap_list(&self, h: &Value) -> Result<&Vec<Value>, ExecFault> {
+        let idx = handle_idx(h)?;
+        match &self.heap[idx] {
+            HeapVal::List(v) => Ok(v),
+            _ => Err(ExecFault::Codeless("expected list handle".into())),
+        }
+    }
+
+    fn heap_list_mut(&mut self, h: &Value) -> Result<&Vec<Value>, ExecFault> {
+        let idx = handle_idx(h)?;
+        match &mut self.heap[idx] {
+            HeapVal::List(v) => Ok(v),
+            _ => Err(ExecFault::Codeless("expected list handle".into())),
+        }
+    }
+
+    fn heap_sum(&self, h: &Value) -> Result<(u32, Value), ExecFault> {
+        let idx = handle_idx(h)?;
+        match &self.heap[idx] {
+            HeapVal::Sum { tag, payload } => Ok((*tag, payload.clone())),
+            _ => Err(ExecFault::Codeless("expected sum handle".into())),
+        }
+    }
+}
+
+fn handle_idx(h: &Value) -> Result<usize, ExecFault> {
+    match h {
+        Value::Handle(i) => Ok(*i),
+        _ => Err(ExecFault::Codeless("expected handle".into())),
     }
 }
 
@@ -735,6 +846,27 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn list_get_oob_is_err_tag_one_unit() {
+        let span = Span {
+            file: "t".into(),
+            start: 0,
+            end: 1,
+        };
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let entry = 0;
+        let empty = b.list_empty(entry, span.clone(), 3);
+        let idx = b.const_i64(entry, span.clone(), 99);
+        let slot = b.list_get(entry, span.clone(), empty, idx);
+        let tag = b.sum_tag(entry, span.clone(), slot);
+        b.ret(entry, span.clone(), tag);
+        let program = b.finish().expect("finish");
+        let mut m = Machine::new(&program, 100, &EmptyHost);
+        let ret = m.run_root_function(fidx).expect("run");
+        assert_eq!(ret, 1);
     }
 
     #[test]

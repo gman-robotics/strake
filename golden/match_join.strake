@@ -1,0 +1,15 @@
+strake 1
+
+fn pick(r: result i64 unit) -> i64
+  match r
+    ok v ->
+      out = v
+    err _ ->
+      skipped = 0
+  end
+  ret out
+end
+
+test match_join.miss
+  ret 0
+end

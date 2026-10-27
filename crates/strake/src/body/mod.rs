@@ -89,9 +89,9 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_loop_in_fn_body_returns_exit_70() {
-        let src = "strake 1\n\nfn bad() -> i64\n  loop\n    break\n  end\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
-        let tmp = std::env::temp_dir().join("strake_loop_fn_lower.strake");
+    fn unsupported_bytes_rhs_in_fn_returns_exit_70() {
+        let src = "strake 1\n\nfn bad() -> i64\n  x = bytes.new x\"dead\"\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let tmp = std::env::temp_dir().join("strake_bytes_fn_lower.strake");
         std::fs::write(&tmp, src).expect("write");
         let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
         assert_eq!(exit.code, LOWER_ABORT_EXIT);

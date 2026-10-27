@@ -1,0 +1,18 @@
+strake 1
+
+fn f() -> bool
+  ret true
+end
+
+fn g() -> bool
+  x = not false
+  ret x
+end
+
+test bool_ret
+  a = call f()
+  assert.eq a true
+  b = call g()
+  assert.eq b true
+  ret 0
+end

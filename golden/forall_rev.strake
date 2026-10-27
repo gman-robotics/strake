@@ -1,0 +1,7 @@
+strake 1
+
+property rev
+  forall n: i64 in 5..1
+    assert.eq n n
+  end
+end

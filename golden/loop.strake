@@ -1,0 +1,14 @@
+strake 1
+
+test loop_l7
+  acc0 = 0
+  loop acc = acc0
+    one = add i64 acc 1
+    stop = eq i64 one 1
+    if stop
+      break
+    end
+    continue acc = one
+  end
+  ret 0
+end
