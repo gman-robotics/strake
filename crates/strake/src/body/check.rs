@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::carry::{
     self, operands_for_continue, publishes_loop_join, ArmSrc, BackEdge, BreakEdge, CarryPlan,
-    JoinSite, LoopSite,
+    JoinSite, LoopSite, SiteId,
 };
 use super::diag::{Code, Diag, Kind, Span};
 use super::syntax::{
@@ -24,6 +24,7 @@ pub struct Sketch {
 struct CheckState {
     carry: CarryPlan,
     loop_stack: Vec<usize>,
+    next_site_id: u32,
 }
 
 impl CheckState {
@@ -31,7 +32,14 @@ impl CheckState {
         Self {
             carry: CarryPlan::default(),
             loop_stack: Vec::new(),
+            next_site_id: 0,
         }
+    }
+
+    fn alloc_site_id(&mut self) -> SiteId {
+        let id = SiteId(self.next_site_id);
+        self.next_site_id += 1;
+        id
     }
 }
 
@@ -437,7 +445,9 @@ fn check_stmt(
         } => {
             let site_idx = state.carry.loops.len();
             let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            let site_id = state.alloc_site_id();
             state.carry.loops.push(LoopSite {
+                id: site_id,
                 span: span.clone(),
                 params: param_names.clone(),
                 backedges: Vec::new(),
@@ -659,7 +669,9 @@ fn check_nested_loop_in_loop_body(
 ) {
     let site_idx = state.carry.loops.len();
     let param_names_vec: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+    let site_id = state.alloc_site_id();
     state.carry.loops.push(LoopSite {
+        id: site_id,
         span: span.clone(),
         params: param_names_vec.clone(),
         backedges: Vec::new(),
@@ -749,7 +761,10 @@ fn check_if(
     let then_tops = top_level_assigns(then_body);
     let else_tops = top_level_assigns(else_body);
 
+    let join_site_idx = state.carry.joins.len();
+    let join_id = state.alloc_site_id();
     state.carry.joins.push(JoinSite {
+        id: join_id,
         span: span.clone(),
         names: carry::join_name_supplies(then_body, else_body),
     });
@@ -836,7 +851,7 @@ fn check_if(
         }
     }
 
-    let site = state.carry.joins.last().expect("join site");
+    let site = &state.carry.joins[join_site_idx];
     for supply in &site.names {
         if !publishes_loop_join(supply) {
             continue;
@@ -845,8 +860,26 @@ fn check_if(
         if pre.contains_key(name) {
             continue;
         }
-        let t_ty = join_arm_type(then_body, &supply.then_arm, name, &then_tops, fns, diags);
-        let e_ty = join_arm_type(else_body, &supply.else_arm, name, &else_tops, fns, diags);
+        let t_ty = join_arm_type(
+            then_body,
+            &supply.then_arm,
+            name,
+            &then_tops,
+            &then_ctx.types,
+            &then_ctx.phi_gaps,
+            fns,
+            diags,
+        );
+        let e_ty = join_arm_type(
+            else_body,
+            &supply.else_arm,
+            name,
+            &else_tops,
+            &else_ctx.types,
+            &else_ctx.phi_gaps,
+            fns,
+            diags,
+        );
         match (t_ty, e_ty) {
             (Some(a), Some(b)) if types_compatible(&a, &b) => {
                 if let Some(existing) = ctx.types.get(name) {
@@ -869,11 +902,13 @@ fn join_arm_type(
     src: &ArmSrc,
     name: &str,
     tops: &HashMap<String, (Type, Span)>,
+    env: &HashMap<String, Type>,
+    phi_gaps: &HashSet<String>,
     fns: &[&FnItem],
     diags: &mut Vec<Diag>,
 ) -> Option<Type> {
     match src {
-        ArmSrc::LoopExit => loop_param_init_ty(arm, name, fns, diags),
+        ArmSrc::LoopExit => loop_param_init_ty(arm, name, env, phi_gaps, fns, diags),
         ArmSrc::Assign => tops.get(name).map(|(ty, _)| ty.clone()),
         ArmSrc::Absent => None,
     }
@@ -882,6 +917,8 @@ fn join_arm_type(
 fn loop_param_init_ty(
     arm: &[Stmt],
     name: &str,
+    env: &HashMap<String, Type>,
+    phi_gaps: &HashSet<String>,
     fns: &[&FnItem],
     diags: &mut Vec<Diag>,
 ) -> Option<Type> {
@@ -889,14 +926,7 @@ fn loop_param_init_ty(
         if let Stmt::Loop { params, .. } = stmt {
             for p in params {
                 if p.name == name {
-                    return Some(operand_ty(
-                        &p.init,
-                        &HashMap::new(),
-                        &HashSet::new(),
-                        fns,
-                        None,
-                        diags,
-                    ));
+                    return Some(operand_ty(&p.init, env, phi_gaps, fns, None, diags));
                 }
             }
         }

@@ -5,14 +5,31 @@ use std::collections::HashMap;
 use super::diag::Span;
 use super::syntax::{Operand, Stmt};
 
+/// Stable identity for a loop or `if` join site in the carry plan (assigned at check time).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SiteId(pub u32);
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CarryPlan {
     pub loops: Vec<LoopSite>,
     pub joins: Vec<JoinSite>,
 }
 
+pub fn loop_site_by_span<'a>(plan: &'a CarryPlan, span: &Span) -> Option<&'a LoopSite> {
+    plan.loops
+        .iter()
+        .find(|s| s.span.file == span.file && s.span.start == span.start && s.span.end == span.end)
+}
+
+pub fn join_site_by_span<'a>(plan: &'a CarryPlan, span: &Span) -> Option<&'a JoinSite> {
+    plan.joins
+        .iter()
+        .find(|s| s.span.file == span.file && s.span.start == span.start && s.span.end == span.end)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoopSite {
+    pub id: SiteId,
     pub span: Span,
     pub params: Vec<String>,
     pub backedges: Vec<BackEdge>,
@@ -32,8 +49,29 @@ pub struct BreakEdge {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct JoinSite {
+    pub id: SiteId,
     pub span: Span,
     pub names: Vec<NameSupply>,
+}
+
+/// Names `lower` must bind at an `if` join (S5 keeps only the first shared assign name).
+pub fn if_join_bind_names(site: &JoinSite, then: &[Stmt], else_body: &[Stmt]) -> Vec<String> {
+    let has_loop_join = site.names.iter().any(publishes_loop_join);
+    if has_loop_join {
+        let mut out = Vec::new();
+        if let Some(n) = shared_assign_join_name(then, else_body) {
+            out.push(n);
+        }
+        for supply in &site.names {
+            if publishes_loop_join(supply) && !out.iter().any(|x| x == &supply.name) {
+                out.push(supply.name.clone());
+            }
+        }
+        return out;
+    }
+    shared_assign_join_name(then, else_body)
+        .map(|n| vec![n])
+        .unwrap_or_default()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -287,6 +325,118 @@ mod tests {
             else_arm: ArmSrc::Assign,
         };
         assert!(!publishes_loop_join(&assign_only));
+    }
+
+    #[test]
+    fn if_join_bind_names_loop_join_and_s5() {
+        let then = vec![Stmt::Assign {
+            name: "x".into(),
+            rhs: Rhs::Hole {
+                span: Span {
+                    file: "t".into(),
+                    start: 0,
+                    end: 1,
+                },
+                ty: Type::Named(
+                    "i64".into(),
+                    Span {
+                        file: "t".into(),
+                        start: 0,
+                        end: 1,
+                    },
+                ),
+            },
+            span: Span {
+                file: "t".into(),
+                start: 0,
+                end: 1,
+            },
+        }];
+        let else_body = vec![Stmt::Loop {
+            span: Span {
+                file: "t".into(),
+                start: 0,
+                end: 1,
+            },
+            params: vec![LoopParam {
+                name: "x".into(),
+                init: name_operand("0"),
+                span: Span {
+                    file: "t".into(),
+                    start: 0,
+                    end: 1,
+                },
+            }],
+            body: vec![],
+        }];
+        let site = JoinSite {
+            id: SiteId(0),
+            span: Span {
+                file: "t".into(),
+                start: 0,
+                end: 1,
+            },
+            names: join_name_supplies(&then, &else_body),
+        };
+        assert_eq!(if_join_bind_names(&site, &then, &else_body), vec!["x"]);
+        let then2 = vec![
+            Stmt::Assign {
+                name: "x".into(),
+                rhs: Rhs::Hole {
+                    span: Span {
+                        file: "t".into(),
+                        start: 0,
+                        end: 1,
+                    },
+                    ty: Type::Named(
+                        "i64".into(),
+                        Span {
+                            file: "t".into(),
+                            start: 0,
+                            end: 1,
+                        },
+                    ),
+                },
+                span: Span {
+                    file: "t".into(),
+                    start: 0,
+                    end: 1,
+                },
+            },
+            Stmt::Assign {
+                name: "y".into(),
+                rhs: Rhs::Hole {
+                    span: Span {
+                        file: "t".into(),
+                        start: 0,
+                        end: 1,
+                    },
+                    ty: Type::Named(
+                        "i64".into(),
+                        Span {
+                            file: "t".into(),
+                            start: 0,
+                            end: 1,
+                        },
+                    ),
+                },
+                span: Span {
+                    file: "t".into(),
+                    start: 0,
+                    end: 1,
+                },
+            },
+        ];
+        let site2 = JoinSite {
+            id: SiteId(1),
+            span: Span {
+                file: "t".into(),
+                start: 0,
+                end: 1,
+            },
+            names: join_name_supplies(&then2, &then2),
+        };
+        assert_eq!(if_join_bind_names(&site2, &then2, &then2), vec!["x"]);
     }
 
     #[test]
