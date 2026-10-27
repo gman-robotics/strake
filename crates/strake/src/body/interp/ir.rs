@@ -613,6 +613,34 @@ impl Builder {
         self.phi(block, span, dst, pairs);
     }
 
+    /// Insert phi nodes at the front of `block` (used when closing a loop).
+    pub(crate) fn prepend_merge_regs(
+        &mut self,
+        block: usize,
+        span: Span,
+        phis: &[(VReg, Vec<(usize, VReg)>)],
+    ) {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        let mut prefix = Vec::new();
+        for (dst, pairs) in phis {
+            let mut args = Vec::new();
+            let mut blocks = Vec::new();
+            for (b, v) in pairs {
+                blocks.push(*b);
+                args.push(*v);
+            }
+            prefix.push(Inst {
+                op: Op::Phi,
+                dst: Some(*dst),
+                args,
+                imm: Imm::Blocks(blocks),
+                span: span.clone(),
+            });
+        }
+        let block_insts = &mut self.functions[fn_idx].blocks[block].insts;
+        block_insts.splice(0..0, prefix);
+    }
+
     pub(crate) fn copy_i64(&mut self, block: usize, span: Span, dst: VReg, src: VReg) {
         let z = self.const_i64(block, span.clone(), 0);
         self.emit(
