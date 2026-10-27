@@ -24,9 +24,13 @@ struct CalleeMaps<'a> {
 }
 
 struct LoopFrame {
-    header: usize,
     exit: usize,
+    tail: usize,
     back: std::collections::HashMap<String, u32>,
+}
+
+struct LowerCtx<'a> {
+    env_bool: Option<&'a mut std::collections::HashSet<String>>,
 }
 
 impl LowerError {
@@ -122,8 +126,9 @@ fn lower_fn_body(
     let mut cur = entry;
     cur = lower_module_binds(b, cur, sketch, &mut env, maps)?;
     let mut loops = Vec::new();
+    let mut ctx = LowerCtx { env_bool: None };
     for stmt in &f.body {
-        cur = lower_stmt(b, cur, stmt, &mut env, &mut loops, maps)?;
+        cur = lower_stmt(b, cur, stmt, &mut env, &mut loops, maps, &mut ctx)?;
     }
     Ok(())
 }
@@ -164,16 +169,12 @@ fn lower_test_or_property_body(
     let mut cur = entry;
     cur = lower_module_binds(b, cur, sketch, &mut env, maps)?;
     let mut loops = Vec::new();
+    let mut ctx = LowerCtx {
+        env_bool: Some(&mut env_bool),
+    };
     for stmt in body {
         cur = lower_stmt_test(
-            b,
-            cur,
-            stmt,
-            &mut env,
-            &mut env_bool,
-            &mut loops,
-            maps,
-            body_label,
+            b, cur, stmt, &mut env, &mut loops, maps, &mut ctx, body_label,
         )?;
     }
     if !b.block_ends_with_ret(cur) {
@@ -227,11 +228,22 @@ fn lower_stmt(
     env: &mut std::collections::HashMap<String, u32>,
     loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
+    ctx: &mut LowerCtx<'_>,
 ) -> Result<usize, LowerError> {
     match stmt {
         Stmt::Assign { name, rhs, .. } => {
             let v = lower_rhs_call(b, block, rhs, env, maps)?;
             env.insert(name.clone(), v);
+            if let Some(env_bool) = ctx.env_bool.as_deref_mut() {
+                if rhs_is_bool(rhs)
+                    || matches!(
+                        rhs,
+                        Rhs::Call { callee, .. } if maps.bool_returns.contains(callee)
+                    )
+                {
+                    env_bool.insert(name.clone());
+                }
+            }
             Ok(block)
         }
         Stmt::Ret { span, value } => {
@@ -244,9 +256,11 @@ fn lower_stmt(
             cond,
             then_body,
             else_body,
-        } => lower_if(b, block, span, cond, then_body, else_body, env, loops, maps),
+        } => lower_if(
+            b, block, span, cond, then_body, else_body, env, loops, maps, ctx,
+        ),
         Stmt::Loop { span, params, body } => {
-            lower_loop(b, block, span, params, body, env, loops, maps)
+            lower_loop(b, block, span, params, body, env, loops, maps, ctx)
         }
         Stmt::Break { span } => {
             let exit = loops
@@ -266,7 +280,7 @@ fn lower_stmt(
                     b.copy_i64(block, span.clone(), *back, v);
                 }
             }
-            b.jmp(block, span.clone(), frame.header);
+            b.jmp(block, span.clone(), frame.tail);
             Ok(block)
         }
         Stmt::For {
@@ -274,25 +288,36 @@ fn lower_stmt(
             binder,
             list,
             body,
-        } => lower_for(b, block, span, binder, list, body, env, loops, maps),
+        } => lower_for(b, block, span, binder, list, body, env, loops, maps, ctx),
         Stmt::Match {
             span,
             scrutinee,
             arms,
-        } => lower_match(b, block, span, scrutinee, arms, env, loops, maps),
+        } => lower_match(b, block, span, scrutinee, arms, env, loops, maps, ctx),
         Stmt::Forall {
             span,
             binder,
             bound,
             body,
-        } => lower_forall(b, block, span, binder, bound, body, env, loops, maps),
+        } => lower_forall(b, block, span, binder, bound, body, env, loops, maps, ctx),
         Stmt::Trap { span } => {
-            b.trap_lower(block, span.clone());
+            b.trap_user(block, span.clone());
             Ok(block)
         }
-        _ => Err(LowerError::unsupported(
-            "statement not supported in this slice",
-        )),
+        Stmt::AssertEq { span, got, want } => {
+            let env_bool = ctx
+                .env_bool
+                .as_deref_mut()
+                .ok_or_else(|| LowerError::unsupported("assert.eq outside test/property"))?;
+            let g = lower_operand(b, block, got, env)?;
+            let w = lower_operand(b, block, want, env)?;
+            let diag_span = span_slice_a_names(got, want, span);
+            if assert_operands_are_bool(got, want, env_bool) {
+                Ok(b.assert_eq_bool(block, span.clone(), g, w, diag_span))
+            } else {
+                Ok(b.assert_eq_i64(block, span.clone(), g, w, diag_span))
+            }
+        }
     }
 }
 
@@ -337,30 +362,32 @@ fn lower_loop(
     env: &mut std::collections::HashMap<String, u32>,
     loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
+    ctx: &mut LowerCtx<'_>,
 ) -> Result<usize, LowerError> {
+    let entry = block;
     let header = b.new_block();
     let body_block = b.new_block();
+    let tail = b.new_block();
     let exit = b.new_block();
     let mut back: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     for p in params {
-        let init = lower_operand(b, block, &p.init, env)?;
+        let init = lower_operand(b, entry, &p.init, env)?;
         let back_v = b.alloc_vreg();
         let phi = b.alloc_vreg();
-        b.merge_regs(
-            header,
-            span.clone(),
-            phi,
-            &[(block, init), (body_block, back_v)],
-        );
+        b.merge_regs(header, span.clone(), phi, &[(entry, init), (tail, back_v)]);
         env.insert(p.name.clone(), phi);
         back.insert(p.name.clone(), back_v);
     }
-    b.jmp(block, span.clone(), header);
+    b.jmp(tail, span.clone(), header);
+    b.jmp(entry, span.clone(), header);
     b.jmp(header, span.clone(), body_block);
-    loops.push(LoopFrame { header, exit, back });
+    loops.push(LoopFrame { exit, tail, back });
     let mut cur = body_block;
     for stmt in body {
-        cur = lower_stmt(b, cur, stmt, env, loops, maps)?;
+        cur = lower_stmt(b, cur, stmt, env, loops, maps, ctx)?;
+    }
+    if !b.block_terminates(cur) {
+        b.jmp(cur, span.clone(), tail);
     }
     loops.pop();
     Ok(exit)
@@ -376,54 +403,66 @@ fn lower_for(
     env: &mut std::collections::HashMap<String, u32>,
     loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
+    ctx: &mut LowerCtx<'_>,
 ) -> Result<usize, LowerError> {
+    let entry = block;
     let list_v = env
         .get(list)
         .copied()
         .ok_or_else(|| LowerError::unsupported("unbound list in for"))?;
-    let n = b.list_len(block, span.clone(), list_v);
-    let zero = b.const_i64(block, span.clone(), 0);
-    let i_init = zero;
-    env.insert("%i".to_string(), i_init);
+    let n = b.list_len(entry, span.clone(), list_v);
+    let i_init = b.const_i64(entry, span.clone(), 0);
     let header = b.new_block();
     let body_block = b.new_block();
+    let ok_arm = b.new_block();
+    let err_arm = b.new_block();
+    let after_ok = b.new_block();
+    let after_match = b.new_block();
     let exit = b.new_block();
     let i_phi = b.alloc_vreg();
     let i_back = b.alloc_vreg();
+    b.jmp(entry, span.clone(), header);
     b.merge_regs(
         header,
         span.clone(),
         i_phi,
-        &[(block, i_init), (body_block, i_back)],
+        &[(entry, i_init), (after_match, i_back)],
     );
-    env.insert("%i".to_string(), i_phi);
     let done = b.ge_i64(header, span.clone(), i_phi, n);
     b.cond_branch(header, span.clone(), done, exit, body_block);
     let slot = b.list_get(body_block, span.clone(), list_v, i_phi);
     let tag = b.sum_tag(body_block, span.clone(), slot);
-    let ok_arm = b.new_block();
-    let err_arm = b.new_block();
-    let after_match = b.new_block();
     b.dispatch_table(body_block, span.clone(), tag, &[ok_arm, err_arm]);
     let payload = b.sum_payload(ok_arm, span.clone(), slot);
     env.insert(binder.to_string(), payload);
+    loops.push(LoopFrame {
+        exit,
+        tail: after_match,
+        back: std::collections::HashMap::new(),
+    });
     let mut cur = ok_arm;
     for stmt in body {
-        cur = lower_stmt(b, cur, stmt, env, loops, maps)?;
+        cur = lower_stmt(b, cur, stmt, env, loops, maps, ctx)?;
     }
-    b.jmp(cur, span.clone(), after_match);
+    loops.pop();
+    if !b.block_terminates(cur) {
+        b.jmp(cur, span.clone(), after_ok);
+        b.jmp(after_ok, span.clone(), after_match);
+    }
     b.trap_lower(err_arm, span.clone());
     let one = b.const_i64(after_match, span.clone(), 1);
     let next_i = b.add_i64(after_match, span.clone(), i_phi, one);
     b.copy_i64(after_match, span.clone(), i_back, next_i);
     b.jmp(after_match, span.clone(), header);
-    loops.push(LoopFrame {
-        header,
-        exit,
-        back: std::collections::HashMap::from([("%i".to_string(), i_back)]),
-    });
-    loops.pop();
     Ok(exit)
+}
+
+fn sum_arm_block(tag: &str, ok_block: usize, err_block: usize) -> Result<usize, LowerError> {
+    match tag {
+        "ok" => Ok(ok_block),
+        "err" => Ok(err_block),
+        _ => Err(LowerError::unsupported("unknown match tag")),
+    }
 }
 
 fn lower_match(
@@ -435,6 +474,7 @@ fn lower_match(
     env: &mut std::collections::HashMap<String, u32>,
     loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
+    ctx: &mut LowerCtx<'_>,
 ) -> Result<usize, LowerError> {
     let scr = env
         .get(scrutinee)
@@ -443,44 +483,43 @@ fn lower_match(
     let tag = b.sum_tag(block, span.clone(), scr);
     let join_name = match_join_name(arms);
     let join_block = b.new_block();
-    let mut arm_blocks = Vec::new();
-    for _arm in arms {
-        arm_blocks.push(b.new_block());
-    }
-    b.dispatch_table(block, span.clone(), tag, &arm_blocks);
-    let mut arm_end_vals: Vec<Option<u32>> = Vec::new();
-    for (arm, arm_b) in arms.iter().zip(arm_blocks.iter()) {
+    let ok_block = b.new_block();
+    let err_block = b.new_block();
+    b.dispatch_table(block, span.clone(), tag, &[ok_block, err_block]);
+    let mut ok_join: Option<u32> = None;
+    let mut err_join: Option<u32> = None;
+    for arm in arms {
+        let arm_b = sum_arm_block(&arm.tag, ok_block, err_block)?;
         let mut arm_env = env.clone();
         if let Some(binder) = &arm.binder {
             if binder != "_" {
-                let payload = b.sum_payload(*arm_b, span.clone(), scr);
+                let payload = b.sum_payload(arm_b, span.clone(), scr);
                 arm_env.insert(binder.clone(), payload);
             }
         }
-        let mut cur = *arm_b;
+        let mut cur = arm_b;
         for stmt in &arm.body {
-            cur = lower_stmt(b, cur, stmt, &mut arm_env, loops, maps)?;
+            cur = lower_stmt(b, cur, stmt, &mut arm_env, loops, maps, ctx)?;
         }
-        let end_v = if let Some(jn) = &join_name {
-            arm_env.get(jn).copied()
-        } else {
-            None
-        };
-        arm_end_vals.push(end_v);
+        if let Some(jn) = &join_name {
+            let end_v = arm_env.get(jn).copied();
+            if arm.tag == "ok" {
+                ok_join = end_v;
+            } else if arm.tag == "err" {
+                err_join = end_v;
+            }
+        }
         b.jmp(cur, span.clone(), join_block);
     }
     if let Some(jn) = join_name {
-        let v0 = arm_end_vals[0].unwrap_or_else(|| b.const_i64(join_block, span.clone(), 0));
-        let v1 = arm_end_vals
-            .get(1)
-            .and_then(|v| *v)
-            .unwrap_or_else(|| b.const_i64(join_block, span.clone(), 0));
+        let v_ok = ok_join.unwrap_or_else(|| b.const_i64(join_block, span.clone(), 0));
+        let v_err = err_join.unwrap_or_else(|| b.const_i64(join_block, span.clone(), 0));
         let joined = b.alloc_vreg();
         b.merge_regs(
             join_block,
             span.clone(),
             joined,
-            &[(arm_blocks[0], v0), (arm_blocks[1], v1)],
+            &[(ok_block, v_ok), (err_block, v_err)],
         );
         env.insert(jn, joined);
     }
@@ -516,41 +555,45 @@ fn lower_forall(
     env: &mut std::collections::HashMap<String, u32>,
     loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
+    ctx: &mut LowerCtx<'_>,
 ) -> Result<usize, LowerError> {
     match bound {
         ForallBound::Range { lo, hi, .. } => {
-            let lo_v = resolve_static_i64_lower(lo, env, b, block, span)?;
-            let hi_v = resolve_static_i64_lower(hi, env, b, block, span)?;
-            let i_init = lo_v;
+            let entry = block;
+            let lo_v = resolve_static_i64_lower(lo, env, b, entry, span)?;
+            let hi_v = resolve_static_i64_lower(hi, env, b, entry, span)?;
             let header = b.new_block();
             let body_block = b.new_block();
+            let tail = b.new_block();
             let exit = b.new_block();
             let i_phi = b.alloc_vreg();
             let i_back = b.alloc_vreg();
-            env.insert(binder.to_string(), i_phi);
-            let one = b.const_i64(block, span.clone(), 1);
-            let hi_plus = b.add_i64(block, span.clone(), hi_v, one);
-            let mut cur = body_block;
-            for stmt in body {
-                cur = lower_stmt_test_forall(b, cur, stmt, env, maps)?;
-            }
-            let back_pred = cur;
-            let step = b.add_i64(back_pred, span.clone(), i_phi, one);
-            b.copy_i64(back_pred, span.clone(), i_back, step);
-            b.jmp(back_pred, span.clone(), header);
+            let one = b.const_i64(entry, span.clone(), 1);
+            let hi_plus = b.add_i64(entry, span.clone(), hi_v, one);
             b.merge_regs(
                 header,
                 span.clone(),
                 i_phi,
-                &[(block, i_init), (back_pred, i_back)],
+                &[(entry, lo_v), (tail, i_back)],
             );
+            env.insert(binder.to_string(), i_phi);
             let done = b.ge_i64(header, span.clone(), i_phi, hi_plus);
-            b.jmp(block, span.clone(), header);
+            b.jmp(entry, span.clone(), header);
             b.cond_branch(header, span.clone(), done, exit, body_block);
+            let mut cur = body_block;
+            for stmt in body {
+                cur = lower_stmt(b, cur, stmt, env, loops, maps, ctx)?;
+            }
+            if !b.block_terminates(cur) {
+                b.jmp(cur, span.clone(), tail);
+            }
+            let step = b.add_i64(tail, span.clone(), i_phi, one);
+            b.copy_i64(tail, span.clone(), i_back, step);
+            b.jmp(tail, span.clone(), header);
             Ok(exit)
         }
         ForallBound::List { name, .. } => {
-            lower_for(b, block, span, binder, name, body, env, loops, maps)
+            lower_for(b, block, span, binder, name, body, env, loops, maps, ctx)
         }
     }
 }
@@ -571,27 +614,6 @@ fn resolve_static_i64_lower(
     }
 }
 
-fn lower_stmt_test_forall(
-    b: &mut Builder,
-    block: usize,
-    stmt: &Stmt,
-    env: &mut std::collections::HashMap<String, u32>,
-    maps: &CalleeMaps,
-) -> Result<usize, LowerError> {
-    let mut env_bool = std::collections::HashSet::new();
-    let mut loops = Vec::new();
-    lower_stmt_test(
-        b,
-        block,
-        stmt,
-        env,
-        &mut env_bool,
-        &mut loops,
-        maps,
-        "property body",
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 fn lower_if(
     b: &mut Builder,
@@ -603,6 +625,7 @@ fn lower_if(
     env: &mut std::collections::HashMap<String, u32>,
     loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
+    ctx: &mut LowerCtx<'_>,
 ) -> Result<usize, LowerError> {
     let cond_v = lower_operand(b, block, cond, env)?;
     let join_name = if_join_name(then_body, else_body);
@@ -611,10 +634,10 @@ fn lower_if(
         let else_b = b.new_block();
         let join_b = b.new_block();
         b.cond_branch(block, span.clone(), cond_v, then_b, else_b);
-        let (then_end, then_v) = lower_if_arm(b, then_b, then_body, env, loops, maps)
+        let (then_end, then_v) = lower_if_arm(b, then_b, then_body, env, loops, maps, ctx)
             .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
         b.jmp(then_end, span.clone(), join_b);
-        let (else_end, else_v) = lower_if_arm(b, else_b, else_body, env, loops, maps)
+        let (else_end, else_v) = lower_if_arm(b, else_b, else_body, env, loops, maps, ctx)
             .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
         b.jmp(else_end, span.clone(), join_b);
         let joined = b.alloc_vreg();
@@ -631,9 +654,9 @@ fn lower_if(
         let else_b = b.new_block();
         let join_b = b.new_block();
         b.cond_branch(block, span.clone(), cond_v, then_b, else_b);
-        let then_end = lower_if_arm_stmts(b, then_b, then_body, env, loops, maps)?;
+        let then_end = lower_if_arm_stmts(b, then_b, then_body, env, loops, maps, ctx)?;
         b.jmp(then_end, span.clone(), join_b);
-        let else_end = lower_if_arm_stmts(b, else_b, else_body, env, loops, maps)?;
+        let else_end = lower_if_arm_stmts(b, else_b, else_body, env, loops, maps, ctx)?;
         b.jmp(else_end, span.clone(), join_b);
         Ok(join_b)
     }
@@ -664,6 +687,7 @@ fn lower_if_arm(
     outer_env: &std::collections::HashMap<String, u32>,
     loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
+    ctx: &mut LowerCtx<'_>,
 ) -> Result<(usize, u32), ()> {
     let mut env = outer_env.clone();
     let mut cur = block;
@@ -678,7 +702,7 @@ fn lower_if_arm(
                 env.insert(name.clone(), v);
             }
             _ => {
-                cur = lower_stmt(b, cur, stmt, &mut env, loops, maps).map_err(|_| ())?;
+                cur = lower_stmt(b, cur, stmt, &mut env, loops, maps, ctx).map_err(|_| ())?;
             }
         }
     }
@@ -692,10 +716,11 @@ fn lower_if_arm_stmts(
     env: &mut std::collections::HashMap<String, u32>,
     loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
+    ctx: &mut LowerCtx<'_>,
 ) -> Result<usize, LowerError> {
     let mut cur = block;
     for stmt in body {
-        cur = lower_stmt(b, cur, stmt, env, loops, maps)?;
+        cur = lower_stmt(b, cur, stmt, env, loops, maps, ctx)?;
     }
     Ok(cur)
 }
@@ -705,48 +730,12 @@ fn lower_stmt_test(
     block: usize,
     stmt: &Stmt,
     env: &mut std::collections::HashMap<String, u32>,
-    env_bool: &mut std::collections::HashSet<String>,
     loops: &mut Vec<LoopFrame>,
     maps: &CalleeMaps,
+    ctx: &mut LowerCtx<'_>,
     _body_label: &str,
 ) -> Result<usize, LowerError> {
-    match stmt {
-        Stmt::Assign { name, rhs, .. } => {
-            let v = lower_rhs_call(b, block, rhs, env, maps)?;
-            env.insert(name.clone(), v);
-            if rhs_is_bool(rhs)
-                || matches!(
-                    rhs,
-                    Rhs::Call { callee, .. } if maps.bool_returns.contains(callee)
-                )
-            {
-                env_bool.insert(name.clone());
-            }
-            Ok(block)
-        }
-        Stmt::AssertEq { span, got, want } => {
-            let g = lower_operand(b, block, got, env)?;
-            let w = lower_operand(b, block, want, env)?;
-            let diag_span = span_slice_a_names(got, want, span);
-            if assert_operands_are_bool(got, want, env_bool) {
-                Ok(b.assert_eq_bool(block, span.clone(), g, w, diag_span))
-            } else {
-                Ok(b.assert_eq_i64(block, span.clone(), g, w, diag_span))
-            }
-        }
-        Stmt::Ret { span, value } => {
-            let v = lower_operand(b, block, value, env)?;
-            b.ret(block, span.clone(), v);
-            Ok(block)
-        }
-        Stmt::Forall {
-            span,
-            binder,
-            bound,
-            body,
-        } => lower_forall(b, block, span, binder, bound, body, env, loops, maps),
-        _ => lower_stmt(b, block, stmt, env, loops, maps),
-    }
+    lower_stmt(b, block, stmt, env, loops, maps, ctx)
 }
 
 fn operand_is_bool(op: &Operand) -> bool {

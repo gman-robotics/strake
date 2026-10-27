@@ -851,9 +851,20 @@ impl<'a> Lexer<'a> {
         let start = self.byte_pos();
         let mut s = String::new();
         while let Some(b) = self.peek_byte() {
-            if b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'%' {
+            if b.is_ascii_alphanumeric() || b == b'_' || b == b'%' {
                 s.push(b as char);
                 self.bump();
+            } else if b == b'.' {
+                let next = self.src[self.i + 1..].bytes().next();
+                if next == Some(b'.') {
+                    break;
+                }
+                if next.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                    s.push('.');
+                    self.bump();
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
@@ -1055,20 +1066,62 @@ impl<'a> Parser<'a> {
                 Ok(Some((Tok::Ident(ty), _, _))) if ident_starts_type(&ty)
             );
         }
-        matches!(
-            head.as_str(),
-            "call"
-                | "list.empty"
-                | "list.cons"
-                | "list.len"
-                | "list.get"
-                | "bytes.new"
-                | "bytes.len"
-                | "bytes.get"
-                | "load"
-                | "store"
-                | "not"
-        )
+        if head == "list" || head == "bytes" || head == "assert" {
+            return matches!(self.peek_token_at(en), Ok(Some((Tok::Dot, _, _))));
+        }
+        matches!(head.as_str(), "call" | "load" | "store" | "not")
+    }
+
+    fn at_dotted_path(&self, parts: &[&str]) -> bool {
+        if parts.is_empty() {
+            return false;
+        }
+        if self.cur_ident() != Some(parts[0]) {
+            return false;
+        }
+        let mut pos = match &self.cur {
+            Some((_, _, e)) => *e,
+            None => return false,
+        };
+        for part in parts.iter().skip(1) {
+            if !matches!(self.peek_token_at(pos), Ok(Some((Tok::Dot, _, _)))) {
+                return false;
+            }
+            match self.peek_token_at(pos) {
+                Ok(Some((Tok::Dot, _, dot_end))) => pos = dot_end,
+                _ => return false,
+            }
+            match self.peek_token_at(pos) {
+                Ok(Some((Tok::Ident(s), _, end))) if s == *part => pos = end,
+                _ => return false,
+            }
+        }
+        true
+    }
+
+    fn eat_dotted_path(&mut self, parts: &[&str]) -> Result<bool, Diag> {
+        if !self.at_dotted_path(parts) {
+            return Ok(false);
+        }
+        self.bump()?;
+        for part in parts.iter().skip(1) {
+            if !self.eat_tok(Tok::Dot)? {
+                return Ok(false);
+            }
+            let (name, _, _) = self.expect_ident()?;
+            if name != *part {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn eat_dotted_builtin(&mut self, single: &str, parts: &[&str]) -> Result<bool, Diag> {
+        if self.cur_ident() == Some(single) {
+            self.bump()?;
+            return Ok(true);
+        }
+        self.eat_dotted_path(parts)
     }
 
     fn parse_module(&mut self) -> Result<Module, Diag> {
@@ -1173,7 +1226,10 @@ impl<'a> Parser<'a> {
                 value: v,
             }));
         }
-        if self.cur_ident() == Some("list.empty") || self.cur_ident() == Some("list.cons") {
+        if matches!(self.cur_ident(), Some("list.empty") | Some("list.cons"))
+            || self.at_dotted_path(&["list", "empty"])
+            || self.at_dotted_path(&["list", "cons"])
+        {
             let rhs = self.parse_rhs(start)?;
             if !rhs_is_list_literal(&rhs) {
                 return Err(self.err_here());
@@ -1781,16 +1837,14 @@ impl<'a> Parser<'a> {
                 ty,
             });
         }
-        if self.cur_ident() == Some("list.empty") {
-            self.bump()?;
+        if self.eat_dotted_builtin("list.empty", &["list", "empty"])? {
             let elem = self.parse_type()?;
             return Ok(Rhs::ListEmpty {
                 span: span(self.file, st, self.lex.byte_pos()),
                 elem,
             });
         }
-        if self.cur_ident() == Some("list.cons") {
-            self.bump()?;
+        if self.eat_dotted_builtin("list.cons", &["list", "cons"])? {
             let head = self.parse_operand()?;
             let tail = self.parse_operand()?;
             return Ok(Rhs::ListCons {
@@ -1799,16 +1853,14 @@ impl<'a> Parser<'a> {
                 tail,
             });
         }
-        if self.cur_ident() == Some("list.len") {
-            self.bump()?;
+        if self.eat_dotted_builtin("list.len", &["list", "len"])? {
             let list = self.parse_operand()?;
             return Ok(Rhs::ListLen {
                 span: span(self.file, st, self.lex.byte_pos()),
                 list,
             });
         }
-        if self.cur_ident() == Some("list.get") {
-            self.bump()?;
+        if self.eat_dotted_builtin("list.get", &["list", "get"])? {
             let list = self.parse_operand()?;
             let index = self.parse_operand()?;
             return Ok(Rhs::ListGet {
@@ -1817,24 +1869,21 @@ impl<'a> Parser<'a> {
                 index,
             });
         }
-        if self.cur_ident() == Some("bytes.new") {
-            self.bump()?;
+        if self.eat_dotted_builtin("bytes.new", &["bytes", "new"])? {
             let hex = self.parse_bytes_operand()?;
             return Ok(Rhs::BytesNew {
                 span: span(self.file, st, self.lex.byte_pos()),
                 hex,
             });
         }
-        if self.cur_ident() == Some("bytes.len") {
-            self.bump()?;
+        if self.eat_dotted_builtin("bytes.len", &["bytes", "len"])? {
             let bytes = self.parse_operand()?;
             return Ok(Rhs::BytesLen {
                 span: span(self.file, st, self.lex.byte_pos()),
                 bytes,
             });
         }
-        if self.cur_ident() == Some("bytes.get") {
-            self.bump()?;
+        if self.eat_dotted_builtin("bytes.get", &["bytes", "get"])? {
             let bytes = self.parse_operand()?;
             let index = self.parse_operand()?;
             return Ok(Rhs::BytesGet {
@@ -2959,6 +3008,14 @@ end
         let m = parse(src, "t.strake").expect("parse");
         let f = format(&m);
         assert!(f.contains("forall n: i32 in 0..1"));
+    }
+
+    #[test]
+    fn forall_module_bind_range_lo_dotdot_hi_parses() {
+        let src = "strake 1\n\nlo = 0\nhi = 2\n\nproperty p\n  forall n: i64 in lo..hi\n    ret 0\n  end\nend\n";
+        parse(src, "t.strake").expect("lo..hi range");
+        let spaced = "strake 1\n\nlo = 0\nhi = 2\n\nproperty p\n  forall n: i64 in lo .. hi\n    ret 0\n  end\nend\n";
+        parse(spaced, "t.strake").expect("lo .. hi range");
     }
 
     #[test]

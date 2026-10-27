@@ -453,6 +453,19 @@ impl Builder {
         );
     }
 
+    pub(crate) fn trap_user(&mut self, block: usize, span: Span) {
+        self.emit(
+            block,
+            Inst {
+                op: Op::Trap,
+                dst: None,
+                args: Vec::new(),
+                imm: Imm::Trap(TrapImm::User),
+                span,
+            },
+        );
+    }
+
     pub(crate) fn dispatch_table(
         &mut self,
         block: usize,
@@ -593,6 +606,20 @@ impl Builder {
             .get(block)
             .and_then(|b| b.insts.last())
             .is_some_and(|inst| inst.op == Op::Ret)
+    }
+
+    pub(crate) fn block_terminates(&self, block: usize) -> bool {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        self.functions[fn_idx]
+            .blocks
+            .get(block)
+            .and_then(|b| b.insts.last())
+            .is_some_and(|inst| {
+                matches!(
+                    inst.op,
+                    Op::Br | Op::BrIf | Op::BrTable | Op::Ret | Op::Trap
+                )
+            })
     }
 
     pub(crate) fn ret_i64(&mut self, block: usize, span: Span, value: i64) {
@@ -890,10 +917,9 @@ mod tests {
         let entry = 0;
         b.trap_lower(entry, span());
         let program = b.finish().expect("finish");
-        assert!(program.functions[0].blocks[0]
-            .insts
-            .iter()
-            .any(|i| i.op == Op::Trap));
+        let inst = &program.functions[0].blocks[0].insts[0];
+        assert_eq!(inst.op, Op::Trap);
+        assert!(matches!(inst.imm, Imm::Trap(TrapImm::Lower)));
     }
 
     #[test]

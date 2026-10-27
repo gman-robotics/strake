@@ -4,7 +4,7 @@ test loop_l7
   acc0 = 0
   loop acc = acc0
     one = add i64 acc 1
-    stop = eq i64 one 1
+    stop = eq i64 one 3
     if stop
       break
     end

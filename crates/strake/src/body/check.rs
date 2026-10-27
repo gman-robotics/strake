@@ -410,6 +410,12 @@ fn check_stmt(
                     diags,
                 );
             }
+            for p in params {
+                if let Some(ty) = loop_ctx.types.get(&p.name) {
+                    ctx.types.insert(p.name.clone(), ty.clone());
+                    ctx.phi_gaps.remove(&p.name);
+                }
+            }
         }
         Stmt::Break { .. } | Stmt::Trap { .. } => {}
         Stmt::Match {

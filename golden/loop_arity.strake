@@ -1,8 +1,7 @@
 strake 1
 
 test loop_arity
-  loop a = 0
-    b = 1
+  loop a = 0 b = 1
     continue a = add i64 a 1
   end
   ret 0
