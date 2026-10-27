@@ -24,6 +24,14 @@ fn run(args: &[&str]) -> (std::process::ExitStatus, String, String) {
 }
 
 #[test]
+fn loop_swap_exits_0() {
+    let path = golden("loop_swap.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0));
+    assert!(stderr.is_empty());
+}
+
+#[test]
 fn loop_l7_exits_0() {
     let path = golden("loop.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
