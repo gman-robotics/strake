@@ -1,0 +1,35 @@
+strake 1
+
+fn first() -> i64
+  ret 1
+end
+
+fn second() -> i64
+  ret 2
+end
+
+fn add2(a: i64, b: i64) -> i64
+  x = add i64 a b
+  y = mul i64 x 2
+  ret y
+end
+
+fn twice(a: i64) -> i64
+  r = call add2(a, a)
+  ret r
+end
+
+test multi.first
+  x = call first()
+  assert.eq x 1
+end
+
+test multi.second
+  x = call second()
+  assert.eq x 2
+end
+
+test multi.twice
+  x = call twice(3)
+  assert.eq x 12
+end

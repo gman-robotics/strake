@@ -36,9 +36,11 @@ impl LowerError {
 
 pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
     let mut b = Builder::new();
+    b.set_entry_charge_span(sketch.module.span.clone());
     for item in &sketch.module.items {
-        if let Item::Fuel(n, _) = item {
+        if let Item::Fuel(n, span) = item {
             b.set_fuel(*n as i64);
+            b.set_entry_charge_span(span.clone());
         }
     }
     let mut import_indices = std::collections::HashMap::new();
@@ -92,6 +94,8 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
 }
 
 fn lower_fn_body(b: &mut Builder, f: &FnItem, maps: &CalleeMaps) -> Result<(), LowerError> {
+    let fn_idx = maps.fn_indices[&f.name];
+    b.select_function(fn_idx);
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     for (i, p) in f.params.iter().enumerate() {

@@ -17,6 +17,8 @@ pub struct Program {
     pub exports: Vec<Export>,
     pub fuel: i64,
     pub imports: Vec<ImportStub>,
+    /// Span charged on host entry (module `fuel` directive or module header).
+    pub entry_charge_span: Span,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +88,7 @@ pub(crate) struct Builder {
     exports: Vec<Export>,
     imports: Vec<ImportStub>,
     fuel: i64,
+    entry_charge_span: Span,
     cur_fn: Option<usize>,
     next_vreg: VReg,
     next_block: usize,
@@ -99,6 +102,11 @@ impl Builder {
             exports: Vec::new(),
             imports: Vec::new(),
             fuel: 100_000,
+            entry_charge_span: Span {
+                file: String::new(),
+                start: 0,
+                end: 0,
+            },
             cur_fn: None,
             next_vreg: 0,
             next_block: 0,
@@ -107,6 +115,10 @@ impl Builder {
 
     pub(crate) fn set_fuel(&mut self, fuel: i64) {
         self.fuel = fuel;
+    }
+
+    pub(crate) fn set_entry_charge_span(&mut self, span: Span) {
+        self.entry_charge_span = span;
     }
 
     pub(crate) fn add_import(&mut self, path: &str) -> usize {
@@ -130,6 +142,13 @@ impl Builder {
         self.next_block = 0;
         self.new_block();
         fn_idx
+    }
+
+    /// Aim subsequent `emit` calls at an already-registered function (multi-fn modules).
+    pub(crate) fn select_function(&mut self, fn_idx: usize) {
+        self.cur_fn = Some(fn_idx);
+        let func = &self.functions[fn_idx];
+        self.next_vreg = func.param_count as VReg;
     }
 
     pub(crate) fn new_block(&mut self) -> usize {
@@ -606,6 +625,7 @@ impl Builder {
             exports: self.exports,
             fuel: self.fuel,
             imports: self.imports,
+            entry_charge_span: self.entry_charge_span.clone(),
         })
     }
 }

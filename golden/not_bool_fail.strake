@@ -1,0 +1,6 @@
+strake 1
+
+test not.false.mismatch
+  b = not false
+  assert.eq b false
+end

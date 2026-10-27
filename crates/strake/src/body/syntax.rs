@@ -1620,8 +1620,9 @@ impl<'a> Parser<'a> {
                     let (s, e) = self.span_of();
                     return Err(e_parse(self.file, s, e));
                 }
+                let end = operand_span_end(&rhs);
                 return Ok(Rhs::BinOp {
-                    span: span(self.file, hst, self.lex.byte_pos()),
+                    span: span(self.file, hst, end),
                     op,
                     ty,
                     lhs,
@@ -1657,8 +1658,9 @@ impl<'a> Parser<'a> {
         if !self.eat_tok(Tok::RParen)? {
             return Err(self.err_here());
         }
+        let end = self.lex.byte_pos();
         Ok(Rhs::Call {
-            span: span(self.file, start, self.lex.byte_pos()),
+            span: span(self.file, start, end),
             callee,
             args,
         })

@@ -6,7 +6,9 @@ mod op;
 pub(crate) use ir::{Builder, FinishError};
 pub use ir::{Inst, Program};
 
-use crate::body::diag::{render_scalar_i64, trap_diag, Code, Diag, ExportOutcome, Kind, Span};
+use crate::body::diag::{
+    render_scalar_bool, render_scalar_i64, trap_diag, Code, Diag, ExportOutcome, Kind, Span,
+};
 use crate::body::host::Host;
 use op::{Op, TrapImm};
 
@@ -95,12 +97,13 @@ impl<'a> Machine<'a> {
 
     pub(crate) fn run_root_function(&mut self, fn_idx: usize) -> Result<i64, ExecFault> {
         self.root_return = None;
-        let span = Span {
-            file: String::new(),
-            start: 0,
-            end: 0,
-        };
-        self.enter_function(fn_idx, &[], None, true, span)?;
+        self.enter_function(
+            fn_idx,
+            &[],
+            None,
+            true,
+            self.program.entry_charge_span.clone(),
+        )?;
         self.run_loop()?;
         self.root_return
             .ok_or_else(|| ExecFault::Codeless("function returned no value".into()))
@@ -296,14 +299,15 @@ impl<'a> Machine<'a> {
                         got,
                         diag_span,
                     } => {
-                        let want_v = value_as_i64(&self.read_reg(want)?)?;
-                        let got_v = value_as_i64(&self.read_reg(got)?)?;
+                        let want_v = self.read_reg(want)?;
+                        let got_v = self.read_reg(got)?;
+                        let (want_s, got_s) = render_test_fail_scalars(&want_v, &got_v)?;
                         self.result_diags.push(Diag {
                             code: Code::ETest,
                             kind: Kind::Result,
                             span: diag_span,
-                            want: Some(render_scalar_i64(want_v)),
-                            got: Some(render_scalar_i64(got_v)),
+                            want: Some(want_s),
+                            got: Some(got_s),
                             patch: None,
                         });
                     }
@@ -456,6 +460,19 @@ fn i32_div(a: i32, b: i32, span: Span) -> Result<i32, ExecFault> {
 fn ensure_reg(regs: &mut Vec<Option<Value>>, idx: usize) {
     if regs.len() <= idx {
         regs.resize(idx + 1, None);
+    }
+}
+
+fn render_test_fail_scalars(want: &Value, got: &Value) -> Result<(String, String), ExecFault> {
+    Ok((render_scalar_for_test(want)?, render_scalar_for_test(got)?))
+}
+
+fn render_scalar_for_test(v: &Value) -> Result<String, ExecFault> {
+    match v {
+        Value::I64(n) => Ok(render_scalar_i64(*n)),
+        Value::Bool(b) => Ok(render_scalar_bool(*b)),
+        Value::I32(n) => Ok(render_scalar_i64(*n as i64)),
+        _ => Err(ExecFault::Codeless("unsupported scalar in E_TEST".into())),
     }
 }
 
