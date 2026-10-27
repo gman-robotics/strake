@@ -2,7 +2,7 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use super::carry::{publishes_loop_join, shared_assign_join_name, JoinSite, LoopSite};
+use super::carry::{if_join_bind_names, join_site_by_span, loop_site_by_span, LoopSite, SiteId};
 use super::check::Sketch;
 use super::diag::Span;
 use super::interp::Program;
@@ -25,8 +25,8 @@ struct CalleeMaps<'a> {
 
 struct LowerPlan<'a> {
     sketch: &'a Sketch,
-    join_idx: usize,
-    loop_idx: usize,
+    visited_loops: std::collections::HashSet<SiteId>,
+    visited_joins: std::collections::HashSet<SiteId>,
 }
 
 struct LoopParamLowering {
@@ -217,18 +217,14 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
     };
     let mut plan = LowerPlan {
         sketch,
-        join_idx: 0,
-        loop_idx: 0,
+        visited_loops: std::collections::HashSet::new(),
+        visited_joins: std::collections::HashSet::new(),
     };
     for item in &sketch.module.items {
         if let Item::Fn(f) = item {
             lower_fn_body(&mut b, f, &mut plan, &maps)?;
         }
     }
-    let fn_loops = plan.loop_idx;
-    let fn_joins = plan.join_idx;
-    plan.join_idx = 0;
-    plan.loop_idx = 0;
     for item in &sketch.module.items {
         match item {
             Item::Test(t) => {
@@ -253,12 +249,12 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
     }
     let total_loops = sketch.carry.loops.len();
     let total_joins = sketch.carry.joins.len();
-    if fn_loops + plan.loop_idx != total_loops {
+    if plan.visited_loops.len() != total_loops {
         return Err(LowerError::unsupported(
             "carry plan loop site count mismatch",
         ));
     }
-    if fn_joins + plan.join_idx != total_joins {
+    if plan.visited_joins.len() != total_joins {
         return Err(LowerError::unsupported(
             "carry plan join site count mismatch",
         ));
@@ -450,14 +446,12 @@ fn lower_loop(
     maps: &CalleeMaps,
     mut env_bool: Option<&mut std::collections::HashSet<String>>,
 ) -> Result<usize, LowerError> {
-    let site = plan
-        .sketch
-        .carry
-        .loops
-        .get(plan.loop_idx)
+    let site = loop_site_by_span(&plan.sketch.carry, span)
         .ok_or_else(|| LowerError::unsupported("carry plan missing loop site"))?
         .clone();
-    plan.loop_idx += 1;
+    if !plan.visited_loops.insert(site.id) {
+        return Err(LowerError::unsupported("carry plan duplicate loop site"));
+    }
     if site.params.len() != params.len()
         || site
             .params
@@ -472,8 +466,9 @@ fn lower_loop(
     let body_block = b.new_block();
     let exit = b.new_block();
     let mut frame_params: Vec<LoopParamLowering> = Vec::new();
+    let mut preheader_env = env.clone();
     for p in params.iter() {
-        let init = lower_operand(b, entry, &p.init, env)?;
+        let init = lower_operand(b, entry, &p.init, &preheader_env)?;
         let header_phi = b.alloc_vreg();
         let exit_phi = b.alloc_vreg();
         frame_params.push(LoopParamLowering {
@@ -483,6 +478,7 @@ fn lower_loop(
             header_edges: vec![(entry, init)],
             exit_edges: Vec::new(),
         });
+        preheader_env.insert(p.name.clone(), init);
         env.insert(p.name.clone(), header_phi);
     }
     b.jump(entry, span.clone(), header);
@@ -539,22 +535,37 @@ fn lower_if(
     loops: &mut Vec<LoopFrame>,
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
-    env_bool: Option<&mut std::collections::HashSet<String>>,
+    mut env_bool: Option<&mut std::collections::HashSet<String>>,
 ) -> Result<usize, LowerError> {
-    let join_site = plan
-        .sketch
-        .carry
-        .joins
-        .get(plan.join_idx)
+    let join_site = join_site_by_span(&plan.sketch.carry, span)
         .ok_or_else(|| LowerError::unsupported("carry plan missing join site"))?;
-    plan.join_idx += 1;
+    if !plan.visited_joins.insert(join_site.id) {
+        return Err(LowerError::unsupported("carry plan duplicate join site"));
+    }
+    let join_names = if_join_bind_names(join_site, then_body, else_body);
+    if join_names.len() > 1 {
+        return lower_if_multi_join(
+            b,
+            block,
+            span,
+            cond,
+            then_body,
+            else_body,
+            env,
+            loops,
+            plan,
+            maps,
+            env_bool,
+            &join_names,
+        );
+    }
+    let join_name = join_names.first().map(String::as_str);
     let cond_v = lower_operand(b, block, cond, env)?;
-    let join_name = if_join_name_from_carry(then_body, else_body, join_site);
     let bool_seed: Option<std::collections::HashSet<String>> =
         env_bool.as_ref().map(|s| (*s).clone());
     let (then_b, else_b, join_block) = b.if_branch_targets(block, span.clone(), cond_v);
     let mut then_bool = bool_seed.clone().unwrap_or_default();
-    let (then_end, then_v) = lower_if_arm(
+    let (then_end, then_vals) = lower_if_arm(
         b,
         then_b,
         then_body,
@@ -563,9 +574,10 @@ fn lower_if(
         plan,
         maps,
         env_bool.is_some().then_some(&mut then_bool),
-        join_name.as_deref(),
+        &join_names,
     )
     .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    let then_v = arm_join_value(&then_vals, join_name, b, then_end, span);
     let mut phi_pairs: Vec<(usize, u32)> = Vec::new();
     if !b.block_terminates(then_end) {
         b.jump(then_end, span.clone(), join_block);
@@ -574,7 +586,7 @@ fn lower_if(
         phi_pairs.push((then_end, then_v));
     }
     let mut else_bool = bool_seed.clone().unwrap_or_default();
-    let (else_end, else_v) = lower_if_arm(
+    let (else_end, else_vals) = lower_if_arm(
         b,
         else_b,
         else_body,
@@ -583,9 +595,10 @@ fn lower_if(
         plan,
         maps,
         env_bool.is_some().then_some(&mut else_bool),
-        join_name.as_deref(),
+        &join_names,
     )
     .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    let else_v = arm_join_value(&else_vals, join_name, b, else_end, span);
     if !b.block_terminates(else_end) {
         b.jump(else_end, span.clone(), join_block);
         phi_pairs.push((else_end, else_v));
@@ -608,30 +621,117 @@ fn lower_if(
     let cont = b.new_block();
     b.jump(join_block, span.clone(), cont);
     if let Some(name) = join_name {
-        env.insert(name.clone(), joined_v);
-        if let Some(env_bool) = env_bool {
-            if if_join_is_bool(then_body, else_body, &name) {
-                env_bool.insert(name);
+        env.insert(name.to_string(), joined_v);
+        if let Some(eb) = env_bool.as_mut() {
+            if if_join_is_bool(then_body, else_body, name) {
+                eb.insert(name.to_string());
             }
         }
     }
     Ok(cont)
 }
 
-fn if_join_name_from_carry(
+fn arm_join_value(
+    vals: &std::collections::HashMap<String, u32>,
+    join_name: Option<&str>,
+    b: &mut Builder,
+    arm_end: usize,
+    span: &Span,
+) -> u32 {
+    match join_name {
+        Some(name) => vals
+            .get(name)
+            .copied()
+            .unwrap_or_else(|| join_fill_i64(b, arm_end, span.clone())),
+        None => vals
+            .values()
+            .next()
+            .copied()
+            .unwrap_or_else(|| join_fill_i64(b, arm_end, span.clone())),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn lower_if_multi_join(
+    b: &mut Builder,
+    block: usize,
+    span: &Span,
+    cond: &Operand,
     then_body: &[Stmt],
     else_body: &[Stmt],
-    site: &JoinSite,
-) -> Option<String> {
-    if let Some(n) = shared_assign_join_name(then_body, else_body) {
-        return Some(n);
+    env: &mut std::collections::HashMap<String, u32>,
+    loops: &mut Vec<LoopFrame>,
+    plan: &mut LowerPlan<'_>,
+    maps: &CalleeMaps,
+    mut env_bool: Option<&mut std::collections::HashSet<String>>,
+    join_names: &[String],
+) -> Result<usize, LowerError> {
+    let cond_v = lower_operand(b, block, cond, env)?;
+    let bool_seed: Option<std::collections::HashSet<String>> =
+        env_bool.as_ref().map(|s| (*s).clone());
+    let (then_b, else_b, join_block) = b.if_branch_targets(block, span.clone(), cond_v);
+    let mut then_bool = bool_seed.clone().unwrap_or_default();
+    let (then_end, then_vals) = lower_if_arm(
+        b,
+        then_b,
+        then_body,
+        env,
+        loops,
+        plan,
+        maps,
+        env_bool.is_some().then_some(&mut then_bool),
+        join_names,
+    )
+    .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    let mut else_bool = bool_seed.clone().unwrap_or_default();
+    let (else_end, else_vals) = lower_if_arm(
+        b,
+        else_b,
+        else_body,
+        env,
+        loops,
+        plan,
+        maps,
+        env_bool.is_some().then_some(&mut else_bool),
+        join_names,
+    )
+    .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    if b.block_terminates(then_end) && b.block_terminates(else_end) {
+        if !b.block_terminates(join_block) {
+            b.trap_fallthrough(join_block, span.clone());
+        }
+        return Ok(then_end);
     }
-    for supply in &site.names {
-        if publishes_loop_join(supply) {
-            return Some(supply.name.clone());
+    if !b.block_terminates(then_end) {
+        b.jump(then_end, span.clone(), join_block);
+    }
+    if !b.block_terminates(else_end) {
+        b.jump(else_end, span.clone(), join_block);
+    }
+    for name in join_names {
+        let then_v = arm_join_value(&then_vals, Some(name), b, then_end, span);
+        let else_v = arm_join_value(&else_vals, Some(name), b, else_end, span);
+        let mut pairs = Vec::new();
+        if !b.block_terminates(then_end) || b.block_branch_target(then_end) == Some(join_block) {
+            pairs.push((then_end, then_v));
+        }
+        if !b.block_terminates(else_end) || b.block_branch_target(else_end) == Some(join_block) {
+            pairs.push((else_end, else_v));
+        }
+        let dst = b.alloc_vreg();
+        b.merge_regs(join_block, span.clone(), dst, &pairs);
+        env.insert(name.clone(), dst);
+    }
+    if let Some(eb) = env_bool.as_mut() {
+        for name in join_names {
+            if if_join_is_bool(then_body, else_body, name) {
+                eb.insert(name.clone());
+            }
         }
     }
-    None
+    let cont = b.new_block();
+    b.jump(join_block, span.clone(), cont);
+    Ok(cont)
 }
 
 fn if_join_is_bool(then_body: &[Stmt], else_body: &[Stmt], name: &str) -> bool {
@@ -657,8 +757,8 @@ fn lower_if_arm(
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
     mut env_bool: Option<&mut std::collections::HashSet<String>>,
-    arm_join: Option<&str>,
-) -> Result<(usize, u32), ()> {
+    join_names: &[String],
+) -> Result<(usize, std::collections::HashMap<String, u32>), ()> {
     let mut env = outer_env.clone();
     let mut cur = block;
     let mut join_v = None;
@@ -742,14 +842,21 @@ fn lower_if_arm(
         start: 0,
         end: 0,
     };
-    let v = match arm_join {
-        Some(name) => env
-            .get(name)
-            .copied()
-            .unwrap_or_else(|| join_fill_i64(b, cur, span)),
-        None => join_v.unwrap_or_else(|| join_fill_i64(b, cur, span)),
-    };
-    Ok((cur, v))
+    let mut vals = std::collections::HashMap::new();
+    if join_names.is_empty() {
+        let v = join_v.unwrap_or_else(|| join_fill_i64(b, cur, span.clone()));
+        vals.insert(String::new(), v);
+    } else {
+        for name in join_names {
+            vals.insert(
+                name.clone(),
+                env.get(name)
+                    .copied()
+                    .unwrap_or_else(|| join_fill_i64(b, cur, span.clone())),
+            );
+        }
+    }
+    Ok((cur, vals))
 }
 
 fn join_fill_i64(b: &mut Builder, cur: usize, span: Span) -> u32 {
