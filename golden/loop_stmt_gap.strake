@@ -1,0 +1,15 @@
+strake 1
+
+test loop_stmt_gap
+  acc0 = 0
+  loop acc = acc0
+    one = add i64 acc 1
+    stop = eq i64 one 3
+    if stop
+      break
+    end
+    noop = add i64 0 0
+    continue acc = one
+  end
+  assert.eq acc 2
+end

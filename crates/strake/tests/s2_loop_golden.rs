@@ -34,14 +34,14 @@ fn loop_arity_fmt_fixed_point() {
         .output()
         .expect("fmt");
     assert_eq!(fmt_out.status.code(), Some(0));
-    let src = std::fs::read_to_string(&path).expect("read");
+    let tmp = std::env::temp_dir().join("strake_loop_arity_fmt.strake");
+    std::fs::write(&tmp, &fmt_out.stdout).expect("write fmt stdout");
     let fmt_again = Command::new(bin)
-        .args(["fmt", path.to_str().unwrap()])
+        .args(["fmt", tmp.to_str().unwrap()])
         .output()
         .expect("fmt again");
     assert_eq!(fmt_again.status.code(), Some(0));
-    let src2 = std::fs::read_to_string(&path).expect("read2");
-    assert_eq!(src, src2);
+    assert_eq!(fmt_again.stdout, fmt_out.stdout);
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
     assert_eq!(status.code(), Some(0));
     assert!(stderr.is_empty());
@@ -77,4 +77,28 @@ fn if_arm_nested_loop_exits_0() {
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
     assert_eq!(status.code(), Some(0));
     assert!(stderr.is_empty());
+}
+
+#[test]
+fn loop_continue_if_else_exits_0() {
+    let path = golden("loop_continue_if_else.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn loop_stmt_gap_exits_0() {
+    let path = golden("loop_stmt_gap.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn loop_continue_arity_miss_check_e_type() {
+    let path = golden("loop_continue_arity_miss.strake");
+    let (status, _stdout, stderr) = run(&["check", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(1));
+    assert!(stderr.contains("E_TYPE"));
 }

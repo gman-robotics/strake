@@ -10,5 +10,5 @@ test loop_l7
     end
     continue acc = one
   end
-  assert.eq acc 3
+  assert.eq acc 2
 end

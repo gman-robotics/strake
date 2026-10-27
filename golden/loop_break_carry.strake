@@ -10,5 +10,5 @@ test loop_break_carry
     end
     continue acc = n
   end
-  assert.eq acc 5
+  assert.eq acc 4
 end

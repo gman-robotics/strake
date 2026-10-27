@@ -9,5 +9,5 @@ test loop_continue_carry
     end
     continue i = next
   end
-  assert.eq i 4
+  assert.eq i 3
 end

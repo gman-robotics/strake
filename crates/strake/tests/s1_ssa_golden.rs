@@ -82,6 +82,14 @@ fn if_test_outer_join_after_split_exits_0() {
 }
 
 #[test]
+fn bool_phi_assert_mismatch_exits_1_e_test() {
+    let path = golden("bool_phi_assert_mismatch.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(1));
+    assert!(stderr.contains("E_TEST"));
+}
+
+#[test]
 fn fn_no_ret_fuel5_exits_2_empty_stderr() {
     let path = golden("fn_no_ret_fuel5.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
