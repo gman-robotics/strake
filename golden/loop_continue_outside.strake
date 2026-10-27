@@ -1,0 +1,6 @@
+strake 1
+
+test t
+  continue acc = 0
+  ret 0
+end

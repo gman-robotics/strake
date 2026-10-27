@@ -1,0 +1,6 @@
+strake 1
+
+test t
+  break
+  ret 0
+end
