@@ -98,13 +98,12 @@ pub(crate) enum FinishError {
         phi_dst: VReg,
         pred_block: usize,
     },
-    SsaPhiMissingPredecessor {
+    SsaPhiImmediate {
         fn_name: String,
         block: usize,
         phi_dst: VReg,
-        pred_block: usize,
     },
-    SsaPhiImmediate {
+    SsaPhiParallel {
         fn_name: String,
         block: usize,
         phi_dst: VReg,
@@ -198,15 +197,47 @@ fn verify_function_ssa(func: &Function) -> Result<(), FinishError> {
                     });
                 }
             }
-            for pred in &predecessors[bi] {
-                if !phi_preds.contains(pred) {
-                    return Err(FinishError::SsaPhiMissingPredecessor {
-                        fn_name: func.name.clone(),
-                        block: bi,
-                        phi_dst: dst,
-                        pred_block: *pred,
-                    });
+            let mut preds_sorted = phi_preds.clone();
+            preds_sorted.sort_unstable();
+            let mut cfg_sorted = predecessors[bi].clone();
+            cfg_sorted.sort_unstable();
+            if preds_sorted != cfg_sorted || phi_preds.len() != predecessors[bi].len() {
+                return Err(FinishError::SsaPhiPredecessor {
+                    fn_name: func.name.clone(),
+                    block: bi,
+                    phi_dst: dst,
+                    pred_block: predecessors[bi].first().copied().unwrap_or(0),
+                });
+            }
+        }
+        let phi_dsts: Vec<VReg> = block
+            .insts
+            .iter()
+            .filter(|i| i.op == Op::Phi)
+            .map(|i| i.dst.unwrap_or(0))
+            .collect();
+        let mut seen_phi = false;
+        for inst in &block.insts {
+            if inst.op == Op::Phi {
+                seen_phi = true;
+                let dst = inst.dst.unwrap_or(0);
+                for &arg in &inst.args {
+                    for &other in &phi_dsts {
+                        if other != dst && arg == other {
+                            return Err(FinishError::SsaPhiParallel {
+                                fn_name: func.name.clone(),
+                                block: bi,
+                                phi_dst: dst,
+                            });
+                        }
+                    }
                 }
+            } else if seen_phi && !is_terminator(inst.op) {
+                return Err(FinishError::SsaBlockTerminator {
+                    fn_name: func.name.clone(),
+                    block: bi,
+                    detail: "phi is not a prefix of the block".into(),
+                });
             }
         }
     }
@@ -583,6 +614,94 @@ impl Builder {
         self.ret(block, span, v);
     }
 
+    pub(crate) fn block_terminates(&self, block: usize) -> bool {
+        self.block_ends_with_terminator(block)
+    }
+
+    pub(crate) fn block_branch_target(&self, block: usize) -> Option<usize> {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        let block = self.functions[fn_idx].blocks.get(block)?;
+        let last = block.insts.last()?;
+        if last.op == Op::Br {
+            if let Imm::Block(t) = last.imm {
+                return Some(t);
+            }
+        }
+        None
+    }
+
+    pub(crate) fn jmp(&mut self, block: usize, span: Span, target: usize) {
+        self.br(block, span, target);
+    }
+
+    pub(crate) fn merge_regs(
+        &mut self,
+        block: usize,
+        span: Span,
+        dst: VReg,
+        pairs: &[(usize, VReg)],
+    ) {
+        self.phi(block, span, dst, pairs);
+    }
+
+    /// Insert phi nodes at the front of `block` (used when closing a loop).
+    pub(crate) fn prepend_merge_regs(
+        &mut self,
+        block: usize,
+        span: Span,
+        phis: &[(VReg, Vec<(usize, VReg)>)],
+    ) {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        let mut prefix = Vec::new();
+        for (dst, pairs) in phis {
+            let mut args = Vec::new();
+            let mut blocks = Vec::new();
+            for (b, v) in pairs {
+                blocks.push(*b);
+                args.push(*v);
+            }
+            prefix.push(Inst {
+                op: Op::Phi,
+                dst: Some(*dst),
+                args,
+                imm: Imm::Blocks(blocks),
+                span: span.clone(),
+            });
+        }
+        let block_insts = &mut self.functions[fn_idx].blocks[block].insts;
+        block_insts.splice(0..0, prefix);
+    }
+
+    pub(crate) fn copy_i64(&mut self, block: usize, span: Span, dst: VReg, src: VReg) {
+        let z = self.const_i64(block, span.clone(), 0);
+        self.emit(
+            block,
+            Inst {
+                op: Op::Add,
+                dst: Some(dst),
+                args: vec![src, z],
+                imm: Imm::None,
+                span,
+            },
+        );
+    }
+
+    /// Rebuild tail as back-edge copies then `br header` (SSA: `back` defs live on tail).
+    pub(crate) fn refresh_tail_back_edge(
+        &mut self,
+        tail: usize,
+        header: usize,
+        span: Span,
+        pairs: &[(VReg, VReg)],
+    ) {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        self.functions[fn_idx].blocks[tail].insts.clear();
+        for (back, src) in pairs {
+            self.copy_i64(tail, span.clone(), *back, *src);
+        }
+        self.jump(tail, span, header);
+    }
+
     fn br(&mut self, block: usize, span: Span, target: usize) {
         self.emit(
             block,
@@ -615,7 +734,7 @@ impl Builder {
         );
     }
 
-    fn br_if(
+    pub(crate) fn br_if(
         &mut self,
         block: usize,
         span: Span,
@@ -666,6 +785,42 @@ impl Builder {
         self.br_if(block, span.clone(), eq, pass, fail);
         self.ret_test_fail(fail, span.clone(), want, got, diag_span);
         pass
+    }
+
+    pub(crate) fn if_branch_targets(
+        &mut self,
+        block: usize,
+        span: Span,
+        cond: VReg,
+    ) -> (usize, usize, usize) {
+        let then_b = self.new_block();
+        let else_b = self.new_block();
+        let join_b = self.new_block();
+        self.br_if(block, span, cond, then_b, else_b);
+        (then_b, else_b, join_b)
+    }
+
+    pub(crate) fn if_join_merge(
+        &mut self,
+        join_b: usize,
+        span: Span,
+        then_end: usize,
+        then_v: VReg,
+        else_end: usize,
+        else_v: VReg,
+    ) -> VReg {
+        self.br(then_end, span.clone(), join_b);
+        self.br(else_end, span.clone(), join_b);
+        let dst = self.alloc_vreg();
+        self.phi(join_b, span, dst, &[(then_end, then_v), (else_end, else_v)]);
+        dst
+    }
+
+    pub(crate) fn jump(&mut self, block: usize, span: Span, target: usize) {
+        if self.block_terminates(block) {
+            return;
+        }
+        self.jmp(block, span, target);
     }
 
     /// Structured `if` with one i64 join value per arm (invariant 1).
@@ -812,16 +967,6 @@ impl FinishError {
                     "ssa verify: function `{fn_name}` block {block} phi %{phi_dst}: predecessor block {pred_block} is not a CFG predecessor"
                 )
             }
-            FinishError::SsaPhiMissingPredecessor {
-                fn_name,
-                block,
-                phi_dst,
-                pred_block,
-            } => {
-                format!(
-                    "ssa verify: function `{fn_name}` block {block} phi %{phi_dst}: missing incoming for CFG predecessor block {pred_block}"
-                )
-            }
             FinishError::SsaPhiImmediate {
                 fn_name,
                 block,
@@ -829,6 +974,15 @@ impl FinishError {
             } => {
                 format!(
                     "ssa verify: function `{fn_name}` block {block} phi %{phi_dst}: immediate is not a block list"
+                )
+            }
+            FinishError::SsaPhiParallel {
+                fn_name,
+                block,
+                phi_dst,
+            } => {
+                format!(
+                    "ssa verify: function `{fn_name}` block {block} phi %{phi_dst}: phi argument aliases another phi destination"
                 )
             }
         }
@@ -918,10 +1072,9 @@ mod tests {
         let err = b.finish().unwrap_err();
         assert!(matches!(
             err,
-            FinishError::SsaPhiMissingPredecessor {
+            FinishError::SsaPhiPredecessor {
                 fn_name,
                 block: 3,
-                pred_block: 2,
                 ..
             } if fn_name == "missing_pred"
         ));
