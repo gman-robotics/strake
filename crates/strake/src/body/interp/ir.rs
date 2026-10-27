@@ -586,6 +586,26 @@ impl Builder {
             .is_some_and(|inst| inst.op == Op::Ret)
     }
 
+    /// CFG predecessor block ids for `block` (from terminators only).
+    pub(crate) fn cfg_predecessors(&self, block: usize) -> Vec<usize> {
+        let fn_idx = self.cur_fn.expect("begin_function first");
+        let func = &self.functions[fn_idx];
+        let n = func.blocks.len();
+        let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (bi, blk) in func.blocks.iter().enumerate() {
+            if let Some(last) = blk.insts.last() {
+                if is_terminator(last.op) {
+                    for t in terminator_successors(last) {
+                        if t < n {
+                            predecessors[t].push(bi);
+                        }
+                    }
+                }
+            }
+        }
+        predecessors.get(block).cloned().unwrap_or_default()
+    }
+
     pub(crate) fn block_ends_with_terminator(&self, block: usize) -> bool {
         let fn_idx = self.cur_fn.expect("begin_function first");
         self.functions[fn_idx]
