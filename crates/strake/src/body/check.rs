@@ -264,7 +264,7 @@ fn check_no_stmt_after_terminator(stmts: &[Stmt], diags: &mut Vec<Diag>) {
             return;
         }
         match stmt {
-            Stmt::Ret { .. } | Stmt::Break { .. } => sealed = true,
+            Stmt::Ret { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => sealed = true,
             Stmt::If {
                 then_body,
                 else_body,
@@ -423,14 +423,26 @@ fn check_stmt_loop(
             return;
         }
     }
-    if let Stmt::Continue { edges, .. } = stmt {
+    if let Stmt::Continue { edges, span, .. } = stmt {
+        let mut seen = HashSet::new();
         for e in edges {
             if !loop_params.contains(&e.name) {
-                continue;
+                diags.push(type_diag(span.clone()));
+                return;
+            }
+            if !seen.insert(e.name.clone()) {
+                diags.push(type_diag(span.clone()));
+                return;
             }
             let ty = operand_ty(&e.value, &ctx.types, &ctx.phi_gaps, fns, None, diags);
             ctx.types.insert(e.name.clone(), ty);
             ctx.phi_gaps.remove(&e.name);
+        }
+        for name in loop_params {
+            if !seen.contains(name) {
+                diags.push(type_diag(span.clone()));
+                return;
+            }
         }
         return;
     }
