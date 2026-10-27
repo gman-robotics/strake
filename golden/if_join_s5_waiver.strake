@@ -1,0 +1,15 @@
+strake 1
+
+test if_join_s5_waiver
+  flag = true
+  if flag
+    x = add i64 1 0
+    y = add i64 2 0
+  else
+    x = add i64 3 0
+    y = add i64 4 0
+  end
+  z = add i64 y 0
+  assert.eq z 2
+  ret 0
+end

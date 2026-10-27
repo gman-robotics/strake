@@ -1,0 +1,16 @@
+strake 1
+
+test loop_both_arms_loop_true
+  c = true
+  if c
+    loop x = 7
+      break
+    end
+  else
+    loop x = 3
+      break
+    end
+  end
+  assert.eq x 7
+  ret 0
+end

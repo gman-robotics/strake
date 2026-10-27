@@ -1,0 +1,6 @@
+strake 1
+
+test loop_seq_after_ret
+  ret 0
+  x = add i64 1 2
+end

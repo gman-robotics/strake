@@ -1,5 +1,4 @@
 strake 1
-
 fuel 5
 
 fn bare() -> i64

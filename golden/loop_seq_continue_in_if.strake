@@ -1,0 +1,11 @@
+strake 1
+
+test loop_seq_continue_in_if
+  loop x = 0
+    if true
+      continue x = x
+      y = add i64 x 1
+    end
+  end
+  ret 0
+end

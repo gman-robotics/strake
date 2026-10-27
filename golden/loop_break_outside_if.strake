@@ -1,0 +1,8 @@
+strake 1
+
+test loop_break_outside_if
+  if true
+    break
+  end
+  ret 0
+end

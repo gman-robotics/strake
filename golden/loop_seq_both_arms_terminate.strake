@@ -1,0 +1,13 @@
+strake 1
+
+test loop_seq_both_arms_terminate
+  loop x = 0
+    if true
+      break
+    else
+      continue x = x
+    end
+    z = add i64 x 1
+  end
+  ret 0
+end

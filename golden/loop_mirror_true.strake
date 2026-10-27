@@ -1,0 +1,14 @@
+strake 1
+
+test loop_mirror_true
+  c = true
+  if c
+    loop x = 7
+      break
+    end
+  else
+    x = 2
+  end
+  assert.eq x 7
+  ret 0
+end

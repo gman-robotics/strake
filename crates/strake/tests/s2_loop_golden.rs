@@ -7,11 +7,7 @@ fn golden(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn check_e_type(path: &Path) {
-    let (status, _stdout, stderr) = run(&["check", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(1));
-    assert!(stderr.contains("E_TYPE"));
-}
+const E_SEQ_MSG: &str = "statement follows ret, break, or continue in the same block";
 
 fn run(args: &[&str]) -> (std::process::ExitStatus, String, String) {
     let bin = env!("CARGO_BIN_EXE_strake");
@@ -23,20 +19,104 @@ fn run(args: &[&str]) -> (std::process::ExitStatus, String, String) {
     )
 }
 
+fn test_exits_0(path: &Path) {
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0), "stderr={stderr}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
+}
+
+fn check_e_type(path: &Path) {
+    let (status, _stdout, stderr) = run(&["check", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(1));
+    assert!(stderr.contains("E_TYPE"), "stderr={stderr}");
+}
+
+fn check_e_seq(path: &Path) {
+    let (status, _stdout, stderr) = run(&["check", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(1));
+    assert!(stderr.contains("E_SEQ"), "stderr={stderr}");
+    assert!(stderr.contains(E_SEQ_MSG), "stderr={stderr}");
+}
+
+fn test_exits_70_contains(path: &Path, needle: &str) {
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(70), "stderr={stderr}");
+    assert!(stderr.contains(needle), "stderr={stderr}");
+}
+
 #[test]
 fn loop_swap_exits_0() {
-    let path = golden("loop_swap.strake");
-    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
-    assert!(stderr.is_empty());
+    test_exits_0(&golden("loop_swap.strake"));
+}
+
+#[test]
+fn loop_swap_ba_exits_0() {
+    test_exits_0(&golden("loop_swap_ba.strake"));
+}
+
+#[test]
+fn loop_cross_param_exits_0() {
+    test_exits_0(&golden("loop_cross_param.strake"));
+}
+
+#[test]
+fn loop_cross_param_ba_exits_0() {
+    test_exits_0(&golden("loop_cross_param_ba.strake"));
+}
+
+#[test]
+fn loop_cycle_three_exits_0() {
+    test_exits_0(&golden("loop_cycle_three.strake"));
+}
+
+#[test]
+fn loop_both_arms_loop_true_exits_0() {
+    test_exits_0(&golden("loop_both_arms_loop_true.strake"));
+}
+
+#[test]
+fn loop_both_arms_loop_false_exits_0() {
+    test_exits_0(&golden("loop_both_arms_loop_false.strake"));
+}
+
+#[test]
+fn loop_mirror_true_exits_0() {
+    test_exits_0(&golden("loop_mirror_true.strake"));
+}
+
+#[test]
+fn loop_mirror_false_exits_0() {
+    test_exits_0(&golden("loop_mirror_false.strake"));
+}
+
+#[test]
+fn loop_arm_join_true_exits_0() {
+    test_exits_0(&golden("loop_arm_join_true.strake"));
+}
+
+#[test]
+fn loop_arm_join_false_exits_0() {
+    test_exits_0(&golden("loop_arm_join_false.strake"));
+}
+
+#[test]
+fn loop_break_if_continue_else_exits_0() {
+    test_exits_0(&golden("loop_break_if_continue_else.strake"));
+}
+
+#[test]
+fn loop_continue_nested_if_exits_0() {
+    test_exits_0(&golden("loop_continue_nested_if.strake"));
+}
+
+#[test]
+fn if_join_s5_waiver_exits_70() {
+    test_exits_70_contains(&golden("if_join_s5_waiver.strake"), "unbound name in lower");
 }
 
 #[test]
 fn loop_l7_exits_0() {
-    let path = golden("loop.strake");
-    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
-    assert!(stderr.is_empty());
+    test_exits_0(&golden("loop.strake"));
 }
 
 #[test]
@@ -50,57 +130,50 @@ fn loop_arity_fmt_fixed_point() {
         .expect("fmt");
     assert_eq!(fmt_out.status.code(), Some(0));
     assert_eq!(fmt_out.stdout, on_disk);
-    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
-    assert!(stderr.is_empty());
+    test_exits_0(&path);
+}
+
+#[test]
+fn fn_no_ret_fuel5_fmt_fixed_point() {
+    let path = golden("fn_no_ret_fuel5.strake");
+    let bin = env!("CARGO_BIN_EXE_strake");
+    let on_disk = std::fs::read(&path).expect("read golden");
+    let fmt_out = Command::new(bin)
+        .args(["fmt", path.to_str().unwrap()])
+        .output()
+        .expect("fmt");
+    assert_eq!(fmt_out.status.code(), Some(0));
+    assert_eq!(fmt_out.stdout, on_disk);
 }
 
 #[test]
 fn nested_loop_exits_0() {
-    let path = golden("nested_loop.strake");
-    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
-    assert!(stderr.is_empty());
+    test_exits_0(&golden("nested_loop.strake"));
 }
 
 #[test]
 fn loop_break_carry_exits_0() {
-    let path = golden("loop_break_carry.strake");
-    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
-    assert!(stderr.is_empty());
+    test_exits_0(&golden("loop_break_carry.strake"));
 }
 
 #[test]
 fn loop_continue_carry_exits_0() {
-    let path = golden("loop_continue_carry.strake");
-    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
-    assert!(stderr.is_empty());
+    test_exits_0(&golden("loop_continue_carry.strake"));
 }
 
 #[test]
 fn if_arm_nested_loop_exits_0() {
-    let path = golden("if_arm_nested_loop.strake");
-    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
-    assert!(stderr.is_empty());
+    test_exits_0(&golden("if_arm_nested_loop.strake"));
 }
 
 #[test]
 fn loop_continue_if_else_exits_0() {
-    let path = golden("loop_continue_if_else.strake");
-    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
-    assert!(stderr.is_empty());
+    test_exits_0(&golden("loop_continue_if_else.strake"));
 }
 
 #[test]
 fn loop_stmt_gap_exits_0() {
-    let path = golden("loop_stmt_gap.strake");
-    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
-    assert!(stderr.is_empty());
+    test_exits_0(&golden("loop_stmt_gap.strake"));
 }
 
 #[test]
@@ -134,6 +207,11 @@ fn loop_continue_arity_dup_if_check_e_type() {
 }
 
 #[test]
+fn loop_continue_dup_check_e_type() {
+    check_e_type(&golden("loop_continue_dup.strake"));
+}
+
+#[test]
 fn loop_continue_bool_i64_check_e_type() {
     check_e_type(&golden("loop_continue_bool_i64.strake"));
 }
@@ -146,4 +224,54 @@ fn loop_break_outside_check_e_type() {
 #[test]
 fn loop_continue_outside_check_e_type() {
     check_e_type(&golden("loop_continue_outside.strake"));
+}
+
+#[test]
+fn loop_break_outside_if_check_e_type() {
+    check_e_type(&golden("loop_break_outside_if.strake"));
+}
+
+#[test]
+fn loop_continue_outside_if_check_e_type() {
+    check_e_type(&golden("loop_continue_outside_if.strake"));
+}
+
+#[test]
+fn loop_break_outside_nested_if_check_e_type() {
+    check_e_type(&golden("loop_break_outside_nested_if.strake"));
+}
+
+#[test]
+fn loop_continue_outside_nested_if_check_e_type() {
+    check_e_type(&golden("loop_continue_outside_nested_if.strake"));
+}
+
+#[test]
+fn loop_break_in_fn_check_e_type() {
+    check_e_type(&golden("loop_break_in_fn.strake"));
+}
+
+#[test]
+fn loop_seq_after_ret_check_e_seq() {
+    check_e_seq(&golden("loop_seq_after_ret.strake"));
+}
+
+#[test]
+fn loop_seq_after_break_check_e_seq() {
+    check_e_seq(&golden("loop_seq_after_break.strake"));
+}
+
+#[test]
+fn loop_seq_after_continue_check_e_seq() {
+    check_e_seq(&golden("loop_seq_after_continue.strake"));
+}
+
+#[test]
+fn loop_seq_continue_in_if_check_e_seq() {
+    check_e_seq(&golden("loop_seq_continue_in_if.strake"));
+}
+
+#[test]
+fn loop_seq_both_arms_terminate_check_e_seq() {
+    check_e_seq(&golden("loop_seq_both_arms_terminate.strake"));
 }

@@ -1,0 +1,15 @@
+strake 1
+
+test loop_cycle_three
+  loop a = 1 b = 2 c = 3
+    done = eq i64 a 2
+    if done
+      break
+    end
+    continue a = b b = c c = a
+  end
+  assert.eq a 2
+  assert.eq b 3
+  assert.eq c 1
+  ret 0
+end
