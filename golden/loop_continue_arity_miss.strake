@@ -1,0 +1,9 @@
+strake 1
+
+test loop_continue_arity_miss
+  loop a = 0 b = 1
+    na = add i64 a 1
+    continue a = na
+  end
+  ret 0
+end

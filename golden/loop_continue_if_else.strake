@@ -1,0 +1,15 @@
+strake 1
+
+test loop_continue_if_else
+  acc0 = 0
+  loop acc = acc0
+    one = add i64 acc 1
+    stop = eq i64 one 3
+    if stop
+      break
+    else
+      continue acc = one
+    end
+  end
+  assert.eq acc 2
+end

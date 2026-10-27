@@ -1,0 +1,20 @@
+strake 1
+
+test if_arm_nested_loop
+  c = true
+  if c
+    loop x = 0
+      y = add i64 x 1
+      stop = eq i64 y 2
+      if stop
+        break
+      end
+      continue x = y
+    end
+    assert.eq x 1
+  else
+    x = add i64 0 0
+    assert.eq x 0
+  end
+  assert.eq x 1
+end

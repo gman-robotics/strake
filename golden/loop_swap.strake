@@ -1,0 +1,11 @@
+strake 1
+
+test loop_swap
+  loop a = 1 b = 2
+    continue a = b b = a
+    break
+  end
+  assert.eq a 2
+  assert.eq b 1
+  ret 0
+end
