@@ -1,0 +1,8 @@
+strake 1
+
+test loop_continue_outside_if
+  if true
+    continue x = 0
+  end
+  ret 0
+end

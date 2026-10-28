@@ -1,0 +1,10 @@
+strake 1
+
+test loop_break_outside_nested_if
+  if true
+    if true
+      break
+    end
+  end
+  ret 0
+end

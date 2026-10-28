@@ -1,0 +1,15 @@
+strake 1
+
+test loop_cross_param_ba
+  loop b = 10 a = 1
+    stop = eq i64 a 6
+    if stop
+      break
+    end
+    a1 = add i64 a 5
+    continue a = a1 b = a
+  end
+  assert.eq a 6
+  assert.eq b 1
+  ret 0
+end

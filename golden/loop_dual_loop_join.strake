@@ -1,0 +1,23 @@
+strake 1
+
+test loop_dual_loop_join
+  c = true
+  if c
+    loop x = 1
+      break
+    end
+    loop y = 10
+      break
+    end
+  else
+    loop x = 2
+      break
+    end
+    loop y = 20
+      break
+    end
+  end
+  assert.eq x 1
+  assert.eq y 10
+  ret 0
+end

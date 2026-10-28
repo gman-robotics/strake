@@ -21,6 +21,7 @@
   },
   "codes": [
     {"code": "E_PARSE", "kind": "check", "msg": "token stream is not v0 A"},
+    {"code": "E_SEQ", "kind": "check", "msg": "statement follows ret, break, or continue in the same block"},
     {"code": "E_TYPE", "kind": "check", "msg": "operand type, arity, compare family, or eq on list/record/sum"},
     {"code": "E_SHADOW", "kind": "check", "msg": "a source name has a second binding site in the same function"},
     {"code": "E_FORALL", "kind": "check", "msg": "forall span empty, reversed, does not fit i64, or bounds not static i64"},

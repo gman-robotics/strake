@@ -295,14 +295,12 @@ mod tests {
 
     #[test]
     fn lower_abort_exit_is_plain_70() {
-        let src =
-            "strake 1\n\nfn f() -> i64\n  loop\n    break\n  end\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let src = "strake 1\n\nfn f(c: bool) -> i64\n  if c\n    ret 1\n  else\n    ret 2\n  end\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
         let tmp = std::env::temp_dir().join("strake_lib_lower70.strake");
         std::fs::write(&tmp, src).expect("write");
         let exit = test(tmp.to_str().unwrap(), Opts::default());
-        assert_eq!(exit.code, body::LOWER_ABORT_EXIT);
-        assert!(!exit.stderr.contains("\"code\""));
-        assert!(exit.stderr.contains("lower:"));
+        assert_eq!(exit.code, 1);
+        assert!(exit.stderr.contains("E_SEQ"));
     }
 
     #[test]

@@ -1,0 +1,15 @@
+strake 1
+
+test t
+  loop o = 0
+    loop a = 0 b = 1
+      na = add i64 a 1
+      if na
+        continue a = na
+      end
+      break
+    end
+    break
+  end
+  ret 0
+end

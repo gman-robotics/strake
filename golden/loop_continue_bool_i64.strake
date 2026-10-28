@@ -1,0 +1,9 @@
+strake 1
+
+test t
+  t = true
+  loop acc = 0
+    continue acc = t
+  end
+  ret 0
+end

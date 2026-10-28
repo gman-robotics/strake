@@ -1,0 +1,8 @@
+strake 1
+
+test loop_zero_param_continue
+  loop
+    continue
+  end
+  ret 0
+end

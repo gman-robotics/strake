@@ -1,0 +1,14 @@
+strake 1
+
+test loop_swap_ba
+  loop b = 2 a = 1
+    done = eq i64 a 2
+    if done
+      break
+    end
+    continue a = b b = a
+  end
+  assert.eq a 2
+  assert.eq b 1
+  ret 0
+end

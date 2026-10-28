@@ -1,0 +1,15 @@
+strake 1
+
+test loop_break_if_continue_else
+  loop acc = 5
+    first = eq i64 acc 5
+    if first
+      break
+    else
+      next = add i64 acc 1
+      continue acc = next
+    end
+  end
+  assert.eq acc 5
+  ret 0
+end

@@ -1,0 +1,16 @@
+strake 1
+
+test loop_arity
+  loop a = 0 b = 1
+    a1 = add i64 a 1
+    b1 = add i64 b 1
+    stop = eq i64 b1 3
+    if stop
+      break
+    end
+    continue a = a1 b = b1
+  end
+  assert.eq a 1
+  assert.eq b 2
+  ret 0
+end

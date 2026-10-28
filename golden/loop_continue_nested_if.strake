@@ -1,0 +1,18 @@
+strake 1
+
+test loop_continue_nested_if
+  loop acc = 0
+    one = add i64 acc 1
+    stop = eq i64 one 3
+    if stop
+      inner = true
+      if inner
+        break
+      end
+    else
+      continue acc = one
+    end
+  end
+  assert.eq acc 2
+  ret 0
+end

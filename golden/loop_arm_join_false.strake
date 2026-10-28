@@ -1,0 +1,15 @@
+strake 1
+
+test loop_arm_join_false
+  c = false
+  if c
+    x = 7
+  else
+    loop x = 0
+      break
+    end
+    y = add i64 x 1
+  end
+  assert.eq x 0
+  ret 0
+end

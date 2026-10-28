@@ -1,0 +1,12 @@
+strake 1
+
+test bool_phi_assert_mismatch
+  flag = true
+  if flag
+    b = eq bool flag true
+  else
+    b = eq bool flag false
+  end
+  assert.eq b false
+  ret 0
+end

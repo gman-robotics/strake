@@ -1,0 +1,20 @@
+strake 1
+
+test if_nested_inner_loop_x_else_x3
+  c = true
+  c2 = false
+  if c
+    if c2
+      loop x = 1
+        break
+      end
+    else
+      loop x = 2
+        break
+      end
+    end
+  else
+    x = add i64 3 0
+  end
+  ret x
+end

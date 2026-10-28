@@ -1,0 +1,16 @@
+strake 1
+
+test if_nested_inner_x_else_x3
+  c = true
+  c2 = false
+  if c
+    if c2
+      x = add i64 1 0
+    else
+      x = add i64 2 0
+    end
+  else
+    x = add i64 3 0
+  end
+  ret x
+end

@@ -1,0 +1,11 @@
+strake 1
+
+test nested_loop_no_break_use
+  loop outer = 0
+    loop inner = 1
+    end
+    break
+  end
+  assert.eq inner 1
+  ret 0
+end

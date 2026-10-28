@@ -1,0 +1,20 @@
+strake 1
+
+test loop_both_arms_nested_if
+  c = true
+  c2 = false
+  if c
+    loop x = 7
+      if c2
+        break
+      end
+      break
+    end
+  else
+    loop x = 3
+      break
+    end
+  end
+  assert.eq x 7
+  ret 0
+end

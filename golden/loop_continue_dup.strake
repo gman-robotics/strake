@@ -1,0 +1,10 @@
+strake 1
+
+test loop_continue_dup
+  loop acc = 0
+    n1 = add i64 acc 1
+    n2 = add i64 acc 10
+    continue acc = n1 acc = n2
+  end
+  ret 0
+end

@@ -1,0 +1,9 @@
+strake 1
+
+test loop_seq_after_break
+  loop x = 0
+    break
+    y = add i64 x 1
+  end
+  ret 0
+end

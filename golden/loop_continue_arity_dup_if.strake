@@ -1,0 +1,15 @@
+strake 1
+
+test t
+  loop acc = 0
+    n1 = add i64 acc 1
+    n2 = add i64 acc 10
+    stop = eq i64 n1 3
+    if stop
+      break
+    else
+      continue acc = n1 acc = n2
+    end
+  end
+  ret 0
+end
