@@ -86,7 +86,7 @@ pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure
     if !diags.is_empty() {
         return Err(CheckFailure::Diags(diags));
     }
-    if state.partial_used && !draft {
+    if state.partial_used {
         return Err(CheckFailure::Codeless(MATCH_JOIN_CODELESS));
     }
     Ok(Sketch {

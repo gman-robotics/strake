@@ -114,6 +114,24 @@ fn is_terminator(op: Op) -> bool {
     matches!(op, Op::Br | Op::BrIf | Op::BrTable | Op::Ret | Op::Trap)
 }
 
+/// CFG predecessor block ids for `block` (from terminators only).
+pub(crate) fn function_cfg_predecessors(func: &Function, block: usize) -> Vec<usize> {
+    let n = func.blocks.len();
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (bi, blk) in func.blocks.iter().enumerate() {
+        if let Some(last) = blk.insts.last() {
+            if is_terminator(last.op) {
+                for t in terminator_successors(last) {
+                    if t < n {
+                        predecessors[t].push(bi);
+                    }
+                }
+            }
+        }
+    }
+    predecessors.get(block).cloned().unwrap_or_default()
+}
+
 fn terminator_successors(inst: &Inst) -> Vec<usize> {
     match inst.op {
         Op::Br => {
@@ -591,21 +609,7 @@ impl Builder {
     /// CFG predecessor block ids for `block` (from terminators only).
     pub(crate) fn cfg_predecessors(&self, block: usize) -> Vec<usize> {
         let fn_idx = self.cur_fn.expect("begin_function first");
-        let func = &self.functions[fn_idx];
-        let n = func.blocks.len();
-        let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (bi, blk) in func.blocks.iter().enumerate() {
-            if let Some(last) = blk.insts.last() {
-                if is_terminator(last.op) {
-                    for t in terminator_successors(last) {
-                        if t < n {
-                            predecessors[t].push(bi);
-                        }
-                    }
-                }
-            }
-        }
-        predecessors.get(block).cloned().unwrap_or_default()
+        function_cfg_predecessors(&self.functions[fn_idx], block)
     }
 
     pub(crate) fn block_ends_with_terminator(&self, block: usize) -> bool {

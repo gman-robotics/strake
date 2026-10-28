@@ -1378,6 +1378,92 @@ mod tests {
             panic!("blocks imm");
         };
         assert_eq!(targets.len(), 2);
+        let err_first = r#"strake 1
+
+fn pick(r: result i64 unit) -> i64
+  match r
+    err _ ->
+      out = 0
+    ok v ->
+      out = v
+  end
+  ret out
+end
+
+test pick.ok
+  v = ok i64 7
+  n = call pick(v)
+  assert.eq n 7
+  ret 0
+end
+
+test pick.err
+  v = err unit unit
+  n = call pick(v)
+  assert.eq n 0
+  ret 0
+end
+"#;
+        let prog2 = compile_golden("err_first.strake", err_first);
+        let pick2 = fn_named(&prog2, "pick");
+        let br2 = pick2
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .find(|i| i.op == Op::BrTable)
+            .expect("br_table");
+        let crate::body::interp::ir::Imm::Blocks(t2) = &br2.imm else {
+            panic!("blocks imm");
+        };
+        assert_eq!(
+            *targets, *t2,
+            "tag index order is ok then err, not source order"
+        );
+    }
+
+    #[test]
+    fn match_loop_fallthrough_header_predecessors() {
+        use crate::body::interp::ir::{function_cfg_predecessors, Imm};
+
+        let src = include_str!("../../../../golden/match_loop_fallthrough.strake");
+        let prog = compile_golden("golden/match_loop_fallthrough.strake", src);
+        let run_once = fn_named(&prog, "run_once");
+        let br_table_block = run_once
+            .blocks
+            .iter()
+            .enumerate()
+            .find(|(_, b)| b.insts.iter().any(|i| i.op == Op::BrTable))
+            .map(|(i, _)| i)
+            .expect("br_table block");
+        let header = run_once
+            .blocks
+            .iter()
+            .enumerate()
+            .find(|(bi, b)| {
+                b.insts.first().is_some_and(|i| i.op == Op::Phi)
+                    && function_cfg_predecessors(run_once, *bi).len() == 2
+            })
+            .map(|(i, _)| i)
+            .expect("loop header");
+        let preds = function_cfg_predecessors(run_once, header);
+        assert_eq!(preds.len(), 2);
+        assert!(!preds.contains(&br_table_block));
+        let preheader = 0usize;
+        assert!(preds.contains(&preheader));
+        let match_cont = preds
+            .iter()
+            .find(|&p| *p != preheader)
+            .copied()
+            .expect("cont");
+        let last = run_once.blocks[match_cont]
+            .insts
+            .last()
+            .expect("terminator");
+        assert_eq!(last.op, Op::Br);
+        let Imm::Block(t) = last.imm else {
+            panic!("br target");
+        };
+        assert_eq!(t, header);
     }
 
     #[test]

@@ -93,6 +93,11 @@ impl<'a> Machine<'a> {
         Value::Sum(idx)
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_alloc_sum_i64(&mut self, tag: u32, payload: i64) -> Value {
+        self.alloc_sum(tag, Value::I64(payload))
+    }
+
     fn sum_tag_of(&self, handle: u32) -> Result<u32, ExecFault> {
         self.sums
             .get(handle as usize)
@@ -670,6 +675,46 @@ mod tests {
     use crate::body::compile_module;
     use crate::body::host::EmptyHost;
     use crate::body::syntax;
+
+    #[test]
+    fn user_sum_red_variant_executes() {
+        let src = r#"strake 1
+
+type Color { Blue unit | Red i64 }
+
+fn pick(c: Color) -> i64
+  match c
+    Blue _ ->
+      out = 0
+    Red x ->
+      out = x
+  end
+  ret out
+end
+
+test t
+  ret 0
+end
+"#;
+        let module = syntax::parse(src, "t.strake").expect("parse");
+        let program = compile_module(&module, false).expect("compile");
+        let fn_idx = program
+            .functions
+            .iter()
+            .position(|f| f.name == "pick")
+            .expect("pick");
+        let span = Span {
+            file: "t".into(),
+            start: 0,
+            end: 1,
+        };
+        let mut m = Machine::new(&program, program.fuel, &EmptyHost);
+        let red = m.test_alloc_sum_i64(1, 11);
+        m.enter_function(fn_idx, &[red], None, true, span)
+            .expect("enter");
+        m.run_loop().expect("run");
+        assert_eq!(m.root_return, Some(11));
+    }
 
     #[test]
     fn add2_basic_call_returns_14() {

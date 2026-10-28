@@ -34,6 +34,22 @@ fn assert_check_codeless(path: &Path) {
     assert!(stderr.contains(MATCH_JOIN_CODELESS), "stderr={stderr}");
 }
 
+fn assert_check_codeless_draft(path: &Path) {
+    let (code, stderr) = run(&["check", "--draft", path.to_str().unwrap()]);
+    assert_eq!(code, 3, "stderr={stderr}");
+    assert!(!stderr.contains("\"code\""), "stderr={stderr}");
+    assert!(stderr.contains(MATCH_JOIN_CODELESS), "stderr={stderr}");
+    assert!(!stderr.contains("lower:"), "stderr={stderr}");
+}
+
+fn assert_test_codeless_draft(path: &Path) {
+    let (code, stderr) = run(&["test", "--draft", path.to_str().unwrap()]);
+    assert_eq!(code, 3, "stderr={stderr}");
+    assert!(!stderr.contains("\"code\""), "stderr={stderr}");
+    assert!(stderr.contains(MATCH_JOIN_CODELESS), "stderr={stderr}");
+    assert!(!stderr.contains("lower:"), "stderr={stderr}");
+}
+
 #[test]
 fn accept_goldens_exit_0() {
     for name in [
@@ -55,6 +71,13 @@ fn match_join_codeless_check_and_test() {
     let (code, stderr) = run(&["test", p.to_str().unwrap()]);
     assert_eq!(code, 3, "stderr={stderr}");
     assert!(!stderr.contains("\"code\""));
+}
+
+#[test]
+fn match_join_codeless_draft_check_and_test() {
+    let p = golden("match_join.strake");
+    assert_check_codeless_draft(&p);
+    assert_test_codeless_draft(&p);
 }
 
 #[test]
@@ -99,16 +122,21 @@ fn partial_use_in_loop_body_exits_3() {
     std::fs::write(&tmp, src).expect("write");
     let exit = strake_check(tmp.to_str().unwrap(), Opts::default());
     assert_eq!(exit.code, 3);
+    assert!(exit.stderr.contains(MATCH_JOIN_CODELESS));
 }
 
 #[test]
-fn ret_arm_then_ret_out_exits_3_not_70() {
-    let src = "strake 1\n\nfn f(r: result i64 unit) -> i64\n  match r\n    ok v ->\n      skip = 0\n    err _ ->\n      out = 0\n  end\n  ret out\nend\n\ntest t\n  ret 0\nend\n";
-    let tmp = std::env::temp_dir().join("strake_s3_ret_partial.strake");
+fn ret_arm_assign_then_ret_out_is_e_type_not_70() {
+    let src = "strake 1\n\nfn f(r: result i64 unit) -> i64\n  match r\n    ok v ->\n      out = v\n      ret out\n    err _ ->\n      skip = 0\n  end\n  ret out\nend\n\ntest t\n  ret 0\nend\n";
+    let tmp = std::env::temp_dir().join("strake_s3_ret_arm_e_type.strake");
     std::fs::write(&tmp, src).expect("write");
-    let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
-    assert_eq!(exit.code, 3);
-    assert!(!exit.stderr.contains("lower:"));
+    let exit = strake_check(tmp.to_str().unwrap(), Opts::default());
+    assert_eq!(exit.code, 1, "stderr={}", exit.stderr);
+    assert!(exit.stderr.contains("E_TYPE"), "stderr={}", exit.stderr);
+    assert!(!exit.stderr.contains("lower:"), "stderr={}", exit.stderr);
+    let exit_test = strake_test(tmp.to_str().unwrap(), Opts::default());
+    assert_eq!(exit_test.code, 1);
+    assert!(!exit_test.stderr.contains("lower:"));
 }
 
 #[test]
@@ -127,4 +155,22 @@ fn later_if_assign_publish_out_exits_0() {
     std::fs::write(&tmp, src).expect("write");
     let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
     assert_eq!(exit.code, 0);
+}
+
+#[test]
+fn match_in_test_body_exits_0() {
+    let src = "strake 1\n\nfn pick(r: result i64 unit) -> i64\n  match r\n    ok v ->\n      out = v\n    err _ ->\n      out = 0\n  end\n  ret out\nend\n\ntest t\n  v = ok i64 7\n  n = call pick(v)\n  assert.eq n 7\n  ret 0\nend\n";
+    let tmp = std::env::temp_dir().join("strake_s3_match_in_test.strake");
+    std::fs::write(&tmp, src).expect("write");
+    let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
+    assert_eq!(exit.code, 0, "stderr={}", exit.stderr);
+}
+
+#[test]
+fn if_loop_exit_and_match_publish_two_names() {
+    let src = "strake 1\n\nfn f(c: bool, r: result i64 unit) -> i64\n  if c\n    loop x = 1\n      break\n    end\n    match r\n      ok v ->\n        y = v\n      err _ ->\n        y = 0\n    end\n  else\n    x = 2\n    y = 3\n  end\n  n = add i64 x y\n  ret n\nend\n\ntest t1\n  v = ok i64 7\n  n = call f(true, v)\n  assert.eq n 8\n  ret 0\nend\n\ntest t2\n  v = ok i64 2\n  n = call f(false, v)\n  assert.eq n 5\n  ret 0\nend\n";
+    let tmp = std::env::temp_dir().join("strake_s3_if_loop_match.strake");
+    std::fs::write(&tmp, src).expect("write");
+    let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
+    assert_eq!(exit.code, 0, "stderr={}", exit.stderr);
 }
