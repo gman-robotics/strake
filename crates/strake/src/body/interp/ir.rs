@@ -114,6 +114,24 @@ fn is_terminator(op: Op) -> bool {
     matches!(op, Op::Br | Op::BrIf | Op::BrTable | Op::Ret | Op::Trap)
 }
 
+/// CFG predecessor block ids for `block` (from terminators only).
+pub(crate) fn function_cfg_predecessors(func: &Function, block: usize) -> Vec<usize> {
+    let n = func.blocks.len();
+    let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (bi, blk) in func.blocks.iter().enumerate() {
+        if let Some(last) = blk.insts.last() {
+            if is_terminator(last.op) {
+                for t in terminator_successors(last) {
+                    if t < n {
+                        predecessors[t].push(bi);
+                    }
+                }
+            }
+        }
+    }
+    predecessors.get(block).cloned().unwrap_or_default()
+}
+
 fn terminator_successors(inst: &Inst) -> Vec<usize> {
     match inst.op {
         Op::Br => {
@@ -591,21 +609,7 @@ impl Builder {
     /// CFG predecessor block ids for `block` (from terminators only).
     pub(crate) fn cfg_predecessors(&self, block: usize) -> Vec<usize> {
         let fn_idx = self.cur_fn.expect("begin_function first");
-        let func = &self.functions[fn_idx];
-        let n = func.blocks.len();
-        let mut predecessors: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (bi, blk) in func.blocks.iter().enumerate() {
-            if let Some(last) = blk.insts.last() {
-                if is_terminator(last.op) {
-                    for t in terminator_successors(last) {
-                        if t < n {
-                            predecessors[t].push(bi);
-                        }
-                    }
-                }
-            }
-        }
-        predecessors.get(block).cloned().unwrap_or_default()
+        function_cfg_predecessors(&self.functions[fn_idx], block)
     }
 
     pub(crate) fn block_ends_with_terminator(&self, block: usize) -> bool {
@@ -615,6 +619,20 @@ impl Builder {
             .get(block)
             .and_then(|b| b.insts.last())
             .is_some_and(|inst| is_terminator(inst.op))
+    }
+
+    pub(crate) fn trap_user(&mut self, block: usize, span: Span) {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Trap,
+                dst: Some(dst),
+                args: Vec::new(),
+                imm: Imm::Trap(TrapImm::User),
+                span,
+            },
+        );
     }
 
     pub(crate) fn trap_fallthrough(&mut self, block: usize, span: Span) {
@@ -738,6 +756,64 @@ impl Builder {
                 span,
             },
         );
+    }
+
+    pub(crate) fn br_table(&mut self, block: usize, span: Span, tag: VReg, targets: &[usize]) {
+        self.emit(
+            block,
+            Inst {
+                op: Op::BrTable,
+                dst: None,
+                args: vec![tag],
+                imm: Imm::Blocks(targets.to_vec()),
+                span,
+            },
+        );
+    }
+
+    pub(crate) fn sum_new(&mut self, block: usize, span: Span, tag: u32, payload: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::SumNew,
+                dst: Some(dst),
+                args: vec![payload],
+                imm: Imm::I32(tag as i32),
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn sum_tag(&mut self, block: usize, span: Span, scrut: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::SumTag,
+                dst: Some(dst),
+                args: vec![scrut],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn sum_payload(&mut self, block: usize, span: Span, scrut: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::SumPayload,
+                dst: Some(dst),
+                args: vec![scrut],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
     }
 
     pub(crate) fn br_if(

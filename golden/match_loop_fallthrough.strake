@@ -1,0 +1,20 @@
+strake 1
+
+fn run_once(r: result i64 unit) -> i64
+  loop i = 0
+    match r
+      ok _ ->
+        skip = 0
+      err _ ->
+        break
+    end
+  end
+  ret i
+end
+
+test t
+  v = err unit unit
+  n = call run_once(v)
+  assert.eq n 0
+  ret 0
+end

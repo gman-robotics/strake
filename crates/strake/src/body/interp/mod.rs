@@ -10,7 +10,7 @@ use crate::body::diag::{
     render_scalar_bool, render_scalar_i64, trap_diag, Code, Diag, ExportOutcome, Kind, Span,
 };
 use crate::body::host::Host;
-use op::{Op, TrapImm};
+pub(crate) use op::{Op, TrapImm};
 
 use ir::{Imm, RetImm, VReg};
 
@@ -22,6 +22,13 @@ pub enum Value {
     F64(f64),
     #[allow(dead_code)]
     Unit,
+    Sum(u32),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SumCell {
+    tag: u32,
+    payload: Value,
 }
 
 pub(crate) struct Machine<'a> {
@@ -34,6 +41,7 @@ pub(crate) struct Machine<'a> {
     test_channel: bool,
     /// Successful call entries (host entry is call 1).
     pub(crate) call_entries: u64,
+    sums: Vec<SumCell>,
 }
 
 struct Frame {
@@ -75,7 +83,33 @@ impl<'a> Machine<'a> {
             result_diags: Vec::new(),
             test_channel,
             call_entries: 0,
+            sums: Vec::new(),
         }
+    }
+
+    fn alloc_sum(&mut self, tag: u32, payload: Value) -> Value {
+        let idx = self.sums.len() as u32;
+        self.sums.push(SumCell { tag, payload });
+        Value::Sum(idx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_alloc_sum_i64(&mut self, tag: u32, payload: i64) -> Value {
+        self.alloc_sum(tag, Value::I64(payload))
+    }
+
+    fn sum_tag_of(&self, handle: u32) -> Result<u32, ExecFault> {
+        self.sums
+            .get(handle as usize)
+            .map(|c| c.tag)
+            .ok_or_else(|| ExecFault::Codeless("bad sum handle".into()))
+    }
+
+    fn sum_payload_of(&self, handle: u32) -> Result<Value, ExecFault> {
+        self.sums
+            .get(handle as usize)
+            .map(|c| c.payload.clone())
+            .ok_or_else(|| ExecFault::Codeless("bad sum handle".into()))
     }
 
     pub(crate) fn take_result_diags(&mut self) -> Vec<Diag> {
@@ -353,6 +387,43 @@ impl<'a> Machine<'a> {
                 };
                 self.jump(t, 0)?;
             }
+            Op::BrTable => {
+                let tag_v = self.read_reg(inst.args[0])?;
+                let tag = value_as_i64(&tag_v)?;
+                let targets = blocks_imm(&inst.imm)?;
+                let idx = tag as usize;
+                if idx >= targets.len() {
+                    return Err(ExecFault::Codeless("br_table out of range".into()));
+                }
+                self.jump(targets[idx], 0)?;
+            }
+            Op::SumNew => {
+                let tag = match inst.imm {
+                    Imm::I32(t) => t as u32,
+                    _ => return Err(ExecFault::Codeless("bad sum.new tag".into())),
+                };
+                let payload = self.read_reg(inst.args[0])?;
+                let handle = self.alloc_sum(tag, payload);
+                self.write_reg(inst.dst, handle)?;
+            }
+            Op::SumTag => {
+                let scrut = self.read_reg(inst.args[0])?;
+                let handle = match scrut {
+                    Value::Sum(h) => h,
+                    _ => return Err(ExecFault::Codeless("sum.tag needs sum".into())),
+                };
+                let tag = self.sum_tag_of(handle)?;
+                self.write_reg(inst.dst, Value::I64(tag as i64))?;
+            }
+            Op::SumPayload => {
+                let scrut = self.read_reg(inst.args[0])?;
+                let handle = match scrut {
+                    Value::Sum(h) => h,
+                    _ => return Err(ExecFault::Codeless("sum.payload needs sum".into())),
+                };
+                let payload = self.sum_payload_of(handle)?;
+                self.write_reg(inst.dst, payload)?;
+            }
             Op::Phi => {
                 let preds = blocks_imm(&inst.imm)?;
                 let pred = self.frames.last().unwrap().edge_pred;
@@ -488,6 +559,7 @@ fn value_as_i64(v: &Value) -> Result<i64, ExecFault> {
     match v {
         Value::I64(n) => Ok(*n),
         Value::I32(n) => Ok(*n as i64),
+        Value::Sum(_) => Err(ExecFault::Codeless("expected i64".into())),
         _ => Err(ExecFault::Codeless("expected i64".into())),
     }
 }
@@ -603,6 +675,46 @@ mod tests {
     use crate::body::compile_module;
     use crate::body::host::EmptyHost;
     use crate::body::syntax;
+
+    #[test]
+    fn user_sum_red_variant_executes() {
+        let src = r#"strake 1
+
+type Color { Blue unit | Red i64 }
+
+fn pick(c: Color) -> i64
+  match c
+    Blue _ ->
+      out = 0
+    Red x ->
+      out = x
+  end
+  ret out
+end
+
+test t
+  ret 0
+end
+"#;
+        let module = syntax::parse(src, "t.strake").expect("parse");
+        let program = compile_module(&module, false).expect("compile");
+        let fn_idx = program
+            .functions
+            .iter()
+            .position(|f| f.name == "pick")
+            .expect("pick");
+        let span = Span {
+            file: "t".into(),
+            start: 0,
+            end: 1,
+        };
+        let mut m = Machine::new(&program, program.fuel, &EmptyHost);
+        let red = m.test_alloc_sum_i64(1, 11);
+        m.enter_function(fn_idx, &[red], None, true, span)
+            .expect("enter");
+        m.run_loop().expect("run");
+        assert_eq!(m.root_return, Some(11));
+    }
 
     #[test]
     fn add2_basic_call_returns_14() {

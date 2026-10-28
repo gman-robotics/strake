@@ -131,7 +131,8 @@ fn check_one_file(path: &str, opts: &Opts) -> Exit {
             stdout: String::new(),
             stderr: String::new(),
         },
-        Err(CompileError::Check(diags)) => check_fail(diags),
+        Err(CompileError::Check(check::CheckFailure::Diags(diags))) => check_fail(diags),
+        Err(CompileError::Check(check::CheckFailure::Codeless(msg))) => codeless_exit(msg),
         Err(CompileError::Lower(err)) => Exit {
             code: LOWER_ABORT_EXIT,
             stdout: String::new(),
@@ -215,7 +216,10 @@ pub fn test(path: &str, opts: Opts) -> Exit {
     }
     let program = match compile_module(&module, opts.draft) {
         Ok(p) => p,
-        Err(CompileError::Check(diags)) => return check_fail(diags),
+        Err(CompileError::Check(check::CheckFailure::Diags(diags))) => return check_fail(diags),
+        Err(CompileError::Check(check::CheckFailure::Codeless(msg))) => {
+            return codeless_exit(msg);
+        }
         Err(CompileError::Lower(err)) => {
             return Exit {
                 code: LOWER_ABORT_EXIT,

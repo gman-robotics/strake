@@ -13,6 +13,47 @@ pub struct SiteId(pub u32);
 pub struct CarryPlan {
     pub loops: Vec<LoopSite>,
     pub joins: Vec<JoinSite>,
+    pub matches: Vec<MatchSite>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatchSite {
+    pub id: SiteId,
+    pub span: Span,
+    pub scrutinee: String,
+    /// `result` is `["ok", "err"]`. A user sum is declaration order.
+    pub tags: Vec<String>,
+    pub arms: Vec<MatchArmSupply>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MatchArmSupply {
+    pub tag_index: u32,
+    /// This arm executes a `Br` to the join.
+    pub reaches: bool,
+    /// Names on that `Br`. Empty when `reaches` is false.
+    pub delivered: Vec<String>,
+}
+
+pub fn match_site_by_span<'a>(plan: &'a CarryPlan, span: &Span) -> Option<&'a MatchSite> {
+    plan.matches
+        .iter()
+        .find(|s| s.span.file == span.file && s.span.start == span.start && s.span.end == span.end)
+}
+
+/// Phi names at a match join: intersection of `delivered` over reaching arms.
+pub fn match_phi_names(site: &MatchSite) -> Vec<String> {
+    let reaching: Vec<&MatchArmSupply> = site.arms.iter().filter(|a| a.reaches).collect();
+    if reaching.is_empty() {
+        return Vec::new();
+    }
+    let mut names: Vec<String> = reaching[0].delivered.clone();
+    for arm in reaching.iter().skip(1) {
+        names.retain(|n| arm.delivered.iter().any(|d| d == n));
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 pub fn loop_site_by_span<'a>(plan: &'a CarryPlan, span: &Span) -> Option<&'a LoopSite> {
@@ -55,23 +96,130 @@ pub struct JoinSite {
 }
 
 /// Names `lower` must bind at an `if` join (S5 keeps only the first shared assign name).
-pub fn if_join_bind_names(site: &JoinSite, then: &[Stmt], else_body: &[Stmt]) -> Vec<String> {
+pub fn if_join_bind_names(
+    plan: &CarryPlan,
+    site: &JoinSite,
+    then: &[Stmt],
+    else_body: &[Stmt],
+) -> Vec<String> {
     let has_loop_join = site.names.iter().any(publishes_loop_join);
-    if has_loop_join {
-        let mut out = Vec::new();
+    let mut out = if has_loop_join {
+        let mut names = Vec::new();
         if let Some(n) = shared_assign_join_name(then, else_body) {
-            out.push(n);
+            names.push(n);
         }
         for supply in &site.names {
-            if publishes_loop_join(supply) && !out.iter().any(|x| x == &supply.name) {
-                out.push(supply.name.clone());
+            if publishes_loop_join(supply) && !names.iter().any(|x| x == &supply.name) {
+                names.push(supply.name.clone());
             }
         }
-        return out;
+        names
+    } else {
+        shared_assign_join_name(then, else_body)
+            .map(|n| vec![n])
+            .unwrap_or_default()
+    };
+    append_match_published_if_names(plan, then, else_body, &mut out);
+    out
+}
+
+fn append_match_published_if_names(
+    plan: &CarryPlan,
+    then: &[Stmt],
+    else_body: &[Stmt],
+    out: &mut Vec<String>,
+) {
+    let then_match = match_published_names_in_arm(then, plan);
+    let else_match = match_published_names_in_arm(else_body, plan);
+    let then_delivers = if_arm_delivered_names(then, plan);
+    let else_delivers = if_arm_delivered_names(else_body, plan);
+    for name in then_match.union(&else_match) {
+        if then_delivers.contains(name) && else_delivers.contains(name) && !out.contains(name) {
+            out.push(name.clone());
+        }
     }
-    shared_assign_join_name(then, else_body)
-        .map(|n| vec![n])
-        .unwrap_or_default()
+}
+
+fn match_published_names_in_arm(
+    body: &[Stmt],
+    plan: &CarryPlan,
+) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for stmt in body {
+        if let Stmt::Match { span, .. } = stmt {
+            if let Some(site) = match_site_by_span(plan, span) {
+                out.extend(match_phi_names(site));
+            }
+        }
+    }
+    out
+}
+
+fn if_arm_delivered_names(body: &[Stmt], plan: &CarryPlan) -> std::collections::HashSet<String> {
+    let mut names = std::collections::HashSet::new();
+    for stmt in body {
+        match stmt {
+            Stmt::Assign { name, .. } => {
+                names.insert(name.clone());
+            }
+            Stmt::If {
+                span,
+                then_body,
+                else_body,
+                ..
+            } => {
+                if let Some(site) = join_site_by_span(plan, span) {
+                    for n in if_join_bind_names(plan, site, then_body, else_body) {
+                        names.insert(n);
+                    }
+                }
+            }
+            Stmt::Match { span, .. } => {
+                if let Some(site) = match_site_by_span(plan, span) {
+                    for n in match_phi_names(site) {
+                        names.insert(n);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Names delivered on the `Br` leaving a match arm body.
+pub fn match_arm_delivered(body: &[Stmt], plan: &CarryPlan) -> Vec<String> {
+    let mut names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for stmt in body {
+        match stmt {
+            Stmt::Assign { name, .. } => {
+                names.insert(name.clone());
+            }
+            Stmt::If {
+                span,
+                then_body,
+                else_body,
+                ..
+            } => {
+                if let Some(site) = join_site_by_span(plan, span) {
+                    for n in if_join_bind_names(plan, site, then_body, else_body) {
+                        names.insert(n);
+                    }
+                }
+            }
+            Stmt::Match { span, .. } => {
+                if let Some(site) = match_site_by_span(plan, span) {
+                    for n in match_phi_names(site) {
+                        names.insert(n);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out: Vec<String> = names.into_iter().collect();
+    out.sort();
+    out
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -378,7 +526,11 @@ mod tests {
             },
             names: join_name_supplies(&then, &else_body),
         };
-        assert_eq!(if_join_bind_names(&site, &then, &else_body), vec!["x"]);
+        let plan = CarryPlan::default();
+        assert_eq!(
+            if_join_bind_names(&plan, &site, &then, &else_body),
+            vec!["x"]
+        );
         let then2 = vec![
             Stmt::Assign {
                 name: "x".into(),
@@ -436,7 +588,7 @@ mod tests {
             },
             names: join_name_supplies(&then2, &then2),
         };
-        assert_eq!(if_join_bind_names(&site2, &then2, &then2), vec!["x"]);
+        assert_eq!(if_join_bind_names(&plan, &site2, &then2, &then2), vec!["x"]);
     }
 
     #[test]

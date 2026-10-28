@@ -1,0 +1,16 @@
+strake 1
+
+fn pick(r: result i64 unit) -> i64
+  match r
+    ok v ->
+      out = v
+    err _ ->
+      skipped = 0
+  end
+  y = out
+  ret y
+end
+
+test t
+  ret 0
+end

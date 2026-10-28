@@ -1,0 +1,14 @@
+strake 1
+
+fn f(r: result i64 unit) -> i64
+  match r
+    ok v ->
+      ret v
+  end
+  n = add i64 v 1
+  ret n
+end
+
+test t
+  ret 0
+end
