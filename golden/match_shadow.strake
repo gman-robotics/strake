@@ -1,0 +1,13 @@
+strake 1
+
+fn f(r: result i64 unit, x: i64) -> i64
+  match r
+    ok x ->
+      ret x
+  end
+  ret 0
+end
+
+test t
+  ret 0
+end

@@ -1,0 +1,12 @@
+strake 1
+
+fn f(r: result i64 unit) -> i64
+  a = ok i64 1
+  b = err unit unit
+  c = eq i64 a b
+  ret c
+end
+
+test t
+  ret 0
+end

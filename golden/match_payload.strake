@@ -1,0 +1,15 @@
+strake 1
+
+fn f(r: result i64 unit) -> i64
+  match r
+    ok v ->
+      ret v
+  end
+  ret 0
+end
+
+test t
+  v = ok i64 true
+  n = call f(v)
+  ret 0
+end

@@ -1,0 +1,24 @@
+strake 1
+
+fn pick(c: bool, r: result i64 unit) -> i64
+  if c
+    match r
+      ok v ->
+        out = v
+      err _ ->
+        out = 0
+    end
+  else
+    out = 1
+  end
+  ret out
+end
+
+test t
+  v = ok i64 7
+  n = call pick(true, v)
+  assert.eq n 7
+  n2 = call pick(false, v)
+  assert.eq n2 1
+  ret 0
+end

@@ -1,0 +1,21 @@
+strake 1
+
+fn both(r: result i64 unit) -> i64
+  match r
+    ok v ->
+      x = v
+      y = add i64 v 1
+    err _ ->
+      x = 0
+      y = 1
+  end
+  sum = add i64 x y
+  ret sum
+end
+
+test t
+  v = ok i64 5
+  n = call both(v)
+  assert.eq n 11
+  ret 0
+end
