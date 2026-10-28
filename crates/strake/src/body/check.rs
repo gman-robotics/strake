@@ -5,14 +5,27 @@
 use std::collections::{HashMap, HashSet};
 
 use super::carry::{
-    self, operands_for_continue, publishes_loop_join, ArmSrc, BackEdge, BreakEdge, CarryPlan,
-    JoinSite, LoopSite, SiteId,
+    self, match_arm_delivered, match_phi_names, operands_for_continue, publishes_loop_join, ArmSrc,
+    BackEdge, BreakEdge, CarryPlan, JoinSite, LoopSite, MatchArmSupply, MatchSite, SiteId,
 };
 use super::diag::{Code, Diag, Kind, Span};
 use super::syntax::{
     BinOp, ContinueEdge, FnItem, ForallBound, Item, Module, Operand, PropertyItem, Rhs, Stmt,
-    TestItem, Type,
+    TestItem, Type, TypeDefKind,
 };
+
+pub(crate) const MATCH_JOIN_CODELESS: &str = "match arm missing the join value";
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CheckFailure {
+    Diags(Vec<Diag>),
+    Codeless(&'static str),
+}
+
+struct SumTypeInfo {
+    tags: Vec<String>,
+    payloads: Vec<Option<Type>>,
+}
 
 /// Checked module ready for lowering.
 #[derive(Clone, Debug, PartialEq)]
@@ -25,14 +38,18 @@ struct CheckState {
     carry: CarryPlan,
     loop_stack: Vec<usize>,
     next_site_id: u32,
+    partial_used: bool,
+    sum_types: HashMap<String, SumTypeInfo>,
 }
 
 impl CheckState {
-    fn new() -> Self {
+    fn new(sum_types: HashMap<String, SumTypeInfo>) -> Self {
         Self {
             carry: CarryPlan::default(),
             loop_stack: Vec::new(),
             next_site_id: 0,
+            partial_used: false,
+            sum_types,
         }
     }
 
@@ -43,9 +60,10 @@ impl CheckState {
     }
 }
 
-pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, Vec<Diag>> {
+pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure> {
     let mut diags = Vec::new();
-    let mut state = CheckState::new();
+    let sum_types = build_sum_type_index(module);
+    let mut state = CheckState::new(sum_types);
     let fn_table: Vec<&FnItem> = module
         .items
         .iter()
@@ -65,14 +83,31 @@ pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, Vec<Diag>> {
     if !draft {
         collect_holes_module(module, &mut diags);
     }
-    if diags.is_empty() {
-        Ok(Sketch {
-            module: module.clone(),
-            carry: state.carry,
-        })
-    } else {
-        Err(diags)
+    if !diags.is_empty() {
+        return Err(CheckFailure::Diags(diags));
     }
+    if state.partial_used && !draft {
+        return Err(CheckFailure::Codeless(MATCH_JOIN_CODELESS));
+    }
+    Ok(Sketch {
+        module: module.clone(),
+        carry: state.carry,
+    })
+}
+
+fn build_sum_type_index(module: &Module) -> HashMap<String, SumTypeInfo> {
+    let mut out = HashMap::new();
+    for item in &module.items {
+        if let Item::TypeDef(td) = item {
+            if let TypeDefKind::Sum(variants) = &td.kind {
+                let tags: Vec<String> = variants.iter().map(|v| v.tag.clone()).collect();
+                let payloads: Vec<Option<Type>> =
+                    variants.iter().map(|v| v.payload.clone()).collect();
+                out.insert(td.name.clone(), SumTypeInfo { tags, payloads });
+            }
+        }
+    }
+    out
 }
 
 /// Whether a test's direct `call` sites are only to `only_fn` (§2.15).
@@ -225,6 +260,7 @@ fn walk_holes_rhs(rhs: &Rhs, diags: &mut Vec<Diag>) {
 struct Ctx {
     types: HashMap<String, Type>,
     phi_gaps: HashSet<String>,
+    match_partial: HashSet<String>,
 }
 
 impl Ctx {
@@ -232,6 +268,7 @@ impl Ctx {
         Self {
             types: HashMap::new(),
             phi_gaps: HashSet::new(),
+            match_partial: HashSet::new(),
         }
     }
 
@@ -240,6 +277,13 @@ impl Ctx {
             diags.push(shadow_diag(span));
             return;
         }
+        self.phi_gaps.remove(name);
+        self.match_partial.remove(name);
+        self.types.insert(name.to_string(), ty);
+    }
+
+    fn publish_if_name(&mut self, name: &str, ty: Type) {
+        self.match_partial.remove(name);
         self.phi_gaps.remove(name);
         self.types.insert(name.to_string(), ty);
     }
@@ -306,7 +350,7 @@ fn stmts_may_fall_through(stmts: &[Stmt]) -> bool {
 
 fn stmt_seals_block(stmt: &Stmt) -> bool {
     match stmt {
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Ret { .. } => true,
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Ret { .. } | Stmt::Trap { .. } => true,
         Stmt::If {
             then_body,
             else_body,
@@ -325,7 +369,9 @@ fn check_no_stmt_after_terminator(stmts: &[Stmt], diags: &mut Vec<Diag>) {
             return;
         }
         match stmt {
-            Stmt::Ret { .. } | Stmt::Break { .. } | Stmt::Continue { .. } => sealed = true,
+            Stmt::Ret { .. } | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Trap { .. } => {
+                sealed = true
+            }
             Stmt::If {
                 then_body,
                 else_body,
@@ -346,6 +392,9 @@ fn check_no_stmt_after_terminator(stmts: &[Stmt], diags: &mut Vec<Diag>) {
             Stmt::Match { arms, .. } => {
                 for arm in arms {
                     check_no_stmt_after_terminator(&arm.body, diags);
+                }
+                if arms.iter().all(|a| !stmts_may_fall_through(&a.body)) {
+                    sealed = true;
                 }
             }
             _ => {}
@@ -388,11 +437,11 @@ fn check_stmt(
 ) {
     match stmt {
         Stmt::Assign { span, name, rhs } => {
-            let ty = check_rhs(rhs, &ctx.types, fns, diags);
+            let ty = check_rhs(rhs, ctx, state, fns, diags);
             ctx.bind(name, ty, span.clone(), diags);
         }
         Stmt::Ret { value, span } => {
-            let got = operand_ty(value, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+            let got = operand_ty(value, ctx, state, fns, None, diags);
             if let Some(expected) = fn_ret {
                 if !types_compatible(&got, expected) {
                     diags.push(type_diag(span.clone()));
@@ -406,7 +455,7 @@ fn check_stmt(
             else_body,
             ..
         } => {
-            operand_ty(cond, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+            operand_ty(cond, ctx, state, fns, None, diags);
             check_if(
                 then_body,
                 else_body,
@@ -461,17 +510,11 @@ fn check_stmt(
             let mut loop_ctx = Ctx {
                 types: ctx.types.clone(),
                 phi_gaps: ctx.phi_gaps.clone(),
+                match_partial: ctx.match_partial.clone(),
             };
             let param_set: HashSet<String> = param_names.iter().cloned().collect();
             for p in params {
-                let ty = operand_ty(
-                    &p.init,
-                    &loop_ctx.types,
-                    &loop_ctx.phi_gaps,
-                    fns,
-                    None,
-                    diags,
-                );
+                let ty = operand_ty(&p.init, &loop_ctx, state, fns, None, diags);
                 loop_ctx.bind(&p.name, ty, p.span.clone(), diags);
             }
             for s in body {
@@ -520,6 +563,7 @@ fn check_stmt(
             let mut inner = Ctx {
                 types: ctx.types.clone(),
                 phi_gaps: ctx.phi_gaps.clone(),
+                match_partial: ctx.match_partial.clone(),
             };
             let forall_name = binder.clone();
             for s in body {
@@ -540,13 +584,29 @@ fn check_stmt(
                 diags.push(parse_diag(span.clone()));
                 return;
             }
-            let g = operand_ty(got, &ctx.types, &ctx.phi_gaps, fns, None, diags);
-            let w = operand_ty(want, &ctx.types, &ctx.phi_gaps, fns, Some(&g), diags);
+            let g = operand_ty(got, ctx, state, fns, None, diags);
+            let w = operand_ty(want, ctx, state, fns, Some(&g), diags);
             if !types_compatible(&g, &w) {
                 diags.push(type_diag(span.clone()));
             }
         }
-        _ => {}
+        Stmt::Match {
+            span,
+            scrutinee,
+            arms,
+        } => check_match(
+            span.clone(),
+            scrutinee,
+            arms,
+            ctx,
+            state,
+            fns,
+            in_fn,
+            fn_ret,
+            None,
+            diags,
+        ),
+        Stmt::Trap { .. } => {}
     }
 }
 
@@ -555,6 +615,7 @@ fn check_continue_edges(
     edges: &[ContinueEdge],
     loop_params: &HashSet<String>,
     ctx: &mut Ctx,
+    state: &mut CheckState,
     fns: &[&FnItem],
     diags: &mut Vec<Diag>,
 ) -> bool {
@@ -568,7 +629,7 @@ fn check_continue_edges(
             diags.push(type_diag(span.clone()));
             return false;
         }
-        let val_ty = operand_ty(&e.value, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+        let val_ty = operand_ty(&e.value, ctx, state, fns, None, diags);
         if let Some(param_ty) = ctx.types.get(&e.name) {
             if !types_compatible(&val_ty, param_ty) {
                 diags.push(type_diag(span.clone()));
@@ -603,7 +664,7 @@ fn check_stmt_loop(
     }
     match stmt {
         Stmt::Continue { edges, span, .. } => {
-            if check_continue_edges(span.clone(), edges, loop_params, ctx, fns, diags) {
+            if check_continue_edges(span.clone(), edges, loop_params, ctx, state, fns, diags) {
                 if let Some(&idx) = state.loop_stack.last() {
                     if let Some(ops) = operands_for_continue(&state.carry.loops[idx].params, edges)
                     {
@@ -629,7 +690,7 @@ fn check_stmt_loop(
             else_body,
             ..
         } => {
-            operand_ty(cond, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+            operand_ty(cond, ctx, state, fns, None, diags);
             check_if(
                 then_body,
                 else_body,
@@ -648,6 +709,23 @@ fn check_stmt_loop(
         } => check_nested_loop_in_loop_body(
             span, params, body, ctx, state, fns, in_fn, fn_ret, diags,
         ),
+        Stmt::Match {
+            span,
+            scrutinee,
+            arms,
+        } => check_match(
+            span.clone(),
+            scrutinee,
+            arms,
+            ctx,
+            state,
+            fns,
+            in_fn,
+            fn_ret,
+            Some(loop_params),
+            diags,
+        ),
+        Stmt::Trap { .. } => {}
         _ => check_stmt(stmt, ctx, state, fns, in_fn, fn_ret, diags),
     }
 }
@@ -681,17 +759,11 @@ fn check_nested_loop_in_loop_body(
     let mut loop_ctx = Ctx {
         types: ctx.types.clone(),
         phi_gaps: ctx.phi_gaps.clone(),
+        match_partial: ctx.match_partial.clone(),
     };
     let inner_params: HashSet<String> = param_names_vec.iter().cloned().collect();
     for p in params {
-        let ty = operand_ty(
-            &p.init,
-            &loop_ctx.types,
-            &loop_ctx.phi_gaps,
-            fns,
-            None,
-            diags,
-        );
+        let ty = operand_ty(&p.init, &loop_ctx, state, fns, None, diags);
         loop_ctx.bind(&p.name, ty, p.span.clone(), diags);
     }
     for s in body {
@@ -775,6 +847,7 @@ fn check_if(
     let mut then_ctx = Ctx {
         types: pre.clone(),
         phi_gaps: ctx.phi_gaps.clone(),
+        match_partial: ctx.match_partial.clone(),
     };
     for s in then_body {
         check_stmt_in_arm(
@@ -792,6 +865,7 @@ fn check_if(
     let mut else_ctx = Ctx {
         types: pre.clone(),
         phi_gaps: ctx.phi_gaps.clone(),
+        match_partial: ctx.match_partial.clone(),
     };
     for s in else_body {
         check_stmt_in_arm(
@@ -807,8 +881,8 @@ fn check_if(
         );
     }
 
-    let site = &state.carry.joins[join_site_idx];
-    for supply in &site.names {
+    let supplies = state.carry.joins[join_site_idx].names.clone();
+    for supply in &supplies {
         let name = &supply.name;
         if pre.contains_key(name) {
             continue;
@@ -840,8 +914,8 @@ fn check_if(
                     &supply.then_arm,
                     name,
                     &then_tops,
-                    &then_ctx.types,
-                    &then_ctx.phi_gaps,
+                    &then_ctx,
+                    state,
                     fns,
                     diags,
                 );
@@ -850,8 +924,8 @@ fn check_if(
                     &supply.else_arm,
                     name,
                     &else_tops,
-                    &else_ctx.types,
-                    &else_ctx.phi_gaps,
+                    &else_ctx,
+                    state,
                     fns,
                     diags,
                 );
@@ -878,6 +952,22 @@ fn check_if(
             }
         }
     }
+
+    let join_site = &state.carry.joins[join_site_idx];
+    let bind_names = carry::if_join_bind_names(&state.carry, join_site, then_body, else_body);
+    for name in bind_names {
+        if pre.contains_key(&name) || ctx.types.contains_key(&name) {
+            continue;
+        }
+        let ty = then_ctx
+            .types
+            .get(&name)
+            .or_else(|| else_ctx.types.get(&name))
+            .cloned();
+        if let Some(ty) = ty {
+            ctx.publish_if_name(&name, ty);
+        }
+    }
 }
 
 fn join_arm_type(
@@ -885,13 +975,13 @@ fn join_arm_type(
     src: &ArmSrc,
     name: &str,
     tops: &HashMap<String, (Type, Span)>,
-    env: &HashMap<String, Type>,
-    phi_gaps: &HashSet<String>,
+    ctx: &Ctx,
+    state: &mut CheckState,
     fns: &[&FnItem],
     diags: &mut Vec<Diag>,
 ) -> Option<Type> {
     match src {
-        ArmSrc::LoopExit => loop_param_init_ty(arm, name, env, phi_gaps, fns, diags),
+        ArmSrc::LoopExit => loop_param_init_ty(arm, name, ctx, state, fns, diags),
         ArmSrc::Assign => tops.get(name).map(|(ty, _)| ty.clone()),
         ArmSrc::Absent => None,
     }
@@ -900,8 +990,8 @@ fn join_arm_type(
 fn loop_param_init_ty(
     arm: &[Stmt],
     name: &str,
-    env: &HashMap<String, Type>,
-    phi_gaps: &HashSet<String>,
+    ctx: &Ctx,
+    state: &mut CheckState,
     fns: &[&FnItem],
     diags: &mut Vec<Diag>,
 ) -> Option<Type> {
@@ -909,7 +999,7 @@ fn loop_param_init_ty(
         if let Stmt::Loop { params, .. } = stmt {
             for p in params {
                 if p.name == name {
-                    return Some(operand_ty(&p.init, env, phi_gaps, fns, None, diags));
+                    return Some(operand_ty(&p.init, ctx, state, fns, None, diags));
                 }
             }
         }
@@ -935,7 +1025,7 @@ fn check_stmt_in_arm(
                 diags.push(shadow_diag(span.clone()));
                 return;
             }
-            let ty = check_rhs(rhs, &ctx.types, fns, diags);
+            let ty = check_rhs(rhs, ctx, state, fns, diags);
             if ctx.types.contains_key(name) {
                 diags.push(shadow_diag(span.clone()));
             } else {
@@ -949,7 +1039,7 @@ fn check_stmt_in_arm(
             else_body,
             ..
         } => {
-            operand_ty(cond, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+            operand_ty(cond, ctx, state, fns, None, diags);
             check_if(
                 then_body,
                 else_body,
@@ -965,7 +1055,7 @@ fn check_stmt_in_arm(
         }
         Stmt::Continue { edges, span, .. } => {
             if let Some(params) = loop_params {
-                if check_continue_edges(span.clone(), edges, params, ctx, fns, diags) {
+                if check_continue_edges(span.clone(), edges, params, ctx, state, fns, diags) {
                     if let Some(&idx) = state.loop_stack.last() {
                         if let Some(ops) =
                             operands_for_continue(&state.carry.loops[idx].params, edges)
@@ -1017,13 +1107,30 @@ fn check_stmt_in_arm(
             span, params, body, ctx, state, fns, in_fn, fn_ret, diags,
         ),
         Stmt::Ret { value, span } => {
-            let got = operand_ty(value, &ctx.types, &ctx.phi_gaps, fns, None, diags);
+            let got = operand_ty(value, ctx, state, fns, None, diags);
             if let Some(expected) = fn_ret {
                 if !types_compatible(&got, expected) {
                     diags.push(type_diag(span.clone()));
                 }
             }
         }
+        Stmt::Match {
+            span,
+            scrutinee,
+            arms,
+        } => check_match(
+            span.clone(),
+            scrutinee,
+            arms,
+            ctx,
+            state,
+            fns,
+            in_fn,
+            fn_ret,
+            loop_params,
+            diags,
+        ),
+        Stmt::Trap { .. } => {}
         _ => {}
     }
 }
@@ -1054,11 +1161,11 @@ fn forall_binder_ty(bound: &ForallBound) -> Type {
 
 fn check_rhs(
     rhs: &Rhs,
-    env: &HashMap<String, Type>,
+    ctx: &Ctx,
+    state: &mut CheckState,
     fns: &[&FnItem],
     diags: &mut Vec<Diag>,
 ) -> Type {
-    let gaps = HashSet::new();
     match rhs {
         Rhs::BinOp {
             ty,
@@ -1067,12 +1174,20 @@ fn check_rhs(
             span,
             op,
         } => {
-            if matches!(op, BinOp::Eq | BinOp::Ne) && type_is_list(ty) {
-                diags.push(type_diag(span.clone()));
-                return ty.clone();
+            if matches!(op, BinOp::Eq | BinOp::Ne) {
+                if type_is_list(ty) {
+                    diags.push(type_diag(span.clone()));
+                    return ty.clone();
+                }
+                if type_is_result_or_sum(lhs, &ctx.types, &state.sum_types)
+                    || type_is_result_or_sum(rhs, &ctx.types, &state.sum_types)
+                {
+                    diags.push(type_diag(span.clone()));
+                    return ty.clone();
+                }
             }
-            let lt = operand_ty(lhs, env, &gaps, fns, Some(ty), diags);
-            let rt = operand_ty(rhs, env, &gaps, fns, Some(ty), diags);
+            let lt = operand_ty(lhs, ctx, state, fns, Some(ty), diags);
+            let rt = operand_ty(rhs, ctx, state, fns, Some(ty), diags);
             if !types_compatible(&lt, ty) || !types_compatible(&rt, ty) {
                 diags.push(type_diag(span.clone()));
             }
@@ -1089,7 +1204,7 @@ fn check_rhs(
                 diags.push(type_diag(span.clone()));
             }
             for (arg, param_ty) in args.iter().zip(params.iter()) {
-                let at = operand_ty(arg, env, &gaps, fns, Some(param_ty), diags);
+                let at = operand_ty(arg, ctx, state, fns, Some(param_ty), diags);
                 if !types_compatible(&at, param_ty) {
                     diags.push(type_diag(span.clone()));
                 }
@@ -1099,8 +1214,8 @@ fn check_rhs(
         Rhs::Not { operand, span } => {
             let t = operand_ty(
                 operand,
-                env,
-                &gaps,
+                ctx,
+                state,
                 fns,
                 Some(&scalar("bool", span.clone())),
                 diags,
@@ -1110,9 +1225,52 @@ fn check_rhs(
             }
             scalar("bool", span.clone())
         }
-        Rhs::Operand(op) => operand_ty(op, env, &gaps, fns, None, diags),
+        Rhs::Ok { ty, value, span } => {
+            check_ok_err_rhs(true, ty, value, span, ctx, state, fns, diags)
+        }
+        Rhs::Err { ty, value, span } => {
+            check_ok_err_rhs(false, ty, value, span, ctx, state, fns, diags)
+        }
+        Rhs::Operand(op) => operand_ty(op, ctx, state, fns, None, diags),
         Rhs::Hole { ty, .. } => ty.clone(),
         _ => scalar("i64", empty_span()),
+    }
+}
+
+fn check_ok_err_rhs(
+    is_ok: bool,
+    written: &Type,
+    value: &Operand,
+    span: &Span,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    let val_ty = operand_ty(value, ctx, state, fns, Some(written), diags);
+    if !types_compatible(&val_ty, written) {
+        diags.push(type_diag(span.clone()));
+    }
+    let unit = scalar("unit", span.clone());
+    if is_ok {
+        Type::Result(Box::new(written.clone()), Box::new(unit), span.clone())
+    } else {
+        Type::Result(Box::new(unit), Box::new(written.clone()), span.clone())
+    }
+}
+
+fn type_is_result_or_sum(
+    op: &Operand,
+    env: &HashMap<String, Type>,
+    sum_types: &HashMap<String, SumTypeInfo>,
+) -> bool {
+    match op {
+        Operand::Name(name, _) => env.get(name).is_some_and(|t| match t {
+            Type::Result(_, _, _) => true,
+            Type::Named(n, _) => sum_types.contains_key(n),
+            _ => false,
+        }),
+        _ => false,
     }
 }
 
@@ -1131,22 +1289,27 @@ fn resolve_fn(name: &str, fns: &[&FnItem]) -> Option<(Vec<Type>, Type)> {
 
 fn operand_ty(
     op: &Operand,
-    env: &HashMap<String, Type>,
-    phi_gaps: &HashSet<String>,
+    ctx: &Ctx,
+    state: &mut CheckState,
     _fns: &[&FnItem],
     expected: Option<&Type>,
     diags: &mut Vec<Diag>,
 ) -> Type {
     match op {
         Operand::Name(name, span) => {
-            if phi_gaps.contains(name) {
+            if let Some(ty) = ctx.types.get(name) {
+                return ty.clone();
+            }
+            if ctx.match_partial.contains(name) {
+                state.partial_used = true;
+                return scalar("i64", span.clone());
+            }
+            if ctx.phi_gaps.contains(name) {
                 diags.push(if_phi_diag(span.clone()));
                 return scalar("i64", span.clone());
             }
-            env.get(name).cloned().unwrap_or_else(|| {
-                diags.push(type_diag(span.clone()));
-                scalar("i64", span.clone())
-            })
+            diags.push(type_diag(span.clone()));
+            scalar("i64", span.clone())
         }
         Operand::Int(n, span) => int_literal_ty(*n, span.clone(), expected, diags),
         Operand::Unit(span) => Type::Named("unit".into(), span.clone()),
@@ -1191,12 +1354,23 @@ fn types_compatible(found: &Type, expected: &Type) -> bool {
     false
 }
 
+fn result_side_compatible(a: &Type, b: &Type) -> bool {
+    if types_equal(a, b) {
+        return true;
+    }
+    is_unit_type(a) || is_unit_type(b)
+}
+
+fn is_unit_type(ty: &Type) -> bool {
+    matches!(ty, Type::Named(n, _) if n == "unit")
+}
+
 fn types_equal(a: &Type, b: &Type) -> bool {
     match (a, b) {
         (Type::Named(na, _), Type::Named(nb, _)) => na == nb,
         (Type::List(ia, _), Type::List(ib, _)) => types_equal(ia, ib),
         (Type::Result(oa, ea, _), Type::Result(ob, eb, _)) => {
-            types_equal(oa, ob) && types_equal(ea, eb)
+            result_side_compatible(oa, ob) && result_side_compatible(ea, eb)
         }
         _ => false,
     }
@@ -1288,6 +1462,179 @@ fn parse_diag(span: Span) -> Diag {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn check_match(
+    span: Span,
+    scrutinee: &str,
+    arms: &[super::syntax::MatchArm],
+    ctx: &mut Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    in_fn: bool,
+    fn_ret: Option<&Type>,
+    loop_params: Option<&HashSet<String>>,
+    diags: &mut Vec<Diag>,
+) {
+    let scrut_ty = ctx.types.get(scrutinee).cloned();
+    let (tags, payloads) = match scrut_ty {
+        Some(Type::Result(ok, err, _)) => (
+            vec!["ok".to_string(), "err".to_string()],
+            vec![Some(ok.as_ref().clone()), Some(err.as_ref().clone())],
+        ),
+        Some(Type::Named(name, _)) => {
+            if let Some(info) = state.sum_types.get(&name) {
+                (info.tags.clone(), info.payloads.clone())
+            } else {
+                diags.push(type_diag(span.clone()));
+                return;
+            }
+        }
+        _ => {
+            diags.push(type_diag(span.clone()));
+            return;
+        }
+    };
+
+    let mut seen_tags = HashSet::new();
+    let mut arm_supplies = Vec::new();
+    let mut arm_local_types: Vec<HashMap<String, Type>> = Vec::new();
+    let site_id = state.alloc_site_id();
+    let match_idx = state.carry.matches.len();
+
+    for arm in arms {
+        if !tags.iter().any(|t| t == &arm.tag) {
+            diags.push(type_diag(arm.span.clone()));
+            continue;
+        }
+        if !seen_tags.insert(arm.tag.clone()) {
+            diags.push(type_diag(arm.span.clone()));
+            continue;
+        }
+        let tag_index = tags.iter().position(|t| t == &arm.tag).unwrap() as u32;
+        let expected_payload = payloads.get(tag_index as usize).and_then(|p| p.as_ref());
+
+        let mut arm_ctx = Ctx {
+            types: ctx.types.clone(),
+            phi_gaps: ctx.phi_gaps.clone(),
+            match_partial: ctx.match_partial.clone(),
+        };
+        if let Some(binder) = &arm.binder {
+            if binder != "_" {
+                if arm_ctx.types.contains_key(binder) {
+                    diags.push(shadow_diag(arm.span.clone()));
+                } else if let Some(payload_ty) = expected_payload {
+                    arm_ctx.bind(binder, payload_ty.clone(), arm.span.clone(), diags);
+                }
+            }
+        }
+
+        for stmt in &arm.body {
+            if let Some(params) = loop_params {
+                check_stmt_loop(stmt, &mut arm_ctx, state, params, fns, in_fn, fn_ret, diags);
+            } else {
+                check_stmt_in_arm(
+                    stmt,
+                    &mut arm_ctx,
+                    &ctx.types,
+                    state,
+                    fns,
+                    in_fn,
+                    fn_ret,
+                    None,
+                    diags,
+                );
+            }
+        }
+
+        let reaches = stmts_may_fall_through(&arm.body);
+        let delivered = if reaches {
+            match_arm_delivered(&arm.body, &state.carry)
+        } else {
+            Vec::new()
+        };
+        let mut local = HashMap::new();
+        for n in &delivered {
+            if let Some(ty) = arm_ctx.types.get(n) {
+                local.insert(n.clone(), ty.clone());
+            }
+        }
+        arm_local_types.push(local);
+        arm_supplies.push(MatchArmSupply {
+            tag_index,
+            reaches,
+            delivered,
+        });
+    }
+
+    for tag in &tags {
+        if !seen_tags.contains(tag) {
+            diags.push(match_diag(span.clone()));
+        }
+    }
+
+    state.carry.matches.push(MatchSite {
+        id: site_id,
+        span: span.clone(),
+        scrutinee: scrutinee.to_string(),
+        tags: tags.clone(),
+        arms: arm_supplies,
+    });
+
+    let site = &state.carry.matches[match_idx];
+    let phi_names = match_phi_names(site);
+    let reaching: Vec<&MatchArmSupply> = site.arms.iter().filter(|a| a.reaches).collect();
+    if reaching.is_empty() {
+        return;
+    }
+
+    let mut all_delivered: HashSet<String> = HashSet::new();
+    for arm in &reaching {
+        for n in &arm.delivered {
+            all_delivered.insert(n.clone());
+        }
+    }
+
+    for name in all_delivered {
+        let in_all = reaching
+            .iter()
+            .all(|a| a.delivered.iter().any(|d| d == &name));
+        let in_some = reaching
+            .iter()
+            .any(|a| a.delivered.iter().any(|d| d == &name));
+        if in_all {
+            let ty = site
+                .arms
+                .iter()
+                .zip(arm_local_types.iter())
+                .filter(|(s, _)| s.reaches && s.delivered.iter().any(|d| d == &name))
+                .find_map(|(_, locals)| locals.get(&name).cloned())
+                .unwrap_or_else(|| scalar("i64", span.clone()));
+            ctx.match_partial.remove(&name);
+            if !ctx.types.contains_key(&name) {
+                ctx.types.insert(name.clone(), ty);
+            }
+            ctx.phi_gaps.remove(&name);
+        } else if in_some {
+            ctx.match_partial.insert(name.clone());
+        }
+    }
+
+    for name in &phi_names {
+        ctx.match_partial.remove(name);
+    }
+}
+
+fn match_diag(span: Span) -> Diag {
+    Diag {
+        code: Code::EMatch,
+        kind: Kind::Check,
+        span,
+        want: None,
+        got: None,
+        patch: None,
+    }
+}
+
 fn seq_diag(span: Span) -> Diag {
     Diag {
         code: Code::ESeq,
@@ -1311,7 +1658,10 @@ mod tests {
         let m = syntax::parse(src, "t.strake").expect("parse");
         let sketch = check(&m, false);
         assert!(sketch.is_err());
-        let diags = sketch.unwrap_err();
+        let diags = match sketch.unwrap_err() {
+            CheckFailure::Diags(d) => d,
+            CheckFailure::Codeless(_) => panic!("expected diags"),
+        };
         assert!(diags.iter().any(|d| d.code == Code::ESeq));
     }
 
@@ -1326,7 +1676,10 @@ mod tests {
     fn shadow_rebind_in_fn() {
         let src = "strake 1\n\nfn f() -> i64\n  x = add i64 1 2\n  x = add i64 x 1\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let err = check(&m, false).unwrap_err();
+        let err = match check(&m, false).unwrap_err() {
+            CheckFailure::Diags(d) => d,
+            CheckFailure::Codeless(_) => panic!("expected diags"),
+        };
         assert!(err.iter().any(|d| d.code == Code::EShadow));
     }
 
@@ -1334,7 +1687,10 @@ mod tests {
     fn if_phi_missing_arm() {
         let src = "strake 1\n\nfn f(c: bool) -> i64\n  if c\n    t = add i64 1 2\n  else\n    u = add i64 3 4\n  end\n  ret t\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let err = check(&m, false).unwrap_err();
+        let err = match check(&m, false).unwrap_err() {
+            CheckFailure::Diags(d) => d,
+            CheckFailure::Codeless(_) => panic!("expected diags"),
+        };
         assert!(err.iter().any(|d| d.code == Code::EIfPhi));
     }
 
@@ -1350,7 +1706,10 @@ mod tests {
         let src =
             "strake 1\n\nfn f() -> i64\n  x = hole i64\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let err = check(&m, false).unwrap_err();
+        let err = match check(&m, false).unwrap_err() {
+            CheckFailure::Diags(d) => d,
+            CheckFailure::Codeless(_) => panic!("expected diags"),
+        };
         assert!(err
             .iter()
             .any(|d| d.code == Code::EHole && d.kind == Kind::Check));
@@ -1385,7 +1744,10 @@ mod tests {
         let src =
             "strake 1\n\nproperty p\n  forall n: i64 in 0..1\n    n = add i64 n 1\n  end\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let err = check(&m, false).unwrap_err();
+        let err = match check(&m, false).unwrap_err() {
+            CheckFailure::Diags(d) => d,
+            CheckFailure::Codeless(_) => panic!("expected diags"),
+        };
         assert!(err.iter().any(|d| d.code == Code::EShadow));
     }
 
