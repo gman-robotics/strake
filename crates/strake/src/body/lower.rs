@@ -2,14 +2,17 @@
 
 #![allow(clippy::too_many_arguments)]
 
-use super::carry::{if_join_bind_names, join_site_by_span, loop_site_by_span, LoopSite, SiteId};
+use super::carry::{
+    if_join_bind_names, join_site_by_span, loop_site_by_span, match_phi_names, match_site_by_span,
+    LoopSite, SiteId,
+};
 use super::check::Sketch;
 use super::diag::Span;
 use super::interp::Program;
 use super::interp::{Builder, FinishError};
 use super::syntax::{
-    BinOp, ContinueEdge, FnItem, ImportSig, Item, LoopParam, Operand, PropertyItem, Rhs, Stmt,
-    TestItem, Type,
+    BinOp, ContinueEdge, FnItem, ImportSig, Item, LoopParam, MatchArm, Operand, PropertyItem, Rhs,
+    Stmt, TestItem, Type,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -27,6 +30,7 @@ struct LowerPlan<'a> {
     sketch: &'a Sketch,
     visited_loops: std::collections::HashSet<SiteId>,
     visited_joins: std::collections::HashSet<SiteId>,
+    visited_matches: std::collections::HashSet<SiteId>,
 }
 
 struct LoopParamLowering {
@@ -219,6 +223,7 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
         sketch,
         visited_loops: std::collections::HashSet::new(),
         visited_joins: std::collections::HashSet::new(),
+        visited_matches: std::collections::HashSet::new(),
     };
     for item in &sketch.module.items {
         if let Item::Fn(f) = item {
@@ -257,6 +262,12 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
     if plan.visited_joins.len() != total_joins {
         return Err(LowerError::unsupported(
             "carry plan join site count mismatch",
+        ));
+    }
+    let total_matches = sketch.carry.matches.len();
+    if plan.visited_matches.len() != total_matches {
+        return Err(LowerError::unsupported(
+            "carry plan match site count mismatch",
         ));
     }
     b.finish().map_err(LowerError::Finish)
@@ -428,9 +439,165 @@ fn lower_stmt(
             record_continue(b, block, span.clone(), edges, frame, env)?;
             Ok(block)
         }
+        Stmt::Match {
+            span,
+            scrutinee,
+            arms,
+        } => lower_match(
+            b, block, span, scrutinee, arms, env, loops, plan, maps, None,
+        ),
+        Stmt::Trap { span } => {
+            b.trap_user(block, span.clone());
+            Ok(block)
+        }
         _ => Err(LowerError::unsupported(
             "statement not supported in this slice",
         )),
+    }
+}
+
+fn lower_match(
+    b: &mut Builder,
+    block: usize,
+    span: &Span,
+    scrutinee: &str,
+    arms: &[MatchArm],
+    env: &mut std::collections::HashMap<String, u32>,
+    loops: &mut Vec<LoopFrame>,
+    plan: &mut LowerPlan<'_>,
+    maps: &CalleeMaps,
+    mut env_bool: Option<&mut std::collections::HashSet<String>>,
+) -> Result<usize, LowerError> {
+    let site = match_site_by_span(&plan.sketch.carry, span)
+        .ok_or_else(|| LowerError::unsupported("carry plan missing match site"))?
+        .clone();
+    if !plan.visited_matches.insert(site.id) {
+        return Err(LowerError::unsupported("carry plan duplicate match site"));
+    }
+    let scrut_v = env
+        .get(scrutinee)
+        .copied()
+        .ok_or_else(|| LowerError::unsupported("unbound match scrutinee"))?;
+    let tag_v = b.sum_tag(block, span.clone(), scrut_v);
+    let arm_entries: Vec<usize> = site.tags.iter().map(|_| b.new_block()).collect();
+    b.br_table(block, span.clone(), tag_v, &arm_entries);
+    let join_block = b.new_block();
+    let phi_names = match_phi_names(&site);
+    let any_reaches = site.arms.iter().any(|a| a.reaches);
+    let mut arm_end_blocks: Vec<(usize, std::collections::HashMap<String, u32>)> = Vec::new();
+    for (arm, supply) in arms.iter().zip(site.arms.iter()) {
+        let arm_block = arm_entries[supply.tag_index as usize];
+        let mut arm_env = env.clone();
+        let mut cur = arm_block;
+        if let Some(binder) = &arm.binder {
+            if binder != "_" {
+                let payload = b.sum_payload(cur, span.clone(), scrut_v);
+                arm_env.insert(binder.clone(), payload);
+            }
+        }
+        for stmt in &arm.body {
+            cur = lower_match_arm_stmt(
+                b,
+                cur,
+                stmt,
+                &mut arm_env,
+                loops,
+                plan,
+                maps,
+                env_bool.as_deref_mut(),
+            )?;
+        }
+        if supply.reaches {
+            if !b.block_terminates(cur) {
+                b.jump(cur, span.clone(), join_block);
+            }
+            let mut snap = std::collections::HashMap::new();
+            for name in &supply.delivered {
+                if let Some(v) = arm_env.get(name) {
+                    snap.insert(name.clone(), *v);
+                }
+            }
+            arm_end_blocks.push((cur, snap));
+        }
+    }
+    if !any_reaches {
+        b.trap_fallthrough(join_block, span.clone());
+        return Ok(join_block);
+    }
+    let cont = b.new_block();
+    for name in &phi_names {
+        let mut pairs: Vec<(usize, u32)> = Vec::new();
+        for (end_blk, snap) in &arm_end_blocks {
+            if let Some(v) = snap.get(name) {
+                pairs.push((*end_blk, *v));
+            }
+        }
+        let dst = b.alloc_vreg();
+        b.merge_regs(join_block, span.clone(), dst, &pairs);
+        env.insert(name.clone(), dst);
+    }
+    b.jump(join_block, span.clone(), cont);
+    Ok(cont)
+}
+
+fn lower_match_arm_stmt(
+    b: &mut Builder,
+    block: usize,
+    stmt: &Stmt,
+    env: &mut std::collections::HashMap<String, u32>,
+    loops: &mut Vec<LoopFrame>,
+    plan: &mut LowerPlan<'_>,
+    maps: &CalleeMaps,
+    env_bool: Option<&mut std::collections::HashSet<String>>,
+) -> Result<usize, LowerError> {
+    match stmt {
+        Stmt::Assign { name, rhs, .. } => {
+            let (block, v) = lower_assign_rhs(b, block, rhs, env, maps)?;
+            env.insert(name.clone(), v);
+            Ok(block)
+        }
+        Stmt::If {
+            span,
+            cond,
+            then_body,
+            else_body,
+        } => lower_if(
+            b, block, span, cond, then_body, else_body, env, loops, plan, maps, env_bool,
+        ),
+        Stmt::Loop { span, params, body } => lower_loop(
+            b, block, span, params, body, env, loops, plan, maps, env_bool,
+        ),
+        Stmt::Match {
+            span,
+            scrutinee,
+            arms,
+        } => lower_match(
+            b, block, span, scrutinee, arms, env, loops, plan, maps, env_bool,
+        ),
+        Stmt::Ret { span, value } => {
+            let v = lower_operand(b, block, value, env)?;
+            b.ret(block, span.clone(), v);
+            Ok(block)
+        }
+        Stmt::Trap { span } => {
+            b.trap_user(block, span.clone());
+            Ok(block)
+        }
+        Stmt::Break { span } => {
+            let frame = loops
+                .last_mut()
+                .ok_or_else(|| LowerError::unsupported("break outside loop"))?;
+            record_break(b, block, span.clone(), frame, env)?;
+            Ok(block)
+        }
+        Stmt::Continue { span, edges } => {
+            let frame = loops
+                .last_mut()
+                .ok_or_else(|| LowerError::unsupported("continue outside loop"))?;
+            record_continue(b, block, span.clone(), edges, frame, env)?;
+            Ok(block)
+        }
+        _ => Err(LowerError::unsupported("statement in match arm")),
     }
 }
 
@@ -542,7 +709,7 @@ fn lower_if(
     if !plan.visited_joins.insert(join_site.id) {
         return Err(LowerError::unsupported("carry plan duplicate join site"));
     }
-    let join_names = if_join_bind_names(join_site, then_body, else_body);
+    let join_names = if_join_bind_names(&plan.sketch.carry, join_site, then_body, else_body);
     if join_names.len() > 1 {
         return lower_if_multi_join(
             b,
@@ -823,6 +990,32 @@ fn lower_if_arm(
                 record_continue(b, cur, span.clone(), edges, frame, &env).map_err(|_| ())?;
                 cur
             }
+            Stmt::Match {
+                span,
+                scrutinee,
+                arms,
+            } => lower_match(
+                b,
+                cur,
+                span,
+                scrutinee,
+                arms,
+                &mut env,
+                loops,
+                plan,
+                maps,
+                env_bool.as_deref_mut(),
+            )
+            .map_err(|_| ())?,
+            Stmt::Ret { span, value } => {
+                let v = lower_operand(b, cur, value, &env).map_err(|_| ())?;
+                b.ret(cur, span.clone(), v);
+                cur
+            }
+            Stmt::Trap { span } => {
+                b.trap_user(cur, span.clone());
+                cur
+            }
             Stmt::AssertEq { span, got, want } => {
                 let env_bool = env_bool.as_deref_mut().ok_or(())?;
                 let g = lower_operand(b, cur, got, &env).map_err(|_| ())?;
@@ -952,6 +1145,26 @@ fn lower_stmt_test(
             record_continue(b, block, span.clone(), edges, frame, env)?;
             Ok(block)
         }
+        Stmt::Match {
+            span,
+            scrutinee,
+            arms,
+        } => lower_match(
+            b,
+            block,
+            span,
+            scrutinee,
+            arms,
+            env,
+            loops,
+            plan,
+            maps,
+            Some(env_bool),
+        ),
+        Stmt::Trap { span } => {
+            b.trap_user(block, span.clone());
+            Ok(block)
+        }
         _ => Err(LowerError::Unsupported(format!(
             "lower: statement not supported in {body_label}"
         ))),
@@ -1020,6 +1233,14 @@ fn lower_rhs(
         Rhs::Operand(op) => Ok(lower_operand(b, block, op, env)?),
         Rhs::Hole { .. } => Err(LowerError::unsupported("hole must be lowered via assign")),
         Rhs::Call { .. } => Err(LowerError::unsupported("call in rhs without indices")),
+        Rhs::Ok { span, value, .. } => {
+            let payload = lower_operand(b, block, value, env)?;
+            Ok(b.sum_new(block, span.clone(), 0, payload))
+        }
+        Rhs::Err { span, value, .. } => {
+            let payload = lower_operand(b, block, value, env)?;
+            Ok(b.sum_new(block, span.clone(), 1, payload))
+        }
         _ => Err(LowerError::unsupported("rhs form")),
     }
 }
@@ -1103,7 +1324,71 @@ fn lower_operand(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::body::syntax::Operand;
+    use crate::body::compile_module;
+    use crate::body::interp::Op;
+    use crate::body::interp::Program;
+    use crate::body::syntax::{self, Operand};
+
+    fn compile_golden(file: &str, src: &str) -> Program {
+        let module = syntax::parse(src, file).expect("parse");
+        compile_module(&module, false).expect("compile")
+    }
+
+    fn fn_named<'a>(prog: &'a Program, name: &str) -> &'a crate::body::interp::ir::Function {
+        prog.functions
+            .iter()
+            .find(|f| f.name == name)
+            .expect("function")
+    }
+
+    #[test]
+    fn match_both_ret_join_is_trap_only() {
+        let src = include_str!("../../../../golden/match_both_ret.strake");
+        let prog = compile_golden("golden/match_both_ret.strake", src);
+        let pick = fn_named(&prog, "pick");
+        let trap_blocks = pick
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.insts.iter().any(|i| i.op == Op::Trap))
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        assert!(!trap_blocks.is_empty());
+        assert!(
+            !pick
+                .blocks
+                .iter()
+                .any(|b| b.insts.iter().any(|i| i.op == Op::Phi)),
+            "no phi when both arms ret"
+        );
+    }
+
+    #[test]
+    fn match_result_br_table_tag_order_ok_err() {
+        let src = include_str!("../../../../golden/match_result.strake");
+        let prog = compile_golden("golden/match_result.strake", src);
+        let pick = fn_named(&prog, "pick");
+        let br_table = pick
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .find(|i| i.op == Op::BrTable)
+            .expect("br_table");
+        let crate::body::interp::ir::Imm::Blocks(targets) = &br_table.imm else {
+            panic!("blocks imm");
+        };
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn visited_match_sites_equal_plan_len() {
+        let src = include_str!("../../../../golden/match_in_if.strake");
+        let module = syntax::parse(src, "golden/match_in_if.strake").expect("parse");
+        let sketch = crate::body::check::check(&module, false).expect("check");
+        assert_eq!(sketch.carry.matches.len(), 1);
+        let prog = compile_module(&module, false).expect("lower");
+        assert!(prog.functions.iter().any(|f| !f.blocks.is_empty()));
+    }
 
     #[test]
     fn lower_source_never_names_branch_control() {

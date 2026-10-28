@@ -27,6 +27,9 @@ pub(crate) enum Op {
     ConstF64,
     ConstBool,
     ConstUnit,
+    SumNew,
+    SumTag,
+    SumPayload,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

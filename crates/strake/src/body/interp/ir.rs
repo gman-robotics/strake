@@ -617,6 +617,20 @@ impl Builder {
             .is_some_and(|inst| is_terminator(inst.op))
     }
 
+    pub(crate) fn trap_user(&mut self, block: usize, span: Span) {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Trap,
+                dst: Some(dst),
+                args: Vec::new(),
+                imm: Imm::Trap(TrapImm::User),
+                span,
+            },
+        );
+    }
+
     pub(crate) fn trap_fallthrough(&mut self, block: usize, span: Span) {
         let dst = self.alloc_vreg();
         self.emit(
@@ -738,6 +752,64 @@ impl Builder {
                 span,
             },
         );
+    }
+
+    pub(crate) fn br_table(&mut self, block: usize, span: Span, tag: VReg, targets: &[usize]) {
+        self.emit(
+            block,
+            Inst {
+                op: Op::BrTable,
+                dst: None,
+                args: vec![tag],
+                imm: Imm::Blocks(targets.to_vec()),
+                span,
+            },
+        );
+    }
+
+    pub(crate) fn sum_new(&mut self, block: usize, span: Span, tag: u32, payload: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::SumNew,
+                dst: Some(dst),
+                args: vec![payload],
+                imm: Imm::I32(tag as i32),
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn sum_tag(&mut self, block: usize, span: Span, scrut: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::SumTag,
+                dst: Some(dst),
+                args: vec![scrut],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn sum_payload(&mut self, block: usize, span: Span, scrut: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::SumPayload,
+                dst: Some(dst),
+                args: vec![scrut],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
     }
 
     pub(crate) fn br_if(

@@ -6,7 +6,6 @@ pub mod interp;
 pub mod lower;
 pub mod syntax;
 
-use diag::Diag;
 use interp::Program;
 use lower::LowerError;
 use syntax::Module;
@@ -15,7 +14,7 @@ pub(crate) const LOWER_ABORT_EXIT: i32 = 70;
 
 #[derive(Debug)]
 pub(crate) enum CompileError {
-    Check(Vec<Diag>),
+    Check(check::CheckFailure),
     Lower(LowerError),
 }
 
