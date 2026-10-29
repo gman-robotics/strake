@@ -11,8 +11,8 @@ use super::diag::Span;
 use super::interp::Program;
 use super::interp::{Builder, FinishError};
 use super::syntax::{
-    BinOp, ContinueEdge, FnItem, ImportSig, Item, LoopParam, MatchArm, Operand, PropertyItem, Rhs,
-    Stmt, TestItem, Type,
+    BinOp, ContinueEdge, FieldDecl, FnItem, ImportSig, Item, LoopParam, MatchArm, Module, Operand,
+    PropertyItem, Rhs, Stmt, TestItem, Type, TypeDefKind,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -31,6 +31,8 @@ struct LowerPlan<'a> {
     visited_loops: std::collections::HashSet<SiteId>,
     visited_joins: std::collections::HashSet<SiteId>,
     visited_matches: std::collections::HashSet<SiteId>,
+    /// SSA name → record type name, for field-index projection.
+    rec_ty: std::collections::HashMap<String, String>,
 }
 
 struct LoopParamLowering {
@@ -224,6 +226,7 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
         visited_loops: std::collections::HashSet::new(),
         visited_joins: std::collections::HashSet::new(),
         visited_matches: std::collections::HashSet::new(),
+        rec_ty: std::collections::HashMap::new(),
     };
     for item in &sketch.module.items {
         if let Item::Fn(f) = item {
@@ -283,8 +286,14 @@ fn lower_fn_body(
     b.select_function(fn_idx);
     let entry = 0;
     let mut env = std::collections::HashMap::new();
+    plan.rec_ty.clear();
     for (i, p) in f.params.iter().enumerate() {
         env.insert(p.name.clone(), i as u32);
+        if let Type::Named(name, _) = &p.ty {
+            if record_decls(&plan.sketch.module, name).is_some() {
+                plan.rec_ty.insert(p.name.clone(), name.clone());
+            }
+        }
     }
     let mut cur = entry;
     let mut loops = Vec::new();
@@ -332,6 +341,7 @@ fn lower_test_or_property_body(
     maps: &CalleeMaps,
     body_label: &str,
 ) -> Result<(), LowerError> {
+    plan.rec_ty.clear();
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     let mut env_bool = std::collections::HashSet::new();
@@ -405,7 +415,8 @@ fn lower_stmt(
 ) -> Result<usize, LowerError> {
     match stmt {
         Stmt::Assign { name, rhs, .. } => {
-            let (block, v) = lower_assign_rhs(b, block, rhs, env, maps)?;
+            let (block, v) = lower_assign_rhs(b, block, rhs, env, plan, maps)?;
+            note_record(plan, name, rhs);
             env.insert(name.clone(), v);
             Ok(block)
         }
@@ -495,6 +506,7 @@ fn lower_match(
                 arm_env.insert(binder.clone(), payload);
             }
         }
+        let saved_rec = plan.rec_ty.clone();
         for stmt in &arm.body {
             cur = lower_match_arm_stmt(
                 b,
@@ -507,6 +519,7 @@ fn lower_match(
                 env_bool.as_deref_mut(),
             )?;
         }
+        plan.rec_ty = saved_rec;
         if supply.reaches {
             if !b.block_terminates(cur) {
                 b.jump(cur, span.clone(), join_block);
@@ -552,7 +565,8 @@ fn lower_match_arm_stmt(
 ) -> Result<usize, LowerError> {
     match stmt {
         Stmt::Assign { name, rhs, .. } => {
-            let (block, v) = lower_assign_rhs(b, block, rhs, env, maps)?;
+            let (block, v) = lower_assign_rhs(b, block, rhs, env, plan, maps)?;
+            note_record(plan, name, rhs);
             env.insert(name.clone(), v);
             Ok(block)
         }
@@ -732,7 +746,8 @@ fn lower_if(
         env_bool.as_ref().map(|s| (*s).clone());
     let (then_b, else_b, join_block) = b.if_branch_targets(block, span.clone(), cond_v);
     let mut then_bool = bool_seed.clone().unwrap_or_default();
-    let (then_end, then_vals) = lower_if_arm(
+    let saved_rec = plan.rec_ty.clone();
+    let then_arm = lower_if_arm(
         b,
         then_b,
         then_body,
@@ -742,8 +757,10 @@ fn lower_if(
         maps,
         env_bool.is_some().then_some(&mut then_bool),
         &join_names,
-    )
-    .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    );
+    plan.rec_ty = saved_rec;
+    let (then_end, then_vals) =
+        then_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     let then_v = arm_join_value(&then_vals, join_name, b, then_end, span);
     let mut phi_pairs: Vec<(usize, u32)> = Vec::new();
     if !b.block_terminates(then_end) {
@@ -753,7 +770,8 @@ fn lower_if(
         phi_pairs.push((then_end, then_v));
     }
     let mut else_bool = bool_seed.clone().unwrap_or_default();
-    let (else_end, else_vals) = lower_if_arm(
+    let saved_rec = plan.rec_ty.clone();
+    let else_arm = lower_if_arm(
         b,
         else_b,
         else_body,
@@ -763,8 +781,10 @@ fn lower_if(
         maps,
         env_bool.is_some().then_some(&mut else_bool),
         &join_names,
-    )
-    .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    );
+    plan.rec_ty = saved_rec;
+    let (else_end, else_vals) =
+        else_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     let else_v = arm_join_value(&else_vals, join_name, b, else_end, span);
     if !b.block_terminates(else_end) {
         b.jump(else_end, span.clone(), join_block);
@@ -838,7 +858,8 @@ fn lower_if_multi_join(
         env_bool.as_ref().map(|s| (*s).clone());
     let (then_b, else_b, join_block) = b.if_branch_targets(block, span.clone(), cond_v);
     let mut then_bool = bool_seed.clone().unwrap_or_default();
-    let (then_end, then_vals) = lower_if_arm(
+    let saved_rec = plan.rec_ty.clone();
+    let then_arm = lower_if_arm(
         b,
         then_b,
         then_body,
@@ -848,10 +869,13 @@ fn lower_if_multi_join(
         maps,
         env_bool.is_some().then_some(&mut then_bool),
         join_names,
-    )
-    .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    );
+    plan.rec_ty = saved_rec;
+    let (then_end, then_vals) =
+        then_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     let mut else_bool = bool_seed.clone().unwrap_or_default();
-    let (else_end, else_vals) = lower_if_arm(
+    let saved_rec = plan.rec_ty.clone();
+    let else_arm = lower_if_arm(
         b,
         else_b,
         else_body,
@@ -861,8 +885,10 @@ fn lower_if_multi_join(
         maps,
         env_bool.is_some().then_some(&mut else_bool),
         join_names,
-    )
-    .map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    );
+    plan.rec_ty = saved_rec;
+    let (else_end, else_vals) =
+        else_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     if b.block_terminates(then_end) && b.block_terminates(else_end) {
         if !b.block_terminates(join_block) {
             b.trap_fallthrough(join_block, span.clone());
@@ -932,8 +958,9 @@ fn lower_if_arm(
     for stmt in body {
         cur = match stmt {
             Stmt::Assign { name, rhs, .. } => {
-                let (next, v) = lower_assign_rhs(b, cur, rhs, &env, maps).map_err(|_| ())?;
+                let (next, v) = lower_assign_rhs(b, cur, rhs, &env, plan, maps).map_err(|_| ())?;
                 cur = next;
+                note_record(plan, name, rhs);
                 if join_v.is_none() {
                     join_v = Some(v);
                 }
@@ -1073,7 +1100,8 @@ fn lower_stmt_test(
 ) -> Result<usize, LowerError> {
     match stmt {
         Stmt::Assign { name, rhs, .. } => {
-            let (block, v) = lower_assign_rhs(b, block, rhs, env, maps)?;
+            let (block, v) = lower_assign_rhs(b, block, rhs, env, plan, maps)?;
+            note_record(plan, name, rhs);
             env.insert(name.clone(), v);
             if rhs_is_bool(rhs) {
                 env_bool.insert(name.clone());
@@ -1202,6 +1230,7 @@ fn lower_rhs(
     block: usize,
     rhs: &Rhs,
     env: &std::collections::HashMap<String, u32>,
+    plan: &LowerPlan<'_>,
 ) -> Result<u32, LowerError> {
     match rhs {
         Rhs::BinOp {
@@ -1241,7 +1270,164 @@ fn lower_rhs(
             let payload = lower_operand(b, block, value, env)?;
             Ok(b.sum_new(block, span.clone(), 1, payload))
         }
+        Rhs::ListEmpty { span, .. } => Ok(b.list_empty(block, span.clone())),
+        Rhs::ListCons { span, head, tail } => {
+            let h = lower_operand(b, block, head, env)?;
+            let t = lower_operand(b, block, tail, env)?;
+            Ok(b.list_cons(block, span.clone(), h, t))
+        }
+        Rhs::ListLen { span, list } => {
+            let l = lower_operand(b, block, list, env)?;
+            Ok(b.list_len(block, span.clone(), l))
+        }
+        Rhs::ListGet { span, list, index } => {
+            let l = lower_operand(b, block, list, env)?;
+            let i = lower_operand(b, block, index, env)?;
+            Ok(b.list_get(block, span.clone(), l, i))
+        }
+        Rhs::BytesNew { span, hex } => Ok(b.bytes_new(block, span.clone(), hex)),
+        Rhs::BytesLen { span, bytes } => {
+            let v = lower_operand(b, block, bytes, env)?;
+            Ok(b.bytes_len(block, span.clone(), v))
+        }
+        Rhs::BytesGet { span, bytes, index } => {
+            let v = lower_operand(b, block, bytes, env)?;
+            let i = lower_operand(b, block, index, env)?;
+            Ok(b.bytes_get(block, span.clone(), v, i))
+        }
+        Rhs::Record { span, fields } => {
+            let rname = match_record_name(&plan.sketch.module, fields)?;
+            let decls = record_decls(&plan.sketch.module, &rname)
+                .ok_or_else(|| LowerError::unsupported("record type"))?;
+            let mut regs = Vec::with_capacity(decls.len());
+            for decl in decls {
+                let op = fields
+                    .iter()
+                    .find(|(n, _)| n == &decl.name)
+                    .map(|(_, op)| op)
+                    .ok_or_else(|| LowerError::unsupported("record field"))?;
+                regs.push(lower_operand(b, block, op, env)?);
+            }
+            Ok(b.rec_new(block, span.clone(), &regs))
+        }
+        Rhs::Project { span, base, field } => {
+            let base_v = env
+                .get(base)
+                .copied()
+                .ok_or_else(|| LowerError::unsupported("unbound name in lower"))?;
+            let idx = project_field_index(&plan.sketch.module, &plan.rec_ty, base, field)?;
+            Ok(b.rec_get(block, span.clone(), base_v, idx))
+        }
         _ => Err(LowerError::unsupported("rhs form")),
+    }
+}
+
+fn note_record(plan: &mut LowerPlan<'_>, name: &str, rhs: &Rhs) {
+    match bound_record_type(&plan.sketch.module, rhs, &plan.rec_ty) {
+        Some(tn) => {
+            plan.rec_ty.insert(name.to_string(), tn);
+        }
+        None => {
+            plan.rec_ty.remove(name);
+        }
+    }
+}
+
+fn bound_record_type(
+    module: &Module,
+    rhs: &Rhs,
+    rec_ty: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    match rhs {
+        Rhs::Record { fields, .. } => match_record_name(module, fields).ok(),
+        Rhs::Project { base, field, .. } => {
+            let tn = rec_ty.get(base)?;
+            let decls = record_decls(module, tn)?;
+            let fty = &decls.iter().find(|f| f.name == *field)?.ty;
+            match fty {
+                Type::Named(n, _) if record_decls(module, n).is_some() => Some(n.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn record_decls<'a>(module: &'a Module, name: &str) -> Option<&'a [FieldDecl]> {
+    for item in &module.items {
+        if let Item::TypeDef(td) = item {
+            if td.name == name {
+                if let TypeDefKind::Record(fields) = &td.kind {
+                    return Some(fields.as_slice());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn match_record_name(module: &Module, fields: &[(String, Operand)]) -> Result<String, LowerError> {
+    let mut names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+    names.sort_unstable();
+    if names.windows(2).any(|w| w[0] == w[1]) {
+        return Err(LowerError::unsupported("record type"));
+    }
+    let mut hits = Vec::new();
+    for item in &module.items {
+        let Item::TypeDef(td) = item else {
+            continue;
+        };
+        let TypeDefKind::Record(decls) = &td.kind else {
+            continue;
+        };
+        let mut dn: Vec<&str> = decls.iter().map(|f| f.name.as_str()).collect();
+        dn.sort_unstable();
+        if dn == names {
+            hits.push(td.name.clone());
+        }
+    }
+    if hits.len() == 1 {
+        Ok(hits.remove(0))
+    } else {
+        Err(LowerError::unsupported("record type"))
+    }
+}
+
+fn project_field_index(
+    module: &Module,
+    rec_ty: &std::collections::HashMap<String, String>,
+    base: &str,
+    field: &str,
+) -> Result<u32, LowerError> {
+    if let Some(tn) = rec_ty.get(base) {
+        let decls =
+            record_decls(module, tn).ok_or_else(|| LowerError::unsupported("record type"))?;
+        let idx = decls
+            .iter()
+            .position(|f| f.name == field)
+            .ok_or_else(|| LowerError::unsupported("record field"))?;
+        return u32::try_from(idx).map_err(|_| LowerError::unsupported("record field"));
+    }
+    let mut idxs = Vec::new();
+    for item in &module.items {
+        let Item::TypeDef(td) = item else {
+            continue;
+        };
+        let TypeDefKind::Record(decls) = &td.kind else {
+            continue;
+        };
+        if let Some(i) = decls.iter().position(|f| f.name == field) {
+            if let Ok(i) = u32::try_from(i) {
+                idxs.push(i);
+            }
+        }
+    }
+    idxs.sort_unstable();
+    idxs.dedup();
+    if idxs.len() == 1 {
+        Ok(idxs[0])
+    } else {
+        Err(LowerError::unsupported("record field"))
     }
 }
 
@@ -1270,13 +1456,14 @@ fn lower_assign_rhs(
     block: usize,
     rhs: &Rhs,
     env: &std::collections::HashMap<String, u32>,
+    plan: &LowerPlan<'_>,
     maps: &CalleeMaps,
 ) -> Result<(usize, u32), LowerError> {
     if let Rhs::Hole { span, .. } = rhs {
         let (nb, v) = b.trap_hole(block, span.clone());
         return Ok((nb, v));
     }
-    let v = lower_rhs_call(b, block, rhs, env, maps)?;
+    let v = lower_rhs_call(b, block, rhs, env, plan, maps)?;
     Ok((block, v))
 }
 
@@ -1285,6 +1472,7 @@ fn lower_rhs_call(
     block: usize,
     rhs: &Rhs,
     env: &std::collections::HashMap<String, u32>,
+    plan: &LowerPlan<'_>,
     maps: &CalleeMaps,
 ) -> Result<u32, LowerError> {
     if let Rhs::Call { span, callee, args } = rhs {
@@ -1300,7 +1488,7 @@ fn lower_rhs_call(
         }
         return Err(LowerError::unsupported("unknown callee"));
     }
-    lower_rhs(b, block, rhs, env)
+    lower_rhs(b, block, rhs, env, plan)
 }
 
 fn lower_operand(
@@ -1317,7 +1505,8 @@ fn lower_operand(
         Operand::Int(n, span) => Ok(b.const_i64(block, span.clone(), *n as i64)),
         Operand::Unit(span) => Ok(b.const_i64(block, span.clone(), 0)),
         Operand::Bool(v, span) => Ok(b.const_bool(block, span.clone(), *v)),
-        Operand::Float(_, _) | Operand::Bytes(_, _) => Err(LowerError::unsupported("operand type")),
+        Operand::Bytes(bytes, span) => Ok(b.bytes_new(block, span.clone(), bytes)),
+        Operand::Float(_, _) => Err(LowerError::unsupported("operand type")),
     }
 }
 

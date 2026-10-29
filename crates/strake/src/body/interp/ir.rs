@@ -61,6 +61,7 @@ pub enum Imm {
     F64(u64),
     F32(u32),
     Bool(bool),
+    Bytes(Vec<u8>),
     Block(usize),
     Blocks(Vec<usize>),
     Fn(usize),
@@ -795,6 +796,141 @@ impl Builder {
                 dst: Some(dst),
                 args: vec![scrut],
                 imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn list_empty(&mut self, block: usize, span: Span) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::ListEmpty,
+                dst: Some(dst),
+                args: Vec::new(),
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn list_cons(&mut self, block: usize, span: Span, head: VReg, tail: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::ListCons,
+                dst: Some(dst),
+                args: vec![head, tail],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn list_len(&mut self, block: usize, span: Span, list: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::ListLen,
+                dst: Some(dst),
+                args: vec![list],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn list_get(&mut self, block: usize, span: Span, list: VReg, index: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::ListGet,
+                dst: Some(dst),
+                args: vec![list, index],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn bytes_new(&mut self, block: usize, span: Span, bytes: &[u8]) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::BytesNew,
+                dst: Some(dst),
+                args: Vec::new(),
+                imm: Imm::Bytes(bytes.to_vec()),
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn bytes_len(&mut self, block: usize, span: Span, bytes: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::BytesLen,
+                dst: Some(dst),
+                args: vec![bytes],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn bytes_get(&mut self, block: usize, span: Span, bytes: VReg, index: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::BytesGet,
+                dst: Some(dst),
+                args: vec![bytes, index],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn rec_new(&mut self, block: usize, span: Span, fields: &[VReg]) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::RecNew,
+                dst: Some(dst),
+                args: fields.to_vec(),
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn rec_get(&mut self, block: usize, span: Span, rec: VReg, field: u32) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::RecGet,
+                dst: Some(dst),
+                args: vec![rec],
+                imm: Imm::I32(field as i32),
                 span,
             },
         );
