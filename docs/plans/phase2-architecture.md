@@ -79,7 +79,14 @@ impl Heap { fn alloc(&mut self, v: HeapVal) -> Handle { unimplemented!() } }
 struct Region { bytes: Option<Vec<u8>> }        // Some only after `import region mem : region`
 impl Machine {
     fn instantiate(p: &Program, host: &dyn Host) -> Result<Machine, ExecFault> { unimplemented!() } // E_IMPORT before stack, no charge
-    fn load(&self, ty: ScalarTy, addr: i128) -> Result<Val, ExecFault> { unimplemented!() }
+    fn load(&self, ty: ScalarTy, addr: i128) -> Result<Val, ExecFault> { unimplemented!() } // bool byte not 0/1 -> ExecFault::Halt
+}
+pub(crate) enum ExecFault {
+    Trap { code: Code, span: Span },   // existing (interp/mod.rs:57-60)
+    Codeless(String),                  // existing: trapped outcome, `status` gives exit 2
+    Halt(String),                      // new: Phase 1 §2.17 stop; run_test_exports returns it; lib::test/run exit 3, plain text, before `status`
+}
+impl Machine {
     fn store(&mut self, ty: ScalarTy, addr: i128, v: Val) -> Result<(), ExecFault> { unimplemented!() }
 }
 
@@ -94,7 +101,7 @@ impl Builder {
 }
 
 // check.rs
-fn check_forall_span(lo: i64, hi: i64) -> Result<(), Diag>;   // E_FORALL on HI < LO or span not in i64; i128 math. Fuel traps at run time, not here.
+fn check_forall_span(lo: i64, hi: i64) -> Result<(), Diag>;   // SPEC "Forall span": span = i128(HI) - i128(LO) + 1; E_FORALL if span <= 0 or span > i64::MAX. LO/HI are i64 literals or module-level integer bindings. Fuel traps at run time, not here.
 fn check_region(module: &Module) -> Vec<Diag>;                           // E_REGION when load/store has no import
 fn check_use(module: &Module, blob_root: Option<&Path>) -> Vec<Diag>;    // E_USE; blake3 of fmt output
 
@@ -133,7 +140,9 @@ A wins on interface depth: one call per construct, and the invariant-6 span rule
 | User `trap` exec code | `interp/mod.rs:451` | low / low | no golden runs it (Phase 1 §2.7); Q1 is optional |
 | Huge `pages` aborts process | region alloc | known (Phase 1 §5) | no test; documented |
 
-**Cleared.** `fmt` does not change (no new syntax is planned; `for`/`forall` already parse, `syntax.rs`). `status` precedence does not change (`tests/status_guard.rs`).
+**Changed, not cleared.** `fmt` changes in T4 only: one new module-level item, `name = <i64 literal>` (`syntax.rs:17-26` has no such `Item` variant). Check: every existing golden stays a fmt fixed point (T1 harness), plus a fmt fixed-point unit for the new item. `for`/`forall` already parse (`syntax.rs`).
+
+**Cleared.** `status` precedence does not change (`tests/status_guard.rs`).
 
 ## 5. Open questions for Tom
 
@@ -148,28 +157,28 @@ A wins on interface depth: one call per construct, and the invariant-6 span rule
 Every ticket: no installs, Rust 1.83.0, CI green, one high-effort review (cap 2).
 
 ### T1. Golden regression harness
-**Scope.** A test that runs each listed golden with its command and compares exit and stderr bytes to a checked-in expectation. A golden with no CLI oracle (for example `trap_user`) is listed as unit-only. **Files.** `crates/strake/tests/golden_sweep.rs`, `golden/expect/*.txt`. **Done.** All 101 current files pass; deleting one expectation fails the test; a golden with no expectation and no unit-only entry fails the test. **Rule for T2–T8.** Each ticket adds the expectation file for every golden it adds. **Size** S. **Depends** none.
+**Scope.** A test that runs each listed golden with its command and compares exit and stderr bytes to a checked-in expectation. A golden with no CLI oracle (for example `trap_user`, Phase 1 §2.7) is listed in a unit-only list in `golden_sweep.rs` and has no expectation file. **Files.** `crates/strake/tests/golden_sweep.rs`, `golden/expect/*.txt`. **Done.** All 101 current files pass; deleting one expectation fails the test; a golden with no expectation and no unit-only entry fails the test. **Rule for T2–T8.** Each ticket adds an expectation file for every golden it adds that has a CLI command, and adds unit-only goldens to the unit-only list instead. **Size** S. **Depends** none.
 
 ### T2. Heap ops: lists, bytes, records
-**Scope.** New `Op` variants, `Heap`, builder methods, check types. **Files.** `interp/op.rs`, `interp/mod.rs`, `interp/ir.rs`, `check.rs`, `lower.rs`, `golden/bytes_oob.strake`. **Done.** `bytes_oob` exits 0; unit: out-of-range `list.get` is tag 1; unit: no backward edge. **Size** L. **Depends** T1.
+**Scope.** New `Op` variants, `Heap`, builder methods, check types. **Files.** `interp/op.rs`, `interp/mod.rs`, `interp/ir.rs`, `check.rs`, `lower.rs`, `golden/bytes_oob.strake`. **Done.** `bytes_oob` exits 0; unit: out-of-range `list.get` is tag 1; unit: in-range `bytes.get` is tag 0 with an i64 in 0..255 (SPEC "Bytes"); unit: `RecNew` then `RecGet` returns each field; unit: no backward edge. **Size** L. **Depends** T1.
 
 ### T3. `for` lowering
 **Scope.** `Builder::for_`, normative index loop, `trap Lower` arm. **Files.** `ir.rs`, `lower.rs`, `interp/mod.rs` (exec arms for `ne lt le gt ge`, `const.i32`, `const.f32`, `const.unit`), `golden/for_list.strake`. **Done.** §3 row 5; builder unit runs the `trap Lower` arm; unit: each existing card op executes. **Size** M. **Depends** T2.
 
 ### T4. `forall`
-**Scope.** Range and module-list forms, `E_FORALL`, exit-3 bad form, and module-level `name = <i64 literal>` items (Phase 1 §2.16; new `Item` variant in `syntax.rs`, fmt fixed point). **Files.** `check.rs`, `ir.rs`, `lower.rs`, `golden/forall_rev.strake`, `golden/forall_ok.strake`, `golden/forall_list_bad.strake`. **Done.** §3 row 6; `forall_list_bad` exits 3, no `E_FORALL`; i64 span units. **Size** M. **Depends** T3.
+**Scope.** Range and module-list forms, `E_FORALL`, exit-3 bad form, and module-level `name = <i64 literal>` items (Phase 1 §2.16; new `Item` variant in `syntax.rs`, fmt fixed point). **Files.** `syntax.rs`, `check.rs`, `ir.rs`, `lower.rs`, `golden/forall_rev.strake`, `golden/forall_ok.strake`, `golden/forall_list_bad.strake`. **Done.** §3 row 6; `forall_list_bad` exits 3, no `E_FORALL`; unit: `name = <i64 literal>` parses and is a fmt fixed point; unit: a `forall` whose `LO`/`HI` name such a binding checks like the literal; unit: `LO=0, HI=i64::MAX` is `E_FORALL` and `LO=1, HI=i64::MAX` is accepted and not run. **Size** M. **Depends** T3.
 
 ### T5. Region, `load`/`store`, imports
-**Scope.** `Region`, `instantiate`, `E_REGION`, `E_OOB`, `E_IMPORT` trap, page precedence (§2.2), zero fill (§2.17), `load` type check. **Files.** `interp/*`, `check.rs`, `golden/region_oob.strake`, `region_miss`, `region_unaligned`, `import_miss`, `load_type`. **Done.** Phase 1 T8 rows for those five files. Unit: a bool `load` of a byte other than 0 or 1 stops with exit 3, plain text, no catalog code (§2.17). **Size** L. **Depends** T2.
+**Scope.** `Region`, `instantiate`, `E_REGION`, `E_OOB`, `E_IMPORT` trap, page precedence (§2.2), zero fill (§2.17), `load` type check. **Files.** `interp/*`, `lib.rs` (map `ExecFault::Halt` to exit 3 before `status`, `lib.rs:232-234`), `check.rs`, `golden/region_oob.strake`, `region_miss`, `region_unaligned`, `import_miss`, `load_type`. **Done.** Phase 1 T8 rows for those five files. Unit through `lib::test`: a bool `load` of a byte other than 0 or 1 gives exit 3, plain text, no catalog code, `status` not called (§2.17). **Size** L. **Depends** T2.
 
 ### T6. Draft holes and user `trap`
-**Scope.** `test --draft` runs to `E_HOLE` trap; user `trap` lowers to opcode `trap` per Phase 1 §2.7. **Files.** `lower.rs`, `interp/mod.rs`, `golden/hole_draft.strake`, `golden/trap_user.strake`. **Done.** §3 row 10 draft; unit lower check for `trap_user`, no CLI oracle. **Size** S. **Depends** T1.
+**Scope.** `test --draft` runs to `E_HOLE` trap; user `trap` lowers to opcode `trap` per Phase 1 §2.7. **Files.** `lower.rs`, `interp/mod.rs`, `golden/hole_draft.strake`, `golden/trap_user.strake`. **Done.** §3 row 10 draft; unit lower check for `trap_user`; `trap_user` is on the T1 unit-only list, with no expectation file. **Size** S. **Depends** T1.
 
 ### T7. `use` and `--blob-root`
 **Scope.** Read the existing `Opts.blob_root` in `check_use`; `blake3`. **Files.** `lib.rs`, `main.rs`, `check.rs`, `Cargo.toml`, `Cargo.lock`, `golden/use_ok.strake`, `golden/use_bad.strake`. **Done.** Phase 1 T8 `use` rows. **Size** M. **Depends** T1, Q3.
 
 ### T8. `run`
-**Scope.** Implement `lib::run`. **Files.** `lib.rs`, `golden/run_const.strake`, verify-strake feature doc. **Done.** `strake run --fn answer golden/run_const.strake` prints `14`, exits 0; non-nullary export is a usage error. **Size** S. **Depends** T1, Q2.
+**Scope.** Implement `lib::run`. **Files.** `lib.rs`, `golden/run_const.strake`, verify-strake feature doc. **Done.** `strake run --fn answer golden/run_const.strake` prints `14`, exits 0; non-nullary export is a usage error. Float rendering follows Q2 but does not block `run_const`. **Size** S. **Depends** T1.
 
 ### T9. MVP sweep and docs
 **Scope.** Confirm the T1 sweep covers the full Phase 1 §3 table; add verify-strake features; README/SPEC per Q4. **Files.** `tests/golden_sweep.rs`, `.cursor/skills/verify-strake/**`, `README.md`, `SPEC.md` "Next" only. **Done.** Every §3 command passes in CI; no `unimplemented op` reachable from any golden. **Size** M. **Depends** T2–T8.
