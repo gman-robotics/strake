@@ -344,10 +344,8 @@ pub fn codeless_rejection(module: &Module) -> Option<&'static str> {
                     return Some("module may contain at most one pages directive");
                 }
             }
-            Item::Test(t) => {
-                if test_calls_priv(t, &priv_fns) {
-                    return Some("tests must call exported functions only");
-                }
+            Item::Test(t) if test_calls_priv(t, &priv_fns) => {
+                return Some("tests must call exported functions only");
             }
             _ => {}
         }
@@ -611,6 +609,9 @@ impl<'a> Lexer<'a> {
             return Err(self.err(start));
         }
         let hex_str = &self.src[hex_start..self.i - 1];
+        // `usize::is_multiple_of` is stable only from Rust 1.87; CI pins 1.83.0.
+        // `unknown_lints` keeps 1.83 clippy quiet about the newer lint name.
+        #[allow(unknown_lints, clippy::manual_is_multiple_of)]
         if hex_str.len() % 2 != 0 {
             return Err(self.err(start));
         }
