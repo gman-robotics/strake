@@ -349,27 +349,24 @@ impl<'a> Machine<'a> {
                     _ => RetImm::Normal,
                 };
                 let v = self.read_reg(inst.args[0])?;
-                let ret_i64 = value_as_i64(&v)?;
                 let is_normal_ret = matches!(&ret_imm, RetImm::Normal);
-                match ret_imm {
-                    RetImm::TestFail {
-                        want,
-                        got,
-                        diag_span,
-                    } => {
-                        let want_v = self.read_reg(want)?;
-                        let got_v = self.read_reg(got)?;
-                        let (want_s, got_s) = render_test_fail_scalars(&want_v, &got_v)?;
-                        self.result_diags.push(Diag {
-                            code: Code::ETest,
-                            kind: Kind::Result,
-                            span: diag_span,
-                            want: Some(want_s),
-                            got: Some(got_s),
-                            patch: None,
-                        });
-                    }
-                    RetImm::Normal => {}
+                if let RetImm::TestFail {
+                    want,
+                    got,
+                    diag_span,
+                } = &ret_imm
+                {
+                    let want_v = self.read_reg(*want)?;
+                    let got_v = self.read_reg(*got)?;
+                    let (want_s, got_s) = render_test_fail_scalars(&want_v, &got_v)?;
+                    self.result_diags.push(Diag {
+                        code: Code::ETest,
+                        kind: Kind::Result,
+                        span: diag_span.clone(),
+                        want: Some(want_s),
+                        got: Some(got_s),
+                        patch: None,
+                    });
                 }
                 let call_dst = self.frames.last().unwrap().pending_call_dst;
                 self.frames.pop();
@@ -379,6 +376,7 @@ impl<'a> Machine<'a> {
                         caller.regs[dst as usize] = Some(v);
                     }
                 } else if self.frames.is_empty() {
+                    let ret_i64 = value_as_i64(&v)?;
                     if self.test_channel && ret_i64 == 77 && is_normal_ret {
                         self.result_diags.push(Diag {
                             code: Code::ERefused,
@@ -530,9 +528,7 @@ impl<'a> Machine<'a> {
             Op::RecGet => {
                 let h = self.reg_handle(inst.args[0])?;
                 let field = match inst.imm {
-                    Imm::I32(i) => {
-                        usize::try_from(i).map_err(|_| ExecFault::Codeless("bad rec.get".into()))?
-                    }
+                    Imm::U32(i) => i as usize,
                     _ => return Err(ExecFault::Codeless("bad rec.get".into())),
                 };
                 let v = self.heap.rec_get(h, field)?;

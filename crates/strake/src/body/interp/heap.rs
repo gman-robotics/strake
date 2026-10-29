@@ -130,15 +130,12 @@ impl Heap {
 
     /// Bytewise content equality. Non-byte handles are a codeless fault.
     pub(super) fn bytes_eq(&self, a: u32, b: u32) -> Result<bool, ExecFault> {
-        let left = match self.cell(a)? {
-            HeapVal::Bytes(bs) => bs.clone(),
-            _ => return Err(ExecFault::Codeless("eq bytes".into())),
-        };
-        let right = match self.cell(b)? {
-            HeapVal::Bytes(bs) => bs.clone(),
-            _ => return Err(ExecFault::Codeless("eq bytes".into())),
-        };
-        Ok(left == right)
+        let left = self.cell(a)?;
+        let right = self.cell(b)?;
+        match (left, right) {
+            (HeapVal::Bytes(x), HeapVal::Bytes(y)) => Ok(x == y),
+            _ => Err(ExecFault::Codeless("eq bytes".into())),
+        }
     }
 
     fn require_list(&self, h: u32) -> Result<(), ExecFault> {
@@ -508,5 +505,266 @@ test t
 end
 "#;
         assert_eq!(compile_run(src, "pack"), 405);
+    }
+
+    #[test]
+    fn callee_returns_list_and_caller_reads_len() {
+        let src = r#"strake 1
+
+fn id(xs: list i64) -> list i64
+  ret xs
+end
+
+fn pack() -> i64
+  e = list.empty i64
+  t = list.cons 4 e
+  xs = list.cons 9 t
+  ys = call id(xs)
+  n = list.len ys
+  ret n
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 2);
+    }
+
+    #[test]
+    fn callee_returns_record_and_caller_projects_field() {
+        let src = r#"strake 1
+
+type Point { x: i64, y: i64 }
+
+fn id(p: Point) -> Point
+  ret p
+end
+
+fn pack() -> i64
+  p = { y: 5, x: 4 }
+  q = call id(p)
+  v = q.x
+  ret v
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 4);
+    }
+
+    #[test]
+    fn callee_returns_sum_and_caller_reads_payload() {
+        let src = r#"strake 1
+
+fn id(r: result i64 unit) -> result i64 unit
+  ret r
+end
+
+fn pack() -> i64
+  r = ok i64 5
+  s = call id(r)
+  match s
+    ok v ->
+      ret v
+    err _ ->
+      ret 0
+  end
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 5);
+    }
+
+    #[test]
+    fn record_copy_projects_field_at_distinct_index() {
+        let src = r#"strake 1
+
+type A { n: i64 }
+type B { label: bytes, n: i64 }
+
+fn pack() -> i64
+  b = { label: x"00", n: 9 }
+  c = b
+  v = c.n
+  ret v
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 9);
+    }
+
+    #[test]
+    fn loop_param_projects_field_at_distinct_index() {
+        let src = r#"strake 1
+
+type A { n: i64 }
+type B { label: bytes, n: i64 }
+
+fn pack() -> i64
+  b = { label: x"00", n: 8 }
+  loop p = b
+    v = p.n
+    ret v
+  end
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 8);
+    }
+
+    #[test]
+    fn match_binder_projects_record_field() {
+        let src = r#"strake 1
+
+type A { n: i64 }
+type B { label: bytes, n: i64 }
+
+fn pick(r: result A unit) -> i64
+  match r
+    ok p ->
+      v = p.n
+      ret v
+    err _ ->
+      ret 0
+  end
+end
+
+fn pack() -> i64
+  a = { n: 6 }
+  r = ok A a
+  n = call pick(r)
+  ret n
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 6);
+    }
+
+    #[test]
+    fn if_join_projects_record_when_arms_agree() {
+        let src = r#"strake 1
+
+type A { n: i64 }
+type B { label: bytes, n: i64 }
+
+fn pick(c: bool) -> i64
+  if c
+    r = { n: 3 }
+  else
+    r = { n: 4 }
+  end
+  v = r.n
+  ret v
+end
+
+fn pack() -> i64
+  n = call pick(true)
+  ret n
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 3);
+    }
+
+    #[test]
+    fn match_join_projects_record_when_arms_agree() {
+        let src = r#"strake 1
+
+type A { n: i64 }
+type B { label: bytes, n: i64 }
+
+fn pick(c: bool) -> i64
+  r = ok bool c
+  match r
+    ok _ ->
+      out = { n: 3 }
+    err _ ->
+      out = { n: 4 }
+  end
+  v = out.n
+  ret v
+end
+
+fn pack() -> i64
+  n = call pick(true)
+  ret n
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 3);
+    }
+
+    #[test]
+    fn record_literal_runs_field_type_survivor() {
+        let src = r#"strake 1
+
+type A { x: i64 }
+type B { x: bool }
+
+fn pack() -> i64
+  p = { x: true }
+  c = p.x
+  if c
+    out = 1
+  else
+    out = 0
+  end
+  ret out
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 1);
+    }
+
+    #[test]
+    fn rec_get_index_above_i32_max_is_not_negative() {
+        let sp = span();
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let entry = 0;
+        let one = b.const_i64(entry, sp.clone(), 1);
+        let rec = b.rec_new(entry, sp.clone(), &[one]);
+        let field = (i32::MAX as u32) + 1;
+        let got = b.rec_get(entry, sp.clone(), rec, field);
+        b.ret(entry, sp, got);
+        let program = b.finish().expect("finish");
+        let inst = program.functions[fidx].blocks[0]
+            .insts
+            .iter()
+            .find(|i| i.op == crate::body::interp::Op::RecGet)
+            .expect("rec.get");
+        assert_eq!(inst.imm, crate::body::interp::ir::Imm::U32(field));
+        let mut m = Machine::new(&program, program.fuel, &EmptyHost);
+        let err = m
+            .run_root_function(fidx)
+            .expect_err("field past the record");
+        match err {
+            ExecFault::Codeless(msg) => assert_eq!(msg, "rec field"),
+            other => panic!("unexpected {other:?}"),
+        }
     }
 }

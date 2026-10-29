@@ -33,6 +33,27 @@ struct LowerPlan<'a> {
     visited_matches: std::collections::HashSet<SiteId>,
     /// SSA name → record type name, for field-index projection.
     rec_ty: std::collections::HashMap<String, String>,
+    /// SSA name → type, for record disambiguation and scrutinee payloads.
+    known_ty: std::collections::HashMap<String, Type>,
+}
+
+struct BoundSnap {
+    rec_ty: std::collections::HashMap<String, String>,
+    known_ty: std::collections::HashMap<String, Type>,
+}
+
+impl LowerPlan<'_> {
+    fn snap_bounds(&self) -> BoundSnap {
+        BoundSnap {
+            rec_ty: self.rec_ty.clone(),
+            known_ty: self.known_ty.clone(),
+        }
+    }
+
+    fn restore_bounds(&mut self, snap: BoundSnap) {
+        self.rec_ty = snap.rec_ty;
+        self.known_ty = snap.known_ty;
+    }
 }
 
 struct LoopParamLowering {
@@ -227,6 +248,7 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
         visited_joins: std::collections::HashSet::new(),
         visited_matches: std::collections::HashSet::new(),
         rec_ty: std::collections::HashMap::new(),
+        known_ty: std::collections::HashMap::new(),
     };
     for item in &sketch.module.items {
         if let Item::Fn(f) = item {
@@ -287,13 +309,10 @@ fn lower_fn_body(
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     plan.rec_ty.clear();
+    plan.known_ty.clear();
     for (i, p) in f.params.iter().enumerate() {
         env.insert(p.name.clone(), i as u32);
-        if let Type::Named(name, _) = &p.ty {
-            if record_decls(&plan.sketch.module, name).is_some() {
-                plan.rec_ty.insert(p.name.clone(), name.clone());
-            }
-        }
+        bind_type(plan, &p.name, p.ty.clone());
     }
     let mut cur = entry;
     let mut loops = Vec::new();
@@ -342,6 +361,7 @@ fn lower_test_or_property_body(
     body_label: &str,
 ) -> Result<(), LowerError> {
     plan.rec_ty.clear();
+    plan.known_ty.clear();
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     let mut env_bool = std::collections::HashSet::new();
@@ -496,6 +516,7 @@ fn lower_match(
     let phi_names = match_phi_names(&site);
     let any_reaches = site.arms.iter().any(|a| a.reaches);
     let mut arm_end_blocks: Vec<(usize, std::collections::HashMap<String, u32>)> = Vec::new();
+    let mut arm_recs: Vec<std::collections::HashMap<String, String>> = Vec::new();
     for (arm, supply) in arms.iter().zip(site.arms.iter()) {
         let arm_block = arm_entries[supply.tag_index as usize];
         let mut arm_env = env.clone();
@@ -506,7 +527,12 @@ fn lower_match(
                 arm_env.insert(binder.clone(), payload);
             }
         }
-        let saved_rec = plan.rec_ty.clone();
+        let saved = plan.snap_bounds();
+        if let Some(binder) = &arm.binder {
+            if binder != "_" {
+                note_match_binder(plan, scrutinee, &arm.tag, binder);
+            }
+        }
         for stmt in &arm.body {
             cur = lower_match_arm_stmt(
                 b,
@@ -519,8 +545,10 @@ fn lower_match(
                 env_bool.as_deref_mut(),
             )?;
         }
-        plan.rec_ty = saved_rec;
+        let arm_rec = plan.rec_ty.clone();
+        plan.restore_bounds(saved);
         if supply.reaches {
+            arm_recs.push(arm_rec);
             if !b.block_terminates(cur) {
                 b.jump(cur, span.clone(), join_block);
             }
@@ -549,6 +577,7 @@ fn lower_match(
         b.merge_regs(join_block, span.clone(), dst, &pairs);
         env.insert(name.clone(), dst);
     }
+    bind_agreed_records(plan, &phi_names, &arm_recs);
     b.jump(join_block, span.clone(), cont);
     Ok(cont)
 }
@@ -650,6 +679,9 @@ fn lower_loop(
     let mut preheader_env = env.clone();
     for p in params.iter() {
         let init = lower_operand(b, entry, &p.init, &preheader_env)?;
+        if let Some(ty) = infer_operand_type(&p.init, &plan.known_ty) {
+            bind_type(plan, &p.name, ty);
+        }
         let header_phi = b.alloc_vreg();
         let exit_phi = b.alloc_vreg();
         frame_params.push(LoopParamLowering {
@@ -746,7 +778,7 @@ fn lower_if(
         env_bool.as_ref().map(|s| (*s).clone());
     let (then_b, else_b, join_block) = b.if_branch_targets(block, span.clone(), cond_v);
     let mut then_bool = bool_seed.clone().unwrap_or_default();
-    let saved_rec = plan.rec_ty.clone();
+    let saved = plan.snap_bounds();
     let then_arm = lower_if_arm(
         b,
         then_b,
@@ -758,7 +790,8 @@ fn lower_if(
         env_bool.is_some().then_some(&mut then_bool),
         &join_names,
     );
-    plan.rec_ty = saved_rec;
+    let then_recs = plan.rec_ty.clone();
+    plan.restore_bounds(saved);
     let (then_end, then_vals) =
         then_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     let then_v = arm_join_value(&then_vals, join_name, b, then_end, span);
@@ -770,7 +803,7 @@ fn lower_if(
         phi_pairs.push((then_end, then_v));
     }
     let mut else_bool = bool_seed.clone().unwrap_or_default();
-    let saved_rec = plan.rec_ty.clone();
+    let saved = plan.snap_bounds();
     let else_arm = lower_if_arm(
         b,
         else_b,
@@ -782,7 +815,8 @@ fn lower_if(
         env_bool.is_some().then_some(&mut else_bool),
         &join_names,
     );
-    plan.rec_ty = saved_rec;
+    let else_recs = plan.rec_ty.clone();
+    plan.restore_bounds(saved);
     let (else_end, else_vals) =
         else_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     let else_v = arm_join_value(&else_vals, join_name, b, else_end, span);
@@ -809,6 +843,7 @@ fn lower_if(
     b.jump(join_block, span.clone(), cont);
     if let Some(name) = join_name {
         env.insert(name.to_string(), joined_v);
+        bind_agreed_record(plan, name, &then_recs, &else_recs);
         if let Some(eb) = env_bool.as_mut() {
             if if_join_is_bool(then_body, else_body, name) {
                 eb.insert(name.to_string());
@@ -858,7 +893,7 @@ fn lower_if_multi_join(
         env_bool.as_ref().map(|s| (*s).clone());
     let (then_b, else_b, join_block) = b.if_branch_targets(block, span.clone(), cond_v);
     let mut then_bool = bool_seed.clone().unwrap_or_default();
-    let saved_rec = plan.rec_ty.clone();
+    let saved = plan.snap_bounds();
     let then_arm = lower_if_arm(
         b,
         then_b,
@@ -870,11 +905,12 @@ fn lower_if_multi_join(
         env_bool.is_some().then_some(&mut then_bool),
         join_names,
     );
-    plan.rec_ty = saved_rec;
+    let then_recs = plan.rec_ty.clone();
+    plan.restore_bounds(saved);
     let (then_end, then_vals) =
         then_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     let mut else_bool = bool_seed.clone().unwrap_or_default();
-    let saved_rec = plan.rec_ty.clone();
+    let saved = plan.snap_bounds();
     let else_arm = lower_if_arm(
         b,
         else_b,
@@ -886,7 +922,8 @@ fn lower_if_multi_join(
         env_bool.is_some().then_some(&mut else_bool),
         join_names,
     );
-    plan.rec_ty = saved_rec;
+    let else_recs = plan.rec_ty.clone();
+    plan.restore_bounds(saved);
     let (else_end, else_vals) =
         else_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     if b.block_terminates(then_end) && b.block_terminates(else_end) {
@@ -914,6 +951,7 @@ fn lower_if_multi_join(
         let dst = b.alloc_vreg();
         b.merge_regs(join_block, span.clone(), dst, &pairs);
         env.insert(name.clone(), dst);
+        bind_agreed_record(plan, name, &then_recs, &else_recs);
     }
     if let Some(eb) = env_bool.as_mut() {
         for name in join_names {
@@ -1296,7 +1334,7 @@ fn lower_rhs(
             Ok(b.bytes_get(block, span.clone(), v, i))
         }
         Rhs::Record { span, fields } => {
-            let rname = match_record_name(&plan.sketch.module, fields)?;
+            let rname = match_record_name(&plan.sketch.module, fields, &plan.known_ty)?;
             let decls = record_decls(&plan.sketch.module, &rname)
                 .ok_or_else(|| LowerError::unsupported("record type"))?;
             let mut regs = Vec::with_capacity(decls.len());
@@ -1323,7 +1361,17 @@ fn lower_rhs(
 }
 
 fn note_record(plan: &mut LowerPlan<'_>, name: &str, rhs: &Rhs) {
-    match bound_record_type(&plan.sketch.module, rhs, &plan.rec_ty) {
+    match infer_rhs_type(&plan.sketch.module, rhs, &plan.known_ty) {
+        Some(ty) => bind_type(plan, name, ty),
+        None => {
+            plan.rec_ty.remove(name);
+            plan.known_ty.remove(name);
+        }
+    }
+}
+
+fn bind_type(plan: &mut LowerPlan<'_>, name: &str, ty: Type) {
+    match named_record(&plan.sketch.module, &ty) {
         Some(tn) => {
             plan.rec_ty.insert(name.to_string(), tn);
         }
@@ -1331,26 +1379,186 @@ fn note_record(plan: &mut LowerPlan<'_>, name: &str, rhs: &Rhs) {
             plan.rec_ty.remove(name);
         }
     }
+    plan.known_ty.insert(name.to_string(), ty);
 }
 
-fn bound_record_type(
-    module: &Module,
-    rhs: &Rhs,
-    rec_ty: &std::collections::HashMap<String, String>,
-) -> Option<String> {
-    match rhs {
-        Rhs::Record { fields, .. } => match_record_name(module, fields).ok(),
-        Rhs::Project { base, field, .. } => {
-            let tn = rec_ty.get(base)?;
-            let decls = record_decls(module, tn)?;
-            let fty = &decls.iter().find(|f| f.name == *field)?.ty;
-            match fty {
-                Type::Named(n, _) if record_decls(module, n).is_some() => Some(n.clone()),
-                _ => None,
-            }
+fn bind_agreed_record(
+    plan: &mut LowerPlan<'_>,
+    name: &str,
+    then_recs: &std::collections::HashMap<String, String>,
+    else_recs: &std::collections::HashMap<String, String>,
+) {
+    let (Some(a), Some(b)) = (then_recs.get(name), else_recs.get(name)) else {
+        return;
+    };
+    if a == b {
+        bind_type(plan, name, Type::Named(a.clone(), ty_span()));
+    }
+}
+
+fn bind_agreed_records(
+    plan: &mut LowerPlan<'_>,
+    names: &[String],
+    snaps: &[std::collections::HashMap<String, String>],
+) {
+    for name in names {
+        let Some(first) = snaps.first().and_then(|s| s.get(name)).cloned() else {
+            continue;
+        };
+        if snaps
+            .iter()
+            .all(|s| s.get(name).is_some_and(|t| t == &first))
+        {
+            bind_type(plan, name, Type::Named(first, ty_span()));
         }
+    }
+}
+
+fn note_match_binder(plan: &mut LowerPlan<'_>, scrutinee: &str, tag: &str, binder: &str) {
+    let Some(scrut) = plan.known_ty.get(scrutinee).cloned() else {
+        return;
+    };
+    let Some(payload) = payload_type(&plan.sketch.module, &scrut, tag) else {
+        return;
+    };
+    bind_type(plan, binder, payload);
+}
+
+fn payload_type(module: &Module, scrut: &Type, tag: &str) -> Option<Type> {
+    match scrut {
+        Type::Result(ok, err, _) => match tag {
+            "ok" => Some((**ok).clone()),
+            "err" => Some((**err).clone()),
+            _ => None,
+        },
+        Type::Named(name, _) => sum_variant_payload(module, name, tag),
         _ => None,
     }
+}
+
+fn sum_variant_payload(module: &Module, name: &str, tag: &str) -> Option<Type> {
+    for item in &module.items {
+        let Item::TypeDef(td) = item else {
+            continue;
+        };
+        if td.name != name {
+            continue;
+        }
+        let TypeDefKind::Sum(variants) = &td.kind else {
+            return None;
+        };
+        return variants
+            .iter()
+            .find(|v| v.tag == tag)
+            .and_then(|v| v.payload.clone());
+    }
+    None
+}
+
+fn named_record(module: &Module, ty: &Type) -> Option<String> {
+    match ty {
+        Type::Named(n, _) if record_decls(module, n).is_some() => Some(n.clone()),
+        _ => None,
+    }
+}
+
+fn ty_span() -> Span {
+    Span {
+        file: String::new(),
+        start: 0,
+        end: 0,
+    }
+}
+
+fn infer_rhs_type(
+    module: &Module,
+    rhs: &Rhs,
+    known: &std::collections::HashMap<String, Type>,
+) -> Option<Type> {
+    match rhs {
+        Rhs::Record { fields, .. } => {
+            let name = match_record_name(module, fields, known).ok()?;
+            Some(Type::Named(name, ty_span()))
+        }
+        Rhs::Project { base, field, .. } => {
+            let base_ty = known.get(base)?;
+            let Type::Named(tn, _) = base_ty else {
+                return None;
+            };
+            let decls = record_decls(module, tn)?;
+            Some(decls.iter().find(|f| f.name == *field)?.ty.clone())
+        }
+        Rhs::Operand(op) => infer_operand_type(op, known),
+        Rhs::Call { callee, .. } => callee_return_type(module, callee),
+        Rhs::Ok { ty, span, .. } => Some(Type::Result(
+            Box::new(ty.clone()),
+            Box::new(Type::Named("unit".into(), span.clone())),
+            span.clone(),
+        )),
+        Rhs::Err { ty, span, .. } => Some(Type::Result(
+            Box::new(Type::Named("unit".into(), span.clone())),
+            Box::new(ty.clone()),
+            span.clone(),
+        )),
+        Rhs::BinOp { ty, .. } => Some(ty.clone()),
+        Rhs::Not { span, .. } => Some(Type::Named("bool".into(), span.clone())),
+        Rhs::Hole { ty, .. } => Some(ty.clone()),
+        Rhs::ListEmpty { span, elem } => Some(Type::List(Box::new(elem.clone()), span.clone())),
+        Rhs::ListCons { tail, .. } => match infer_operand_type(tail, known) {
+            Some(Type::List(inner, span)) => Some(Type::List(inner, span)),
+            _ => None,
+        },
+        Rhs::ListLen { span, .. } | Rhs::BytesLen { span, .. } => {
+            Some(Type::Named("i64".into(), span.clone()))
+        }
+        Rhs::ListGet { span, list, .. } => {
+            let Type::List(elem, _) = infer_operand_type(list, known)? else {
+                return None;
+            };
+            Some(Type::Result(
+                elem,
+                Box::new(Type::Named("unit".into(), span.clone())),
+                span.clone(),
+            ))
+        }
+        Rhs::BytesNew { span, .. } => Some(Type::Named("bytes".into(), span.clone())),
+        Rhs::BytesGet { span, .. } => Some(Type::Result(
+            Box::new(Type::Named("i64".into(), span.clone())),
+            Box::new(Type::Named("unit".into(), span.clone())),
+            span.clone(),
+        )),
+        _ => None,
+    }
+}
+
+fn infer_operand_type(
+    op: &Operand,
+    known: &std::collections::HashMap<String, Type>,
+) -> Option<Type> {
+    match op {
+        Operand::Name(name, _) => known.get(name).cloned(),
+        Operand::Bool(_, span) => Some(Type::Named("bool".into(), span.clone())),
+        Operand::Int(n, span) if fits_i64(*n) => Some(Type::Named("i64".into(), span.clone())),
+        Operand::Bytes(_, span) => Some(Type::Named("bytes".into(), span.clone())),
+        Operand::Unit(span) => Some(Type::Named("unit".into(), span.clone())),
+        Operand::Float(_, span) => Some(Type::Named("f64".into(), span.clone())),
+        Operand::Int(_, _) => None,
+    }
+}
+
+fn callee_return_type(module: &Module, callee: &str) -> Option<Type> {
+    for item in &module.items {
+        match item {
+            Item::Fn(f) if f.name == callee => return Some(f.ret.clone()),
+            Item::Import(im) if im.path == callee => {
+                if let ImportSig::Fn { ret, .. } = &im.sig {
+                    return Some(ret.clone());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn record_decls<'a>(module: &'a Module, name: &str) -> Option<&'a [FieldDecl]> {
@@ -1366,7 +1574,11 @@ fn record_decls<'a>(module: &'a Module, name: &str) -> Option<&'a [FieldDecl]> {
     None
 }
 
-fn match_record_name(module: &Module, fields: &[(String, Operand)]) -> Result<String, LowerError> {
+fn match_record_name(
+    module: &Module,
+    fields: &[(String, Operand)],
+    known: &std::collections::HashMap<String, Type>,
+) -> Result<String, LowerError> {
     let mut names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
     names.sort_unstable();
     if names.windows(2).any(|w| w[0] == w[1]) {
@@ -1382,7 +1594,7 @@ fn match_record_name(module: &Module, fields: &[(String, Operand)]) -> Result<St
         };
         let mut dn: Vec<&str> = decls.iter().map(|f| f.name.as_str()).collect();
         dn.sort_unstable();
-        if dn == names {
+        if dn == names && record_fields_fit(decls, fields, known) {
             hits.push(td.name.clone());
         }
     }
@@ -1393,42 +1605,83 @@ fn match_record_name(module: &Module, fields: &[(String, Operand)]) -> Result<St
     }
 }
 
+fn record_fields_fit(
+    decls: &[FieldDecl],
+    fields: &[(String, Operand)],
+    known: &std::collections::HashMap<String, Type>,
+) -> bool {
+    decls.iter().all(|decl| {
+        fields
+            .iter()
+            .find(|(n, _)| n == &decl.name)
+            .is_some_and(|(_, op)| operand_fits(op, &decl.ty, known))
+    })
+}
+
+fn operand_fits(
+    op: &Operand,
+    expected: &Type,
+    known: &std::collections::HashMap<String, Type>,
+) -> bool {
+    match op {
+        Operand::Bool(_, _) => type_name_is(expected, "bool"),
+        Operand::Float(_, _) => type_name_is(expected, "f64"),
+        Operand::Bytes(_, _) => type_name_is(expected, "bytes"),
+        Operand::Unit(_) => type_name_is(expected, "unit"),
+        Operand::Int(n, _) => match expected {
+            Type::Named(name, _) if name == "i32" => fits_i32(*n),
+            Type::Named(name, _) if name == "i64" => fits_i64(*n),
+            _ => false,
+        },
+        Operand::Name(name, _) => match known.get(name) {
+            Some(got) => types_match(got, expected),
+            None => true,
+        },
+    }
+}
+
+fn types_match(found: &Type, expected: &Type) -> bool {
+    match (found, expected) {
+        (Type::Named(a, _), Type::Named(b, _)) => a == b,
+        (Type::List(a, _), Type::List(b, _)) => types_match(a, b),
+        (Type::Result(ok_a, err_a, _), Type::Result(ok_b, err_b, _)) => {
+            result_side(ok_a, ok_b) && result_side(err_a, err_b)
+        }
+        _ => false,
+    }
+}
+
+fn result_side(a: &Type, b: &Type) -> bool {
+    type_name_is(a, "unit") || type_name_is(b, "unit") || types_match(a, b)
+}
+
+fn type_name_is(ty: &Type, name: &str) -> bool {
+    matches!(ty, Type::Named(n, _) if n == name)
+}
+
+fn fits_i64(n: i128) -> bool {
+    n >= i64::MIN as i128 && n <= i64::MAX as i128
+}
+
+fn fits_i32(n: i128) -> bool {
+    n >= i32::MIN as i128 && n <= i32::MAX as i128
+}
+
 fn project_field_index(
     module: &Module,
     rec_ty: &std::collections::HashMap<String, String>,
     base: &str,
     field: &str,
 ) -> Result<u32, LowerError> {
-    if let Some(tn) = rec_ty.get(base) {
-        let decls =
-            record_decls(module, tn).ok_or_else(|| LowerError::unsupported("record type"))?;
-        let idx = decls
-            .iter()
-            .position(|f| f.name == field)
-            .ok_or_else(|| LowerError::unsupported("record field"))?;
-        return u32::try_from(idx).map_err(|_| LowerError::unsupported("record field"));
-    }
-    let mut idxs = Vec::new();
-    for item in &module.items {
-        let Item::TypeDef(td) = item else {
-            continue;
-        };
-        let TypeDefKind::Record(decls) = &td.kind else {
-            continue;
-        };
-        if let Some(i) = decls.iter().position(|f| f.name == field) {
-            if let Ok(i) = u32::try_from(i) {
-                idxs.push(i);
-            }
-        }
-    }
-    idxs.sort_unstable();
-    idxs.dedup();
-    if idxs.len() == 1 {
-        Ok(idxs[0])
-    } else {
-        Err(LowerError::unsupported("record field"))
-    }
+    let tn = rec_ty
+        .get(base)
+        .ok_or_else(|| LowerError::unsupported("record type"))?;
+    let decls = record_decls(module, tn).ok_or_else(|| LowerError::unsupported("record type"))?;
+    let idx = decls
+        .iter()
+        .position(|f| f.name == field)
+        .ok_or_else(|| LowerError::unsupported("record field"))?;
+    u32::try_from(idx).map_err(|_| LowerError::unsupported("record field"))
 }
 
 fn type_is_bool(ty: &Type) -> bool {

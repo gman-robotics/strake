@@ -58,6 +58,7 @@ pub enum Imm {
     None,
     I64(i64),
     I32(i32),
+    U32(u32),
     F64(u64),
     F32(u32),
     Bool(bool),
@@ -930,7 +931,7 @@ impl Builder {
                 op: Op::RecGet,
                 dst: Some(dst),
                 args: vec![rec],
-                imm: Imm::I32(field as i32),
+                imm: Imm::U32(field),
                 span,
             },
         );
