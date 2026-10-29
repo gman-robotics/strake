@@ -96,6 +96,16 @@ fn sweep(root: &Path, bless: bool) -> Vec<String> {
                     failures.push(format!("{name}: expectation lacks `args:` first line"));
                     continue;
                 };
+                let own = format!("golden/{name}.strake");
+                let toks: Vec<&str> = args_line.split_whitespace().collect();
+                let names_own = toks.last() == Some(&own.as_str())
+                    && toks.iter().filter(|t| t.ends_with(".strake")).count() == 1;
+                if !names_own {
+                    failures.push(format!(
+                        "{name}: `args:` must name its own golden {own}, got `{args_line}`"
+                    ));
+                    continue;
+                }
                 let got = render(root, args_line);
                 if got != want {
                     failures.push(format!(
@@ -128,8 +138,24 @@ fn every_golden_matches_its_expectation() {
     );
 }
 
+/// Scratch root removed on drop, so a failing assertion still cleans up.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
 /// Copies `golden/` into a scratch root so mutations never touch the repo.
-fn scratch_copy(tag: &str) -> PathBuf {
+fn scratch_copy(tag: &str) -> Scratch {
     let dst = std::env::temp_dir().join(format!("strake-sweep-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dst);
     fs::create_dir_all(dst.join("golden/expect")).unwrap();
@@ -142,7 +168,7 @@ fn scratch_copy(tag: &str) -> PathBuf {
             }
         }
     }
-    dst
+    Scratch(dst)
 }
 
 #[test]
@@ -150,12 +176,8 @@ fn deleting_an_expectation_fails() {
     let dst = scratch_copy("delete");
     fs::remove_file(dst.join("golden/expect/add2_basic.txt")).unwrap();
     let f = sweep(&dst, false);
-    assert!(
-        f.iter()
-            .any(|m| m.starts_with("add2_basic: no expectation")),
-        "{f:?}"
-    );
-    fs::remove_dir_all(&dst).unwrap();
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(f[0].starts_with("add2_basic: no expectation"), "{f:?}");
 }
 
 #[test]
@@ -169,7 +191,6 @@ fn golden_without_expectation_or_unit_entry_fails() {
     let f = sweep(&dst, false);
     assert_eq!(f.len(), 1, "{f:?}");
     assert!(f[0].starts_with("zz_new: no expectation"), "{f:?}");
-    fs::remove_dir_all(&dst).unwrap();
 }
 
 #[test]
@@ -181,7 +202,6 @@ fn wrong_expectation_fails() {
     let f = sweep(&dst, false);
     assert_eq!(f.len(), 1, "{f:?}");
     assert!(f[0].starts_with("div0: output differs"), "{f:?}");
-    fs::remove_dir_all(&dst).unwrap();
 }
 
 #[test]
@@ -204,5 +224,25 @@ fn unit_only_golden_with_expectation_fails() {
     );
     fs::remove_file(dst.join("golden/expect/trap_user.txt")).unwrap();
     assert!(sweep(&dst, false).is_empty());
-    fs::remove_dir_all(&dst).unwrap();
+}
+
+#[test]
+fn expectation_naming_another_golden_fails() {
+    let dst = scratch_copy("mismatch");
+    let p = dst.join("golden/expect/div0.txt");
+    let want = fs::read_to_string(&p).unwrap();
+    fs::write(
+        &p,
+        want.replace(
+            "args: test golden/div0.strake",
+            "args: test golden/add2_basic.strake",
+        ),
+    )
+    .unwrap();
+    let f = sweep(&dst, false);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert!(
+        f[0].starts_with("div0: `args:` must name its own golden"),
+        "{f:?}"
+    );
 }
