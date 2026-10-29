@@ -31,7 +31,7 @@ Phase 1 tickets T1–T6 merged (PRs #3, #5, #7, #8, #9, #11). Later work added a
 | Gap | Evidence |
 |---|---|
 | `run` is a stub. `strake run --fn add2 golden/add2_basic.strake` prints usage and exits 2. | `lib.rs:248` |
-| Opcode card has no heap ops and no `load`/`store`. Only sum ops exist (`SumNew`, `SumTag`, `SumPayload`). | `interp/op.rs` |
+| Opcode card has control, arithmetic, compare and const ops, but no list/bytes/record ops and no `load`/`store`. The only heap ops are the three sum ops (`SumNew`, `SumTag`, `SumPayload`). | `interp/op.rs:7-32` |
 | Unknown ops fall to a codeless fault `unimplemented op`. Existing card ops `Ne`, `Lt`, `Le`, `Gt`, `Ge`, `ConstI32`, `ConstF32`, `ConstUnit` already reach it. The normative `for` loop needs `ge` (LOWERING.md:128). | `interp/mod.rs:456`, `interp/op.rs:19-29` |
 | `lower` has no `for` or `forall` lowering. `Stmt::For` / `Stmt::Forall` appear only in `stmt_span`. | `lower.rs:387-388` |
 | `TrapImm::User` maps to `E_TYPE` at exec. Phase 1 §2.7 locks only the lower shape (opcode `trap`, immediate outside the seven named codes, unit check, no CLI exit), so `trap_user` needs no decision. | `interp/mod.rs:451` |
@@ -102,6 +102,9 @@ impl Builder {
 
 // check.rs
 fn check_forall_span(lo: i64, hi: i64) -> Result<(), Diag>;   // SPEC "Forall span": span = i128(HI) - i128(LO) + 1; E_FORALL if span <= 0 or span > i64::MAX. LO/HI are i64 literals or module-level integer bindings. Fuel traps at run time, not here.
+// syntax.rs: today ForallBound::Range holds only i128 literals (syntax.rs:193-198, parse_forall :1406-1416), and an identifier becomes ForallBound::List.
+// T4 changes it to: enum RangeEnd { Lit(i128), Name(String, Span) }; Range { span, ty, lo: RangeEnd, hi: RangeEnd }.
+// check resolves Name to a module-level i64 binding before check_forall_span; an unknown name or a module list name keeps today's meaning.
 fn check_region(module: &Module) -> Vec<Diag>;                           // E_REGION when load/store has no import
 fn check_use(module: &Module, blob_root: Option<&Path>) -> Vec<Diag>;    // E_USE; blake3 of fmt output
 
@@ -166,10 +169,10 @@ Every ticket: no installs, Rust 1.83.0, CI green, one high-effort review (cap 2)
 **Scope.** `Builder::for_`, normative index loop, `trap Lower` arm. **Files.** `ir.rs`, `lower.rs`, `interp/mod.rs` (exec arms for `ne lt le gt ge`, `const.i32`, `const.f32`, `const.unit`), `golden/for_list.strake`. **Done.** §3 row 5; builder unit runs the `trap Lower` arm; unit: each existing card op executes. **Size** M. **Depends** T2.
 
 ### T4. `forall`
-**Scope.** Range and module-list forms, `E_FORALL`, exit-3 bad form, and module-level `name = <i64 literal>` items (Phase 1 §2.16; new `Item` variant in `syntax.rs`, fmt fixed point). **Files.** `syntax.rs`, `check.rs`, `ir.rs`, `lower.rs`, `golden/forall_rev.strake`, `golden/forall_ok.strake`, `golden/forall_list_bad.strake`. **Done.** §3 row 6; `forall_list_bad` exits 3, no `E_FORALL`; unit: `name = <i64 literal>` parses and is a fmt fixed point; unit: a `forall` whose `LO`/`HI` name such a binding checks like the literal; unit: `LO=0, HI=i64::MAX` is `E_FORALL` and `LO=1, HI=i64::MAX` is accepted and not run. **Size** M. **Depends** T3.
+**Scope.** Range and module-list forms, `E_FORALL`, exit-3 bad form, and module-level `name = <i64 literal>` items (Phase 1 §2.16; new `Item` variant in `syntax.rs`, fmt fixed point), and `ForallBound::Range` ends that can name such a binding (`RangeEnd`, see sketch). **Files.** `syntax.rs`, `check.rs`, `ir.rs`, `lower.rs`, `golden/forall_rev.strake`, `golden/forall_ok.strake`, `golden/forall_list_bad.strake`. **Done.** §3 row 6; `forall_list_bad` exits 3, no `E_FORALL`; unit: `name = <i64 literal>` parses and is a fmt fixed point; unit: `parse_forall` gives `Range` with `RangeEnd::Name` when `LO`/`HI` is an identifier followed by `..`; unit: a `forall` whose `LO`/`HI` name such a binding checks like the literal; unit: `LO=0, HI=i64::MAX` is `E_FORALL` and `LO=1, HI=i64::MAX` is accepted and not run. **Size** M. **Depends** T3.
 
 ### T5. Region, `load`/`store`, imports
-**Scope.** `Region`, `instantiate`, `E_REGION`, `E_OOB`, `E_IMPORT` trap, page precedence (§2.2), zero fill (§2.17), `load` type check. **Files.** `interp/*`, `lib.rs` (map `ExecFault::Halt` to exit 3 before `status`, `lib.rs:232-234`), `check.rs`, `golden/region_oob.strake`, `region_miss`, `region_unaligned`, `import_miss`, `load_type`. **Done.** Phase 1 T8 rows for those five files. Unit through `lib::test`: a bool `load` of a byte other than 0 or 1 gives exit 3, plain text, no catalog code, `status` not called (§2.17). **Size** L. **Depends** T2.
+**Scope.** `Region`, `instantiate`, `E_REGION`, `E_OOB`, `E_IMPORT` trap, page precedence (§2.2), zero fill (§2.17), `load` type check. **Files.** `interp/*`, `lower.rs` (lower `Rhs::Load` / `Rhs::Store`, now the unsupported arm at `lower.rs:1244` and the property lowerer at `:1168`; apply `Item::Pages` and `ImportSig::Region`, which `lower.rs:196-208` skips today), `lib.rs` (map `ExecFault::Halt` to exit 3 before `status`, `lib.rs:232-234`), `check.rs`, `golden/region_oob.strake`, `region_miss`, `region_unaligned`, `import_miss`, `load_type`. **Done.** Phase 1 T8 rows for those five files. Unit through `lib::test`: a bool `load` of a byte other than 0 or 1 gives exit 3, plain text, no catalog code, `status` not called (§2.17). Unit: page count follows §2.2 (directive, else import count, else 16). **Size** L. **Depends** T2.
 
 ### T6. Draft holes and user `trap`
 **Scope.** `test --draft` runs to `E_HOLE` trap; user `trap` lowers to opcode `trap` per Phase 1 §2.7. **Files.** `lower.rs`, `interp/mod.rs`, `golden/hole_draft.strake`, `golden/trap_user.strake`. **Done.** §3 row 10 draft; unit lower check for `trap_user`; `trap_user` is on the T1 unit-only list, with no expectation file. **Size** S. **Depends** T1.
@@ -178,9 +181,9 @@ Every ticket: no installs, Rust 1.83.0, CI green, one high-effort review (cap 2)
 **Scope.** Read the existing `Opts.blob_root` in `check_use`; `blake3`. **Files.** `lib.rs`, `main.rs`, `check.rs`, `Cargo.toml`, `Cargo.lock`, `golden/use_ok.strake`, `golden/use_bad.strake`. **Done.** Phase 1 T8 `use` rows. **Size** M. **Depends** T1, Q3.
 
 ### T8. `run`
-**Scope.** Implement `lib::run`. **Files.** `lib.rs`, `golden/run_const.strake`, verify-strake feature doc. **Done.** `strake run --fn answer golden/run_const.strake` prints `14`, exits 0; non-nullary export is a usage error. Float rendering follows Q2 but does not block `run_const`. **Size** S. **Depends** T1.
+**Scope.** Implement `lib::run`. **Files.** `lib.rs`, `golden/run_const.strake`, verify-strake feature doc. **Done.** `strake run --fn answer golden/run_const.strake` prints `14`, exits 0; non-nullary export is a usage error; unit through `lib::run`: an `ExecFault::Halt` (bad bool byte, §2.17) gives exit 3, plain text, and `pub fn run` still does not reference `status` (`tests/status_guard.rs:174-179`). Float rendering follows Q2 but does not block `run_const`. **Size** S. **Depends** T1, T5.
 
 ### T9. MVP sweep and docs
 **Scope.** Confirm the T1 sweep covers the full Phase 1 §3 table; add verify-strake features; README/SPEC per Q4. **Files.** `tests/golden_sweep.rs`, `.cursor/skills/verify-strake/**`, `README.md`, `SPEC.md` "Next" only. **Done.** Every §3 command passes in CI; no `unimplemented op` reachable from any golden. **Size** M. **Depends** T2–T8.
 
-Order: T1 → T2 → (T3 → T4) ∥ T5; T6, T7, T8 after T1 in any order; T9 last. With one laptop lane, run them in number order.
+Order: run T1 to T9 in number order, one at a time. The dependency graph allows more parallel work, but T3, T4, T5 and T6 all edit `lower.rs` and `interp/mod.rs`, so number order is the schedule. T8 depends on T5 for the `Halt` path.
