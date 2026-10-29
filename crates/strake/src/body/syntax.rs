@@ -994,7 +994,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_import(&mut self, start: u32) -> Result<ImportDecl, Diag> {
-        let (path, _, _) = self.expect_ident()?;
+        let (path, pst, pen) = self.expect_ident()?;
+        Self::check_user_name(&path, (pst, pen), self.file)?;
         let sig = if path == "region" {
             let (mem, _, _) = self.expect_ident()?;
             if mem != "mem" {
@@ -1043,7 +1044,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_use(&mut self, start: u32) -> Result<UseDecl, Diag> {
-        let (name, _, _) = self.expect_ident()?;
+        let (name, nst, nen) = self.expect_ident()?;
+        Self::check_user_name(&name, (nst, nen), self.file)?;
         if !self.eat_tok(Tok::At)? {
             return Err(self.err_here());
         }
@@ -2663,6 +2665,35 @@ end
         let f = format(&m);
         assert!(f.contains("import region mem : region\n"));
         parse(&f, "t.strake").expect("reparse region import");
+    }
+
+    #[test]
+    fn import_fn_sig_parses() {
+        let src = "strake 1\n\nimport foo : (i64) -> i64\n";
+        let m = parse(src, "t.strake").expect("fn import");
+        let Item::Import(im) = &m.items[0] else {
+            panic!("import")
+        };
+        assert_eq!(im.path, "foo");
+        assert!(matches!(im.sig, ImportSig::Fn { .. }));
+    }
+
+    #[test]
+    fn e_parse_percent_import() {
+        let src = "strake 1\n\nimport %foo : (i64) -> i64\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_import_region() {
+        let src = "strake 1\n\nimport %region mem : region\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+    }
+
+    #[test]
+    fn e_parse_percent_use_name() {
+        let src = "strake 1\n\nuse %pkg@blake3:0123abcd\n";
+        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
     }
 
     #[test]
