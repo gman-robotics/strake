@@ -1,0 +1,4 @@
+args: test golden/add2_basic.strake
+exit: 0
+--- stdout
+--- stderr

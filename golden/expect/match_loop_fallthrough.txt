@@ -1,0 +1,4 @@
+args: test golden/match_loop_fallthrough.strake
+exit: 0
+--- stdout
+--- stderr

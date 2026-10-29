@@ -1,0 +1,5 @@
+args: test golden/add2_worked.strake
+exit: 70
+--- stdout
+--- stderr
+lower: statement not supported in property body

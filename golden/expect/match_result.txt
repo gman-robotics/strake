@@ -1,0 +1,4 @@
+args: test golden/match_result.strake
+exit: 0
+--- stdout
+--- stderr

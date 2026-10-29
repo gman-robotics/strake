@@ -1,0 +1,5 @@
+args: test golden/loop_continue_bool_i64.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/loop_continue_bool_i64.strake","start":47,"end":69}}

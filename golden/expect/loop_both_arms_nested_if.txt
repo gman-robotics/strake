@@ -1,0 +1,4 @@
+args: test golden/loop_both_arms_nested_if.strake
+exit: 0
+--- stdout
+--- stderr

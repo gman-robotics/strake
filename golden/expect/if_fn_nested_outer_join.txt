@@ -1,0 +1,4 @@
+args: test golden/if_fn_nested_outer_join.strake
+exit: 0
+--- stdout
+--- stderr

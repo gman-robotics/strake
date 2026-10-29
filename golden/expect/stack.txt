@@ -1,0 +1,5 @@
+args: test golden/stack.strake
+exit: 2
+--- stdout
+--- stderr
+{"code":"E_STACK","kind":"trap","msg":"call would exceed 1024 frames","span":{"file":"golden/stack.strake","start":29,"end":50}}

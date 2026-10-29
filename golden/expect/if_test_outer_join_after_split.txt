@@ -1,0 +1,4 @@
+args: test golden/if_test_outer_join_after_split.strake
+exit: 0
+--- stdout
+--- stderr

@@ -1,0 +1,5 @@
+args: test golden/loop_zero_param_break_e_type.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/loop_zero_param_break_e_type.strake","start":39,"end":65}}

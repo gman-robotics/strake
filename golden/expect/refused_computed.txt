@@ -1,0 +1,5 @@
+args: test golden/refused_computed.strake
+exit: 77
+--- stdout
+--- stderr
+{"code":"E_REFUSED","kind":"result","msg":"test or property executed ret 77","span":{"file":"golden/refused_computed.strake","start":53,"end":58}}

@@ -1,0 +1,4 @@
+args: test golden/loop_swap_ba.strake
+exit: 0
+--- stdout
+--- stderr

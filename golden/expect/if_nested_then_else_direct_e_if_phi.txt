@@ -1,0 +1,5 @@
+args: test golden/if_nested_then_else_direct_e_if_phi.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_IF_PHI","kind":"check","msg":"a name used after if is missing from one arm","span":{"file":"golden/if_nested_then_else_direct_e_if_phi.strake","start":152,"end":153}}

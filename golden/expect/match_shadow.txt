@@ -1,0 +1,7 @@
+args: test golden/match_shadow.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_SEQ","kind":"check","msg":"statement follows ret, break, or continue in the same block","span":{"file":"golden/match_shadow.strake","start":92,"end":97}}
+{"code":"E_SHADOW","kind":"check","msg":"a source name has a second binding site in the same function","span":{"file":"golden/match_shadow.strake","start":64,"end":66}}
+{"code":"E_MATCH","kind":"check","msg":"match is not exhaustive","span":{"file":"golden/match_shadow.strake","start":52,"end":95}}

@@ -1,0 +1,5 @@
+args: test golden/match_join_assign.strake
+exit: 3
+--- stdout
+--- stderr
+match arm missing the join value

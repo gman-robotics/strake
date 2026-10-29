@@ -1,0 +1,6 @@
+args: test golden/match_nonsum.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_SEQ","kind":"check","msg":"statement follows ret, break, or continue in the same block","span":{"file":"golden/match_nonsum.strake","start":72,"end":77}}
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/match_nonsum.strake","start":32,"end":75}}

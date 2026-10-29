@@ -1,0 +1,6 @@
+args: test golden/loop_break_outside.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_SEQ","kind":"check","msg":"statement follows ret, break, or continue in the same block","span":{"file":"golden/loop_break_outside.strake","start":27,"end":32}}
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/loop_break_outside.strake","start":19,"end":30}}

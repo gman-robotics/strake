@@ -1,0 +1,6 @@
+args: test golden/div0.strake
+exit: 2
+--- stdout
+--- stderr
+{"code":"E_DIV0","kind":"trap","msg":"integer divisor 0, or signed MIN / -1 on i32 or i64","span":{"file":"golden/div0.strake","start":31,"end":42}}
+{"code":"E_DIV0","kind":"trap","msg":"integer divisor 0, or signed MIN / -1 on i32 or i64","span":{"file":"golden/div0.strake","start":76,"end":107}}

@@ -1,0 +1,5 @@
+args: test golden/fuel.strake
+exit: 2
+--- stdout
+--- stderr
+{"code":"E_FUEL","kind":"trap","msg":"remaining fuel less than the next instruction's cost","span":{"file":"golden/fuel.strake","start":14,"end":15}}

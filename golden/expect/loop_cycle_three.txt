@@ -1,0 +1,4 @@
+args: test golden/loop_cycle_three.strake
+exit: 0
+--- stdout
+--- stderr

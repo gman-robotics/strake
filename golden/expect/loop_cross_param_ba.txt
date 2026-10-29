@@ -1,0 +1,4 @@
+args: test golden/loop_cross_param_ba.strake
+exit: 0
+--- stdout
+--- stderr

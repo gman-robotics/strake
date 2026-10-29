@@ -1,0 +1,5 @@
+args: test golden/bool_phi_assert_mismatch.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TEST","kind":"result","msg":"assert.eq mismatch","span":{"file":"golden/bool_phi_assert_mismatch.strake","start":142,"end":143},"want":"false","got":"true"}
