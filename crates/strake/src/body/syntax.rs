@@ -2681,19 +2681,32 @@ end
     #[test]
     fn e_parse_percent_import() {
         let src = "strake 1\n\nimport %foo : (i64) -> i64\n";
-        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+        let err = parse(src, "t.strake").unwrap_err();
+        assert_eq!(err.code, Code::EParse);
+        // Error must point at the `%foo` path token, not a later token.
+        assert_eq!(&src[err.span.start as usize..err.span.end as usize], "%foo");
     }
 
     #[test]
     fn e_parse_percent_import_region() {
         let src = "strake 1\n\nimport %region mem : region\n";
-        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+        let err = parse(src, "t.strake").unwrap_err();
+        assert_eq!(err.code, Code::EParse);
+        // Without the `%` check, `%region` falls to the fn-sig branch and the
+        // error lands on `mem`; pinning the span makes this test fail then.
+        assert_eq!(
+            &src[err.span.start as usize..err.span.end as usize],
+            "%region"
+        );
     }
 
     #[test]
     fn e_parse_percent_use_name() {
         let src = "strake 1\n\nuse %pkg@blake3:0123abcd\n";
-        assert_eq!(parse(src, "t.strake").unwrap_err().code, Code::EParse);
+        let err = parse(src, "t.strake").unwrap_err();
+        assert_eq!(err.code, Code::EParse);
+        // Error must point at the `%pkg` name token.
+        assert_eq!(&src[err.span.start as usize..err.span.end as usize], "%pkg");
     }
 
     #[test]
