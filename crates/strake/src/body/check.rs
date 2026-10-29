@@ -441,7 +441,7 @@ fn check_stmt(
             ctx.bind(name, ty, span.clone(), diags);
         }
         Stmt::Ret { value, span } => {
-            let got = operand_ty(value, ctx, state, fns, None, diags);
+            let got = operand_ty(value, ctx, state, fns, fn_ret, diags);
             if let Some(expected) = fn_ret {
                 if !types_compatible(&got, expected) {
                     diags.push(type_diag(span.clone()));
@@ -584,7 +584,13 @@ fn check_stmt(
                 diags.push(parse_diag(span.clone()));
                 return;
             }
-            let g = operand_ty(got, ctx, state, fns, None, diags);
+            // A named want gives the literal got its width (`assert.eq 1 x`).
+            // A literal want still adopts got below (`assert.eq x 1`).
+            let want_ty = match want {
+                Operand::Name(name, _) => ctx.types.get(name).cloned(),
+                _ => None,
+            };
+            let g = operand_ty(got, ctx, state, fns, want_ty.as_ref(), diags);
             let w = operand_ty(want, ctx, state, fns, Some(&g), diags);
             if !types_compatible(&g, &w) {
                 diags.push(type_diag(span.clone()));
@@ -629,8 +635,9 @@ fn check_continue_edges(
             diags.push(type_diag(span.clone()));
             return false;
         }
-        let val_ty = operand_ty(&e.value, ctx, state, fns, None, diags);
-        if let Some(param_ty) = ctx.types.get(&e.name) {
+        let param_ty = ctx.types.get(&e.name).cloned();
+        let val_ty = operand_ty(&e.value, ctx, state, fns, param_ty.as_ref(), diags);
+        if let Some(param_ty) = &param_ty {
             if !types_compatible(&val_ty, param_ty) {
                 diags.push(type_diag(span.clone()));
                 return false;
@@ -1107,7 +1114,7 @@ fn check_stmt_in_arm(
             span, params, body, ctx, state, fns, in_fn, fn_ret, diags,
         ),
         Stmt::Ret { value, span } => {
-            let got = operand_ty(value, ctx, state, fns, None, diags);
+            let got = operand_ty(value, ctx, state, fns, fn_ret, diags);
             if let Some(expected) = fn_ret {
                 if !types_compatible(&got, expected) {
                     diags.push(type_diag(span.clone()));
@@ -1340,18 +1347,8 @@ fn int_literal_ty(n: i128, span: Span, expected: Option<&Type>, diags: &mut Vec<
 }
 
 fn types_compatible(found: &Type, expected: &Type) -> bool {
-    if types_equal(found, expected) {
-        return true;
-    }
-    if let (Type::Named(f, _), Type::Named(e, _)) = (found, expected) {
-        if f == e {
-            return true;
-        }
-        if (f == "i32" || f == "i64") && (e == "i32" || e == "i64") {
-            return true;
-        }
-    }
-    false
+    // i32 and i64 are distinct types: no implicit coercion (GMA-372).
+    types_equal(found, expected)
 }
 
 fn result_side_compatible(a: &Type, b: &Type) -> bool {
@@ -1668,6 +1665,77 @@ mod tests {
     #[test]
     fn call_i32_param_accepts_small_literal() {
         let src = "strake 1\n\nfn id32(a: i32) -> i32\n  ret a\nend\n\ntest t\n  r = call id32(3)\n  ret 0\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        assert!(check(&m, false).is_ok());
+    }
+
+    fn check_errs(src: &str) -> bool {
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        matches!(
+            check(&m, false),
+            Err(CheckFailure::Diags(d)) if d.iter().any(|diag| diag.code == Code::EType)
+        )
+    }
+
+    #[test]
+    fn ret_i32_accepts_small_literal() {
+        let src = "strake 1\n\nfn f() -> i32\n  ret 1\nend\n\ntest t\n  ret 0\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        assert!(check(&m, false).is_ok());
+    }
+
+    #[test]
+    fn ret_i32_rejects_literal_outside_i32() {
+        let src = "strake 1\n\nfn f() -> i32\n  ret 3000000000\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(src));
+    }
+
+    #[test]
+    fn continue_i32_param_accepts_small_literal() {
+        let src = "strake 1\n\ntest t\n  x = add i32 1 2\n  loop p = x\n    continue p = 1\n  end\n  ret 0\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        assert!(check(&m, false).is_ok());
+    }
+
+    #[test]
+    fn assert_eq_i32_literal_either_side() {
+        let src = "strake 1\n\ntest t\n  x = add i32 1 2\n  assert.eq 1 x\n  assert.eq x 1\n  ret 0\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        assert!(check(&m, false).is_ok());
+    }
+
+    #[test]
+    fn types_compatible_rejects_i32_i64_both_directions() {
+        let s = empty_span;
+        assert!(!types_compatible(&scalar("i32", s()), &scalar("i64", s())));
+        assert!(!types_compatible(&scalar("i64", s()), &scalar("i32", s())));
+        assert!(types_compatible(&scalar("i32", s()), &scalar("i32", s())));
+        assert!(types_compatible(&scalar("i64", s()), &scalar("i64", s())));
+    }
+
+    #[test]
+    fn call_i32_param_rejects_i64_value() {
+        let src = "strake 1\n\nfn id32(a: i32) -> i32\n  ret a\nend\n\ntest t\n  x = add i64 1 2\n  r = call id32(x)\n  ret 0\nend\n";
+        assert!(check_errs(src));
+    }
+
+    #[test]
+    fn call_i64_param_rejects_i32_value() {
+        let src = "strake 1\n\nfn id64(a: i64) -> i64\n  ret a\nend\n\ntest t\n  x = add i32 1 2\n  r = call id64(x)\n  ret 0\nend\n";
+        assert!(check_errs(src));
+    }
+
+    #[test]
+    fn ret_rejects_i32_i64_mismatch_both_directions() {
+        let a = "strake 1\n\nfn f(a: i32) -> i64\n  ret a\nend\n\ntest t\n  ret 0\nend\n";
+        let b = "strake 1\n\nfn f(a: i64) -> i32\n  ret a\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(a));
+        assert!(check_errs(b));
+    }
+
+    #[test]
+    fn same_width_values_still_check() {
+        let src = "strake 1\n\nfn id32(a: i32) -> i32\n  ret a\nend\n\ntest t\n  x = add i32 1 2\n  r = call id32(x)\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
         assert!(check(&m, false).is_ok());
     }
