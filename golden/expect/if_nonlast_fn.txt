@@ -1,0 +1,4 @@
+args: test golden/if_nonlast_fn.strake
+exit: 0
+--- stdout
+--- stderr

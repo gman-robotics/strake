@@ -1,0 +1,4 @@
+args: test golden/match_two_names.strake
+exit: 0
+--- stdout
+--- stderr

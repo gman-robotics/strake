@@ -1,0 +1,6 @@
+args: test golden/match_miss.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_SEQ","kind":"check","msg":"statement follows ret, break, or continue in the same block","span":{"file":"golden/match_miss.strake","start":84,"end":89}}
+{"code":"E_MATCH","kind":"check","msg":"match is not exhaustive","span":{"file":"golden/match_miss.strake","start":44,"end":87}}

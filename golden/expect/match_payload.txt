@@ -1,0 +1,7 @@
+args: test golden/match_payload.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_SEQ","kind":"check","msg":"statement follows ret, break, or continue in the same block","span":{"file":"golden/match_payload.strake","start":84,"end":89}}
+{"code":"E_MATCH","kind":"check","msg":"match is not exhaustive","span":{"file":"golden/match_payload.strake","start":44,"end":87}}
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/match_payload.strake","start":108,"end":123}}

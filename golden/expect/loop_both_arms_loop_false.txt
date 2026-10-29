@@ -1,0 +1,4 @@
+args: test golden/loop_both_arms_loop_false.strake
+exit: 0
+--- stdout
+--- stderr

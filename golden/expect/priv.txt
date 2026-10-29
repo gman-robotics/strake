@@ -1,0 +1,4 @@
+args: test golden/priv.strake
+exit: 0
+--- stdout
+--- stderr

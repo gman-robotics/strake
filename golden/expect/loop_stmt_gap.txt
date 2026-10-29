@@ -1,0 +1,4 @@
+args: test golden/loop_stmt_gap.strake
+exit: 0
+--- stdout
+--- stderr

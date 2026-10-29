@@ -1,0 +1,5 @@
+args: test golden/shadow.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_SHADOW","kind":"check","msg":"a source name has a second binding site in the same function","span":{"file":"golden/shadow.strake","start":44,"end":65}}

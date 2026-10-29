@@ -1,0 +1,4 @@
+args: test golden/loop_join_arm_init_n.strake
+exit: 0
+--- stdout
+--- stderr

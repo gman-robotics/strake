@@ -1,0 +1,5 @@
+args: test golden/test_fail.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TEST","kind":"result","msg":"assert.eq mismatch","span":{"file":"golden/test_fail.strake","start":54,"end":55},"want":"14","got":"16"}

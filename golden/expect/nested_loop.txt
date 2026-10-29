@@ -1,0 +1,4 @@
+args: test golden/nested_loop.strake
+exit: 0
+--- stdout
+--- stderr

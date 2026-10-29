@@ -1,0 +1,4 @@
+args: test golden/loop_fn_and_test_loops.strake
+exit: 0
+--- stdout
+--- stderr

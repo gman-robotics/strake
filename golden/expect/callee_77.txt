@@ -1,0 +1,4 @@
+args: test golden/callee_77.strake
+exit: 0
+--- stdout
+--- stderr

@@ -1,0 +1,5 @@
+args: test golden/loop_seq_continue_in_if.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_SEQ","kind":"check","msg":"statement follows ret, break, or continue in the same block","span":{"file":"golden/loop_seq_continue_in_if.strake","start":91,"end":114}}

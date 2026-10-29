@@ -1,0 +1,4 @@
+args: test golden/loop_dual_loop_join.strake
+exit: 0
+--- stdout
+--- stderr

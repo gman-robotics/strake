@@ -1,0 +1,5 @@
+args: test golden/hole_ship.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_HOLE","kind":"check","msg":"ship module rejects a hole before lower; --draft execution traps on hole","span":{"file":"golden/hole_ship.strake","start":30,"end":44}}

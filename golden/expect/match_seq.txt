@@ -1,0 +1,5 @@
+args: test golden/match_seq.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_SEQ","kind":"check","msg":"statement follows ret, break, or continue in the same block","span":{"file":"golden/match_seq.strake","start":109,"end":130}}

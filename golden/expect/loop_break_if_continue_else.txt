@@ -1,0 +1,4 @@
+args: test golden/loop_break_if_continue_else.strake
+exit: 0
+--- stdout
+--- stderr

@@ -1,0 +1,5 @@
+args: test golden/fuel_twice.strake
+exit: 3
+--- stdout
+--- stderr
+module may contain at most one fuel directive

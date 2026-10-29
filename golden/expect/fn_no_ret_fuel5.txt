@@ -1,0 +1,4 @@
+args: test golden/fn_no_ret_fuel5.strake
+exit: 2
+--- stdout
+--- stderr

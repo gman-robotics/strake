@@ -1,0 +1,4 @@
+args: test golden/if_arm_call.strake
+exit: 0
+--- stdout
+--- stderr

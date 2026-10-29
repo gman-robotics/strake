@@ -1,0 +1,4 @@
+args: test golden/loop_continue_carry.strake
+exit: 0
+--- stdout
+--- stderr

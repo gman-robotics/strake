@@ -1,0 +1,4 @@
+args: test golden/loop_mirror_false.strake
+exit: 0
+--- stdout
+--- stderr

@@ -1,0 +1,5 @@
+args: test golden/nested_loop_no_break_use_e_type.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/nested_loop_no_break_use_e_type.strake","start":112,"end":117}}

@@ -1,0 +1,5 @@
+args: test golden/if_arm_assert_fail.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TEST","kind":"result","msg":"assert.eq mismatch","span":{"file":"golden/if_arm_assert_fail.strake","start":88,"end":107},"want":"1","got":"0"}

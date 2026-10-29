@@ -1,0 +1,5 @@
+args: test golden/not_bool_fail.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TEST","kind":"result","msg":"assert.eq mismatch","span":{"file":"golden/not_bool_fail.strake","start":62,"end":63},"want":"false","got":"true"}

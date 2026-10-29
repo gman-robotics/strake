@@ -1,0 +1,4 @@
+args: test golden/match_trap_arm.strake
+exit: 0
+--- stdout
+--- stderr

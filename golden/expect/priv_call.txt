@@ -1,0 +1,5 @@
+args: test golden/priv_call.strake
+exit: 3
+--- stdout
+--- stderr
+tests must call exported functions only
