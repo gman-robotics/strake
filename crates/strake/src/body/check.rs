@@ -1344,10 +1344,8 @@ fn types_compatible(found: &Type, expected: &Type) -> bool {
         return true;
     }
     if let (Type::Named(f, _), Type::Named(e, _)) = (found, expected) {
+        // i32 and i64 are distinct types: no implicit coercion (GMA-372).
         if f == e {
-            return true;
-        }
-        if (f == "i32" || f == "i64") && (e == "i32" || e == "i64") {
             return true;
         }
     }
@@ -1668,6 +1666,47 @@ mod tests {
     #[test]
     fn call_i32_param_accepts_small_literal() {
         let src = "strake 1\n\nfn id32(a: i32) -> i32\n  ret a\nend\n\ntest t\n  r = call id32(3)\n  ret 0\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        assert!(check(&m, false).is_ok());
+    }
+
+    fn check_errs(src: &str) -> bool {
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        matches!(check(&m, false), Err(CheckFailure::Diags(d)) if !d.is_empty())
+    }
+
+    #[test]
+    fn types_compatible_rejects_i32_i64_both_directions() {
+        let s = empty_span;
+        assert!(!types_compatible(&scalar("i32", s()), &scalar("i64", s())));
+        assert!(!types_compatible(&scalar("i64", s()), &scalar("i32", s())));
+        assert!(types_compatible(&scalar("i32", s()), &scalar("i32", s())));
+        assert!(types_compatible(&scalar("i64", s()), &scalar("i64", s())));
+    }
+
+    #[test]
+    fn call_i32_param_rejects_i64_value() {
+        let src = "strake 1\n\nfn id32(a: i32) -> i32\n  ret a\nend\n\ntest t\n  x = add i64 1 2\n  r = call id32(x)\n  ret 0\nend\n";
+        assert!(check_errs(src));
+    }
+
+    #[test]
+    fn call_i64_param_rejects_i32_value() {
+        let src = "strake 1\n\nfn id64(a: i64) -> i64\n  ret a\nend\n\ntest t\n  x = add i32 1 2\n  r = call id64(x)\n  ret 0\nend\n";
+        assert!(check_errs(src));
+    }
+
+    #[test]
+    fn ret_rejects_i32_i64_mismatch_both_directions() {
+        let a = "strake 1\n\nfn f(a: i32) -> i64\n  ret a\nend\n\ntest t\n  ret 0\nend\n";
+        let b = "strake 1\n\nfn f(a: i64) -> i32\n  ret a\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(a));
+        assert!(check_errs(b));
+    }
+
+    #[test]
+    fn same_width_values_still_check() {
+        let src = "strake 1\n\nfn id32(a: i32) -> i32\n  ret a\nend\n\ntest t\n  x = add i32 1 2\n  r = call id32(x)\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
         assert!(check(&m, false).is_ok());
     }
