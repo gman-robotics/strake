@@ -364,21 +364,10 @@ fn lower_test_or_property_body(
     plan.known_ty.clear();
     let entry = 0;
     let mut env = std::collections::HashMap::new();
-    let mut env_bool = std::collections::HashSet::new();
     let mut cur = entry;
     let mut loops = Vec::new();
     for stmt in body {
-        cur = lower_stmt_test(
-            b,
-            cur,
-            stmt,
-            &mut env,
-            &mut env_bool,
-            &mut loops,
-            plan,
-            maps,
-            body_label,
-        )?;
+        cur = lower_stmt_test(b, cur, stmt, &mut env, &mut loops, plan, maps, body_label)?;
     }
     if !b.block_ends_with_ret(cur) {
         let span = body.last().map(stmt_span).unwrap_or(default_span);
@@ -451,10 +440,10 @@ fn lower_stmt(
             then_body,
             else_body,
         } => lower_if(
-            b, block, span, cond, then_body, else_body, env, loops, plan, maps, None,
+            b, block, span, cond, then_body, else_body, env, loops, plan, maps, false,
         ),
         Stmt::Loop { span, params, body } => {
-            lower_loop(b, block, span, params, body, env, loops, plan, maps, None)
+            lower_loop(b, block, span, params, body, env, loops, plan, maps, false)
         }
         Stmt::Break { span } => {
             let frame = loops
@@ -475,7 +464,7 @@ fn lower_stmt(
             scrutinee,
             arms,
         } => lower_match(
-            b, block, span, scrutinee, arms, env, loops, plan, maps, None,
+            b, block, span, scrutinee, arms, env, loops, plan, maps, false,
         ),
         Stmt::Trap { span } => {
             b.trap_user(block, span.clone());
@@ -497,7 +486,7 @@ fn lower_match(
     loops: &mut Vec<LoopFrame>,
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
-    mut env_bool: Option<&mut std::collections::HashSet<String>>,
+    in_test: bool,
 ) -> Result<usize, LowerError> {
     let site = match_site_by_span(&plan.sketch.carry, span)
         .ok_or_else(|| LowerError::unsupported("carry plan missing match site"))?
@@ -534,16 +523,7 @@ fn lower_match(
             }
         }
         for stmt in &arm.body {
-            cur = lower_match_arm_stmt(
-                b,
-                cur,
-                stmt,
-                &mut arm_env,
-                loops,
-                plan,
-                maps,
-                env_bool.as_deref_mut(),
-            )?;
+            cur = lower_match_arm_stmt(b, cur, stmt, &mut arm_env, loops, plan, maps, in_test)?;
         }
         let arm_ty = plan.known_ty.clone();
         plan.restore_bounds(saved);
@@ -592,7 +572,7 @@ fn lower_match_arm_stmt(
     loops: &mut Vec<LoopFrame>,
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
-    env_bool: Option<&mut std::collections::HashSet<String>>,
+    in_test: bool,
 ) -> Result<usize, LowerError> {
     match stmt {
         Stmt::Assign { name, rhs, .. } => {
@@ -607,17 +587,17 @@ fn lower_match_arm_stmt(
             then_body,
             else_body,
         } => lower_if(
-            b, block, span, cond, then_body, else_body, env, loops, plan, maps, env_bool,
+            b, block, span, cond, then_body, else_body, env, loops, plan, maps, in_test,
         ),
         Stmt::Loop { span, params, body } => lower_loop(
-            b, block, span, params, body, env, loops, plan, maps, env_bool,
+            b, block, span, params, body, env, loops, plan, maps, in_test,
         ),
         Stmt::Match {
             span,
             scrutinee,
             arms,
         } => lower_match(
-            b, block, span, scrutinee, arms, env, loops, plan, maps, env_bool,
+            b, block, span, scrutinee, arms, env, loops, plan, maps, in_test,
         ),
         Stmt::Ret { span, value } => {
             let v = lower_operand(b, block, value, env)?;
@@ -656,7 +636,7 @@ fn lower_loop(
     loops: &mut Vec<LoopFrame>,
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
-    mut env_bool: Option<&mut std::collections::HashSet<String>>,
+    in_test: bool,
 ) -> Result<usize, LowerError> {
     let site = loop_site_by_span(&plan.sketch.carry, span)
         .ok_or_else(|| LowerError::unsupported("carry plan missing loop site"))?
@@ -705,9 +685,10 @@ fn lower_loop(
     });
     let mut cur = body_block;
     for stmt in body {
-        cur = match &mut env_bool {
-            Some(eb) => lower_stmt_test(b, cur, stmt, env, eb, loops, plan, maps, "loop body")?,
-            None => lower_stmt(b, cur, stmt, env, loops, plan, maps)?,
+        cur = if in_test {
+            lower_stmt_test(b, cur, stmt, env, loops, plan, maps, "loop body")?
+        } else {
+            lower_stmt(b, cur, stmt, env, loops, plan, maps)?
         };
     }
     if !b.block_terminates(cur) {
@@ -750,7 +731,7 @@ fn lower_if(
     loops: &mut Vec<LoopFrame>,
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
-    mut env_bool: Option<&mut std::collections::HashSet<String>>,
+    in_test: bool,
 ) -> Result<usize, LowerError> {
     let join_site = join_site_by_span(&plan.sketch.carry, span)
         .ok_or_else(|| LowerError::unsupported("carry plan missing join site"))?;
@@ -770,16 +751,13 @@ fn lower_if(
             loops,
             plan,
             maps,
-            env_bool,
+            in_test,
             &join_names,
         );
     }
     let join_name = join_names.first().map(String::as_str);
     let cond_v = lower_operand(b, block, cond, env)?;
-    let bool_seed: Option<std::collections::HashSet<String>> =
-        env_bool.as_ref().map(|s| (*s).clone());
     let (then_b, else_b, join_block) = b.if_branch_targets(block, span.clone(), cond_v);
-    let mut then_bool = bool_seed.clone().unwrap_or_default();
     let saved = plan.snap_bounds();
     let then_arm = lower_if_arm(
         b,
@@ -789,7 +767,7 @@ fn lower_if(
         loops,
         plan,
         maps,
-        env_bool.is_some().then_some(&mut then_bool),
+        in_test,
         &join_names,
     );
     let then_known = plan.known_ty.clone();
@@ -805,7 +783,6 @@ fn lower_if(
     } else if b.block_branch_target(then_end) == Some(join_block) {
         phi_pairs.push((then_end, then_v));
     }
-    let mut else_bool = bool_seed.clone().unwrap_or_default();
     let saved = plan.snap_bounds();
     let else_arm = lower_if_arm(
         b,
@@ -815,7 +792,7 @@ fn lower_if(
         loops,
         plan,
         maps,
-        env_bool.is_some().then_some(&mut else_bool),
+        in_test,
         &join_names,
     );
     let else_known = plan.known_ty.clone();
@@ -854,12 +831,7 @@ fn lower_if(
         if else_reaches {
             reaching.push(else_known);
         }
-        bind_agreed_type(plan, name, &reaching);
-        if let Some(eb) = env_bool.as_mut() {
-            if if_join_is_bool(then_body, else_body, name) {
-                eb.insert(name.to_string());
-            }
-        }
+        note_joined_type(plan, name, &reaching);
     }
     Ok(cont)
 }
@@ -900,43 +872,23 @@ fn lower_if_multi_join(
     loops: &mut Vec<LoopFrame>,
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
-    mut env_bool: Option<&mut std::collections::HashSet<String>>,
+    in_test: bool,
     join_names: &[String],
 ) -> Result<usize, LowerError> {
     let cond_v = lower_operand(b, block, cond, env)?;
-    let bool_seed: Option<std::collections::HashSet<String>> =
-        env_bool.as_ref().map(|s| (*s).clone());
     let (then_b, else_b, join_block) = b.if_branch_targets(block, span.clone(), cond_v);
-    let mut then_bool = bool_seed.clone().unwrap_or_default();
     let saved = plan.snap_bounds();
     let then_arm = lower_if_arm(
-        b,
-        then_b,
-        then_body,
-        env,
-        loops,
-        plan,
-        maps,
-        env_bool.is_some().then_some(&mut then_bool),
-        join_names,
+        b, then_b, then_body, env, loops, plan, maps, in_test, join_names,
     );
     let then_known = plan.known_ty.clone();
     plan.restore_bounds(saved);
     let (then_end, then_vals) =
         then_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     let then_reaches = arm_reaches_join(b, then_end, join_block);
-    let mut else_bool = bool_seed.clone().unwrap_or_default();
     let saved = plan.snap_bounds();
     let else_arm = lower_if_arm(
-        b,
-        else_b,
-        else_body,
-        env,
-        loops,
-        plan,
-        maps,
-        env_bool.is_some().then_some(&mut else_bool),
-        join_names,
+        b, else_b, else_body, env, loops, plan, maps, in_test, join_names,
     );
     let else_known = plan.known_ty.clone();
     plan.restore_bounds(saved);
@@ -977,32 +929,24 @@ fn lower_if_multi_join(
         reaching.push(else_known);
     }
     for name in join_names {
-        bind_agreed_type(plan, name, &reaching);
-    }
-    if let Some(eb) = env_bool.as_mut() {
-        for name in join_names {
-            if if_join_is_bool(then_body, else_body, name) {
-                eb.insert(name.clone());
-            }
-        }
+        note_joined_type(plan, name, &reaching);
     }
     let cont = b.new_block();
     b.jump(join_block, span.clone(), cont);
     Ok(cont)
 }
 
-fn if_join_is_bool(then_body: &[Stmt], else_body: &[Stmt], name: &str) -> bool {
-    fn arm_join_bool(body: &[Stmt], name: &str) -> bool {
-        for stmt in body {
-            if let Stmt::Assign { name: n, rhs, .. } = stmt {
-                if n == name {
-                    return rhs_is_bool(rhs);
-                }
-            }
-        }
-        false
-    }
-    arm_join_bool(then_body, name) && arm_join_bool(else_body, name)
+fn note_joined_type(
+    plan: &mut LowerPlan<'_>,
+    name: &str,
+    reaching: &[std::collections::HashMap<String, Type>],
+) {
+    // Agreed types, bool included, bind through `bind_agreed_type`.
+    bind_agreed_type(plan, name, reaching);
+}
+
+fn known_is_bool(known: &std::collections::HashMap<String, Type>, name: &str) -> bool {
+    known.get(name).is_some_and(type_is_bool)
 }
 
 fn lower_if_arm(
@@ -1013,7 +957,7 @@ fn lower_if_arm(
     loops: &mut Vec<LoopFrame>,
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
-    mut env_bool: Option<&mut std::collections::HashSet<String>>,
+    in_test: bool,
     join_names: &[String],
 ) -> Result<(usize, std::collections::HashMap<String, u32>), ()> {
     let mut env = outer_env.clone();
@@ -1029,11 +973,6 @@ fn lower_if_arm(
                     join_v = Some(v);
                 }
                 env.insert(name.clone(), v);
-                if let Some(env_bool) = env_bool.as_mut() {
-                    if rhs_is_bool(rhs) {
-                        env_bool.insert(name.clone());
-                    }
-                }
                 cur
             }
             Stmt::If {
@@ -1042,31 +981,12 @@ fn lower_if_arm(
                 then_body,
                 else_body,
             } => lower_if(
-                b,
-                cur,
-                span,
-                cond,
-                then_body,
-                else_body,
-                &mut env,
-                loops,
-                plan,
-                maps,
-                env_bool.as_deref_mut(),
+                b, cur, span, cond, then_body, else_body, &mut env, loops, plan, maps, in_test,
             )
             .map_err(|_| ())?,
             Stmt::Loop { span, params, body } => {
                 cur = lower_loop(
-                    b,
-                    cur,
-                    span,
-                    params,
-                    body,
-                    &mut env,
-                    loops,
-                    plan,
-                    maps,
-                    env_bool.as_deref_mut(),
+                    b, cur, span, params, body, &mut env, loops, plan, maps, in_test,
                 )
                 .map_err(|_| ())?;
                 cur
@@ -1086,16 +1006,7 @@ fn lower_if_arm(
                 scrutinee,
                 arms,
             } => lower_match(
-                b,
-                cur,
-                span,
-                scrutinee,
-                arms,
-                &mut env,
-                loops,
-                plan,
-                maps,
-                env_bool.as_deref_mut(),
+                b, cur, span, scrutinee, arms, &mut env, loops, plan, maps, in_test,
             )
             .map_err(|_| ())?,
             Stmt::Ret { span, value } => {
@@ -1108,15 +1019,10 @@ fn lower_if_arm(
                 cur
             }
             Stmt::AssertEq { span, got, want } => {
-                let env_bool = env_bool.as_deref_mut().ok_or(())?;
-                let g = lower_operand(b, cur, got, &env).map_err(|_| ())?;
-                let w = lower_operand(b, cur, want, &env).map_err(|_| ())?;
-                let diag_span = span_slice_a_names(got, want, span);
-                if assert_operands_are_bool(got, want, env_bool) {
-                    b.assert_eq_bool(cur, span.clone(), g, w, diag_span)
-                } else {
-                    b.assert_eq_i64(cur, span.clone(), g, w, diag_span)
+                if !in_test {
+                    return Err(());
                 }
+                lower_assert_eq(b, cur, span, got, want, &env, &plan.known_ty).map_err(|_| ())?
             }
             _ => return Err(()),
         };
@@ -1156,7 +1062,6 @@ fn lower_stmt_test(
     block: usize,
     stmt: &Stmt,
     env: &mut std::collections::HashMap<String, u32>,
-    env_bool: &mut std::collections::HashSet<String>,
     loops: &mut Vec<LoopFrame>,
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
@@ -1167,20 +1072,10 @@ fn lower_stmt_test(
             let (block, v) = lower_assign_rhs(b, block, rhs, env, plan, maps)?;
             note_record(plan, name, rhs);
             env.insert(name.clone(), v);
-            if rhs_is_bool(rhs) {
-                env_bool.insert(name.clone());
-            }
             Ok(block)
         }
         Stmt::AssertEq { span, got, want } => {
-            let g = lower_operand(b, block, got, env)?;
-            let w = lower_operand(b, block, want, env)?;
-            let diag_span = span_slice_a_names(got, want, span);
-            if assert_operands_are_bool(got, want, env_bool) {
-                Ok(b.assert_eq_bool(block, span.clone(), g, w, diag_span))
-            } else {
-                Ok(b.assert_eq_i64(block, span.clone(), g, w, diag_span))
-            }
+            lower_assert_eq(b, block, span, got, want, env, &plan.known_ty)
         }
         Stmt::Ret { span, value } => {
             let v = lower_operand(b, block, value, env)?;
@@ -1193,30 +1088,11 @@ fn lower_stmt_test(
             then_body,
             else_body,
         } => lower_if(
-            b,
-            block,
-            span,
-            cond,
-            then_body,
-            else_body,
-            env,
-            loops,
-            plan,
-            maps,
-            Some(env_bool),
+            b, block, span, cond, then_body, else_body, env, loops, plan, maps, true,
         ),
-        Stmt::Loop { span, params, body } => lower_loop(
-            b,
-            block,
-            span,
-            params,
-            body,
-            env,
-            loops,
-            plan,
-            maps,
-            Some(env_bool),
-        ),
+        Stmt::Loop { span, params, body } => {
+            lower_loop(b, block, span, params, body, env, loops, plan, maps, true)
+        }
         Stmt::Break { span } => {
             if b.block_terminates(block) {
                 return Ok(block);
@@ -1242,16 +1118,7 @@ fn lower_stmt_test(
             scrutinee,
             arms,
         } => lower_match(
-            b,
-            block,
-            span,
-            scrutinee,
-            arms,
-            env,
-            loops,
-            plan,
-            maps,
-            Some(env_bool),
+            b, block, span, scrutinee, arms, env, loops, plan, maps, true,
         ),
         Stmt::Trap { span } => {
             b.trap_user(block, span.clone());
@@ -1263,17 +1130,29 @@ fn lower_stmt_test(
     }
 }
 
-fn operand_is_bool(op: &Operand) -> bool {
-    matches!(op, Operand::Bool(_, _))
+fn lower_assert_eq(
+    b: &mut Builder,
+    block: usize,
+    span: &Span,
+    got: &Operand,
+    want: &Operand,
+    env: &std::collections::HashMap<String, u32>,
+    known: &std::collections::HashMap<String, Type>,
+) -> Result<usize, LowerError> {
+    let g = lower_operand(b, block, got, env)?;
+    let w = lower_operand(b, block, want, env)?;
+    let diag_span = span_slice_a_names(got, want, span);
+    if assert_operands_are_bool(got, want, known) {
+        Ok(b.assert_eq_bool(block, span.clone(), g, w, diag_span))
+    } else {
+        Ok(b.assert_eq_i64(block, span.clone(), g, w, diag_span))
+    }
 }
 
-fn rhs_is_bool(rhs: &Rhs) -> bool {
-    match rhs {
-        Rhs::Not { .. } => true,
-        Rhs::Operand(Operand::Bool(_, _)) => true,
-        Rhs::BinOp {
-            ty, op: BinOp::Eq, ..
-        } if type_is_bool(ty) => true,
+fn operand_known_bool(op: &Operand, known: &std::collections::HashMap<String, Type>) -> bool {
+    match op {
+        Operand::Bool(_, _) => true,
+        Operand::Name(name, _) => known_is_bool(known, name),
         _ => false,
     }
 }
@@ -1281,12 +1160,9 @@ fn rhs_is_bool(rhs: &Rhs) -> bool {
 fn assert_operands_are_bool(
     got: &Operand,
     want: &Operand,
-    env_bool: &std::collections::HashSet<String>,
+    known: &std::collections::HashMap<String, Type>,
 ) -> bool {
-    let got_b = operand_is_bool(got) || matches!(got, Operand::Name(n, _) if env_bool.contains(n));
-    let want_b =
-        operand_is_bool(want) || matches!(want, Operand::Name(n, _) if env_bool.contains(n));
-    got_b && want_b
+    operand_known_bool(got, known) && operand_known_bool(want, known)
 }
 
 fn lower_rhs(

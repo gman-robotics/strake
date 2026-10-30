@@ -918,24 +918,16 @@ fn check_if(
         }
         match (supply.then_arm, supply.else_arm) {
             (ArmSrc::Assign, ArmSrc::Assign) => {
-                let agreed = match (then_ctx.types.get(name), else_ctx.types.get(name)) {
-                    (Some(a), Some(b)) if types_compatible(a, b) => Some(a.clone()),
-                    _ => None,
-                };
-                let ty = agreed.or_else(|| {
-                    then_tops
-                        .get(name)
-                        .map(|(t, _)| t.clone())
-                        .or_else(|| else_tops.get(name).map(|(t, _)| t.clone()))
-                });
-                if let Some(ty) = ty {
-                    if ctx.types.contains_key(name) {
-                        diags.push(shadow_diag(span.clone()));
-                    } else {
-                        ctx.types.insert(name.clone(), ty);
-                        ctx.phi_gaps.remove(name);
-                    }
-                }
+                bind_both_assign_join(
+                    name,
+                    &span,
+                    then_ctx.types.get(name),
+                    else_ctx.types.get(name),
+                    &then_tops,
+                    &else_tops,
+                    ctx,
+                    diags,
+                );
             }
             (ArmSrc::Assign, ArmSrc::LoopExit)
             | (ArmSrc::LoopExit, ArmSrc::Assign)
@@ -1002,6 +994,42 @@ fn check_if(
         if let Some(ty) = ty {
             ctx.publish_if_name(&name, ty);
         }
+    }
+}
+
+fn bind_both_assign_join(
+    name: &str,
+    span: &Span,
+    then_ty: Option<&Type>,
+    else_ty: Option<&Type>,
+    then_tops: &HashMap<String, (Type, Span)>,
+    else_tops: &HashMap<String, (Type, Span)>,
+    ctx: &mut Ctx,
+    diags: &mut Vec<Diag>,
+) {
+    match (then_ty, else_ty) {
+        (Some(a), Some(b)) if types_compatible(a, b) => {
+            insert_join_type(ctx, name, a.clone(), span, diags);
+        }
+        (Some(_), Some(_)) => diags.push(type_diag(span.clone())),
+        _ => {
+            let ty = then_tops
+                .get(name)
+                .map(|(t, _)| t.clone())
+                .or_else(|| else_tops.get(name).map(|(t, _)| t.clone()));
+            if let Some(ty) = ty {
+                insert_join_type(ctx, name, ty, span, diags);
+            }
+        }
+    }
+}
+
+fn insert_join_type(ctx: &mut Ctx, name: &str, ty: Type, span: &Span, diags: &mut Vec<Diag>) {
+    if ctx.types.contains_key(name) {
+        diags.push(shadow_diag(span.clone()));
+    } else {
+        ctx.types.insert(name.to_string(), ty);
+        ctx.phi_gaps.remove(name);
     }
 }
 
