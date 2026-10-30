@@ -445,6 +445,42 @@ end
     }
 
     #[test]
+    fn ne_bytes_is_bytewise() {
+        let src = r#"strake 1
+
+fn one(a: bytes, b: bytes) -> i64
+  c = ne bytes a b
+  if c
+    out = 1
+  else
+    out = 0
+  end
+  ret out
+end
+
+fn same() -> i64
+  a = bytes.new x"ff00"
+  b = bytes.new x"ff00"
+  x = call one(a, b)
+  ret x
+end
+
+fn diff() -> i64
+  a = bytes.new x"ff00"
+  d = bytes.new x"00ff"
+  y = call one(a, d)
+  ret y
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "same"), 0);
+        assert_eq!(compile_run(src, "diff"), 1);
+    }
+
+    #[test]
     fn eq_bytes_is_bytewise() {
         let src = r#"strake 1
 

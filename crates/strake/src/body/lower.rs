@@ -1313,6 +1313,15 @@ fn lower_rhs(
                 BinOp::Div => lower_div(block, span.clone(), ty, l, r, b),
                 BinOp::Eq if type_is_bool(ty) => Ok(b.eq_bool(block, span.clone(), l, r)),
                 BinOp::Eq => Ok(b.eq_i64(block, span.clone(), l, r)),
+                BinOp::Ne => {
+                    let eq = if type_is_bool(ty) {
+                        b.eq_bool(block, span.clone(), l, r)
+                    } else {
+                        b.eq_i64(block, span.clone(), l, r)
+                    };
+                    let false_v = b.const_bool(block, span.clone(), false);
+                    Ok(b.eq_bool(block, span.clone(), eq, false_v))
+                }
                 _ => Err(LowerError::unsupported(
                     "binary operator not lowered in this slice",
                 )),
