@@ -2,13 +2,14 @@
 # (743927a-era main, plus the two commits after it on origin/main).
 # Strake's workflow passes the Rust coverage command and `cargo test --locked`.
 # hub-path stays ".". Coverage and the mutator test command default to empty
-# here. There is no Python unittest default.
+# here. The workflow job runs `python3 -m unittest discover -s scripts/tests`
+# before this action. This action does not run those tests.
 #
 # Coverage reports crapper and mutator read when --use-existing-coverage is set.
 # Pass one of these as coverage-command (the hub job uses the Python command).
 #
 # Rust (cargo-llvm-cov 0.6.21, works with rustc 1.83):
-#   cargo llvm-cov --lcov --output-path target/coverage/rust/lcov.info
+#   cargo llvm-cov --locked --lcov --output-path target/coverage/rust/lcov.info
 #
 # TypeScript with bun (crapper's own runner only knows vitest):
 #   bun test --coverage --coverage-reporter=lcov && mkdir -p target/coverage/typescript && cp coverage/lcov.info target/coverage/typescript/lcov.info
@@ -50,9 +51,11 @@ runs:
     # Install the uv version named in scripts/ub-tools.lock instead.
     - name: Install pinned uv
       shell: bash
+      env:
+        UB_GATES_HUB_PATH: ${{ inputs.hub-path }}
       run: |
         set -euo pipefail
-        lock="${{ inputs.hub-path }}/scripts/ub-tools.lock"
+        lock="${UB_GATES_HUB_PATH}/scripts/ub-tools.lock"
         uv_ver="$(awk -F= '$1=="uv" {print $2; exit}' "${lock}")"
         test -n "${uv_ver}"
         curl -LsSf "https://astral.sh/uv/${uv_ver}/install.sh" | env UV_INSTALL_DIR="${RUNNER_TEMP}/uv" UV_NO_MODIFY_PATH=1 sh
@@ -60,9 +63,11 @@ runs:
 
     - name: Install pinned crapper, dryer, and mutator
       shell: bash
+      env:
+        UB_GATES_HUB_PATH: ${{ inputs.hub-path }}
       run: |
         set -euo pipefail
-        hub="${{ inputs.hub-path }}"
+        hub="${UB_GATES_HUB_PATH}"
         lock="${hub}/scripts/ub-tools.lock"
         py_ver="$(awk -F= '$1=="python" {print $2; exit}' "${lock}")"
         test -n "${py_ver}"
@@ -99,9 +104,11 @@ runs:
     - name: Install pinned cargo-llvm-cov
       if: inputs.rust == 'true'
       shell: bash
+      env:
+        UB_GATES_HUB_PATH: ${{ inputs.hub-path }}
       run: |
         set -euo pipefail
-        lock="${{ inputs.hub-path }}/scripts/ub-tools.lock"
+        lock="${UB_GATES_HUB_PATH}/scripts/ub-tools.lock"
         ver="$(awk -F= '$1=="cargo_llvm_cov" {print $2; exit}' "${lock}")"
         test -n "${ver}"
         rustup component add llvm-tools-preview
@@ -114,9 +121,10 @@ runs:
         UB_GATES_BASE_REF: ${{ inputs.base-ref }}
         UB_GATES_COVERAGE_CMD: ${{ inputs.coverage-command }}
         UB_GATES_MUTATOR_TEST_CMD: ${{ inputs.mutator-test-command }}
+        UB_GATES_HUB_PATH: ${{ inputs.hub-path }}
       run: |
         set -euo pipefail
-        bash "${{ inputs.hub-path }}/scripts/run_ub_gates_ci.sh"
+        bash "${UB_GATES_HUB_PATH}/scripts/run_ub_gates_ci.sh"
 
     - name: Upload ub-gates metrics
       if: always()
@@ -124,4 +132,5 @@ runs:
       with:
         name: ub-gates-metrics
         path: .metrics/
+        include-hidden-files: true
         if-no-files-found: ignore

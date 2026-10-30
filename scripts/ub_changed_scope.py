@@ -355,19 +355,20 @@ def _lines_or_empty(found: list[int] | None) -> list[int]:
 
 def _scan_hit(
     rel: str, items: list[tuple[str, list[int]]], root: Path | None
-) -> list[int] | None:
+) -> tuple[list[int] | None, list[tuple[str, list[int]]]]:
     found = _lines_for_key(rel, items[0][0], items[0][1], root)
     if found is not None:
-        return found
-    return _scan_lines(rel, items[1:], root)
+        return found, []
+    return None, items[1:]
 
 
 def _scan_lines(
     rel: str, items: list[tuple[str, list[int]]], root: Path | None
 ) -> list[int] | None:
-    if not items:
-        return None
-    return _scan_hit(rel, items, root)
+    found = None
+    while items:
+        found, items = _scan_hit(rel, items, root)
+    return found
 
 
 def lines_for_path(path: str, changed: dict[str, list[int]], root: Path | None = None) -> list[int]:

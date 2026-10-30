@@ -5,7 +5,9 @@
 # Coverage defaults to pinned cargo-llvm-cov LCOV at target/coverage/rust/lcov.info.
 # The mutator test command defaults to `cargo test --locked`.
 # The throwaway clone commits a copy of the mounted worktree so uncommitted
-# files are in the merge-base diff. The host repository is not committed.
+# files are in the merge-base diff. The clone worktree is cleared before the
+# copy so an existing directory is replaced, not nested. The host repository
+# is not committed.
 # git clone maps origin/main to the source's local main branch. When that
 # branch is behind the worktree's origin/main, the clone's remote-tracking
 # ref is moved to the worktree's origin/main.
@@ -28,10 +30,18 @@ The worktree mount is read-only (:ro).
 The main git directory is mounted :ro when it is outside the worktree.
 .metrics is copied to a temp directory on the host. Nothing else is written
 on the host. UB_GATES_ADVISORY defaults to 0. Set UB_GATES_ADVISORY=1 for a
-local report run. Coverage defaults to cargo llvm-cov. The command creates
-target/coverage/rust and writes lcov.info there. The mutator test command
-defaults to cargo test --locked.
+local report run. Coverage defaults to cargo llvm-cov --locked. The command
+creates target/coverage/rust and writes lcov.info there. The mutator test
+command defaults to cargo test --locked. The mutator budget is 20 minutes.
 EOF
+}
+
+overlay_worktree() {
+  local src="$1"
+  local dest="$2"
+  find "${dest}" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+  find "${src}" -mindepth 1 -maxdepth 1 ! -name .git ! -name target ! -name .metrics \
+    -exec cp -a {} "${dest}/" \;
 }
 
 inside() {
@@ -82,8 +92,7 @@ inside() {
   if git -C /work rev-parse --verify "${remote_ref}^{commit}" >/dev/null 2>&1; then
     git -C /tmp/app update-ref "${remote_ref}" "$(git -C /work rev-parse "${remote_ref}")"
   fi
-  find /work -mindepth 1 -maxdepth 1 ! -name .git ! -name target ! -name .metrics \
-    -exec cp -a {} /tmp/app/ \;
+  overlay_worktree /work /tmp/app
   cd /tmp/app
   git add -A
   if ! git diff --cached --quiet; then
@@ -102,6 +111,7 @@ inside() {
   exit "${rc}"
 }
 
+main() {
 WORKTREE=""
 MAIN_GIT=""
 METRICS_DIR=""
@@ -166,7 +176,7 @@ docker run --rm -i \
   "${mounts[@]}" \
   -e "UB_GATES_ADVISORY=${UB_GATES_ADVISORY:-0}" \
   -e "UB_GATES_BASE_REF=${UB_GATES_BASE_REF:-origin/main}" \
-  -e "UB_GATES_COVERAGE_CMD=${UB_GATES_COVERAGE_CMD:-mkdir -p target/coverage/rust && cargo llvm-cov --lcov --output-path target/coverage/rust/lcov.info}" \
+  -e "UB_GATES_COVERAGE_CMD=${UB_GATES_COVERAGE_CMD:-mkdir -p target/coverage/rust && cargo llvm-cov --locked --lcov --output-path target/coverage/rust/lcov.info}" \
   -e "UB_GATES_MUTATOR_TEST_CMD=${UB_GATES_MUTATOR_TEST_CMD:-cargo test --locked}" \
   -w /tmp \
   rust:1.83 \
@@ -177,3 +187,8 @@ if command -v git >/dev/null 2>&1; then
 fi
 exec bash /work/scripts/ub_gates_container.sh --inside
 EOS
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

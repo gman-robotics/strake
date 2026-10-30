@@ -66,6 +66,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: ub-gates script tests
+        run: python3 -m unittest discover -s scripts/tests
+
       - name: Install Rust toolchain
         run: |
           rustup toolchain install 1.83.0 --profile minimal --component rustfmt --component clippy
@@ -79,7 +82,7 @@ jobs:
         with:
           advisory: "1"
           base-ref: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'origin/main' }}
-          coverage-command: mkdir -p target/coverage/rust && cargo llvm-cov --lcov --output-path target/coverage/rust/lcov.info
+          coverage-command: mkdir -p target/coverage/rust && cargo llvm-cov --locked --lcov --output-path target/coverage/rust/lcov.info
           mutator-test-command: cargo test --locked
           rust: "true"
           hub-path: "."
