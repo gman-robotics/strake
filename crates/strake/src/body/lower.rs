@@ -516,7 +516,7 @@ fn lower_match(
     let phi_names = match_phi_names(&site);
     let any_reaches = site.arms.iter().any(|a| a.reaches);
     let mut arm_end_blocks: Vec<(usize, std::collections::HashMap<String, u32>)> = Vec::new();
-    let mut arm_recs: Vec<std::collections::HashMap<String, String>> = Vec::new();
+    let mut arm_known: Vec<std::collections::HashMap<String, Type>> = Vec::new();
     for (arm, supply) in arms.iter().zip(site.arms.iter()) {
         let arm_block = arm_entries[supply.tag_index as usize];
         let mut arm_env = env.clone();
@@ -545,10 +545,10 @@ fn lower_match(
                 env_bool.as_deref_mut(),
             )?;
         }
-        let arm_rec = plan.rec_ty.clone();
+        let arm_ty = plan.known_ty.clone();
         plan.restore_bounds(saved);
         if supply.reaches {
-            arm_recs.push(arm_rec);
+            arm_known.push(arm_ty);
             if !b.block_terminates(cur) {
                 b.jump(cur, span.clone(), join_block);
             }
@@ -577,7 +577,9 @@ fn lower_match(
         b.merge_regs(join_block, span.clone(), dst, &pairs);
         env.insert(name.clone(), dst);
     }
-    bind_agreed_records(plan, &phi_names, &arm_recs);
+    for name in &phi_names {
+        bind_agreed_type(plan, name, &arm_known);
+    }
     b.jump(join_block, span.clone(), cont);
     Ok(cont)
 }
@@ -790,11 +792,12 @@ fn lower_if(
         env_bool.is_some().then_some(&mut then_bool),
         &join_names,
     );
-    let then_recs = plan.rec_ty.clone();
+    let then_known = plan.known_ty.clone();
     plan.restore_bounds(saved);
     let (then_end, then_vals) =
         then_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     let then_v = arm_join_value(&then_vals, join_name, b, then_end, span);
+    let then_reaches = arm_reaches_join(b, then_end, join_block);
     let mut phi_pairs: Vec<(usize, u32)> = Vec::new();
     if !b.block_terminates(then_end) {
         b.jump(then_end, span.clone(), join_block);
@@ -815,11 +818,12 @@ fn lower_if(
         env_bool.is_some().then_some(&mut else_bool),
         &join_names,
     );
-    let else_recs = plan.rec_ty.clone();
+    let else_known = plan.known_ty.clone();
     plan.restore_bounds(saved);
     let (else_end, else_vals) =
         else_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
     let else_v = arm_join_value(&else_vals, join_name, b, else_end, span);
+    let else_reaches = arm_reaches_join(b, else_end, join_block);
     if !b.block_terminates(else_end) {
         b.jump(else_end, span.clone(), join_block);
         phi_pairs.push((else_end, else_v));
@@ -843,7 +847,14 @@ fn lower_if(
     b.jump(join_block, span.clone(), cont);
     if let Some(name) = join_name {
         env.insert(name.to_string(), joined_v);
-        bind_agreed_record(plan, name, &then_recs, &else_recs);
+        let mut reaching = Vec::new();
+        if then_reaches {
+            reaching.push(then_known);
+        }
+        if else_reaches {
+            reaching.push(else_known);
+        }
+        bind_agreed_type(plan, name, &reaching);
         if let Some(eb) = env_bool.as_mut() {
             if if_join_is_bool(then_body, else_body, name) {
                 eb.insert(name.to_string());
@@ -851,6 +862,10 @@ fn lower_if(
         }
     }
     Ok(cont)
+}
+
+fn arm_reaches_join(b: &Builder, end: usize, join: usize) -> bool {
+    !b.block_terminates(end) || b.block_branch_target(end) == Some(join)
 }
 
 fn arm_join_value(
@@ -905,10 +920,11 @@ fn lower_if_multi_join(
         env_bool.is_some().then_some(&mut then_bool),
         join_names,
     );
-    let then_recs = plan.rec_ty.clone();
+    let then_known = plan.known_ty.clone();
     plan.restore_bounds(saved);
     let (then_end, then_vals) =
         then_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    let then_reaches = arm_reaches_join(b, then_end, join_block);
     let mut else_bool = bool_seed.clone().unwrap_or_default();
     let saved = plan.snap_bounds();
     let else_arm = lower_if_arm(
@@ -922,10 +938,11 @@ fn lower_if_multi_join(
         env_bool.is_some().then_some(&mut else_bool),
         join_names,
     );
-    let else_recs = plan.rec_ty.clone();
+    let else_known = plan.known_ty.clone();
     plan.restore_bounds(saved);
     let (else_end, else_vals) =
         else_arm.map_err(|_| LowerError::unsupported("if arm lowering failed"))?;
+    let else_reaches = arm_reaches_join(b, else_end, join_block);
     if b.block_terminates(then_end) && b.block_terminates(else_end) {
         if !b.block_terminates(join_block) {
             b.trap_fallthrough(join_block, span.clone());
@@ -951,7 +968,16 @@ fn lower_if_multi_join(
         let dst = b.alloc_vreg();
         b.merge_regs(join_block, span.clone(), dst, &pairs);
         env.insert(name.clone(), dst);
-        bind_agreed_record(plan, name, &then_recs, &else_recs);
+    }
+    let mut reaching = Vec::new();
+    if then_reaches {
+        reaching.push(then_known);
+    }
+    if else_reaches {
+        reaching.push(else_known);
+    }
+    for name in join_names {
+        bind_agreed_type(plan, name, &reaching);
     }
     if let Some(eb) = env_bool.as_mut() {
         for name in join_names {
@@ -1382,35 +1408,19 @@ fn bind_type(plan: &mut LowerPlan<'_>, name: &str, ty: Type) {
     plan.known_ty.insert(name.to_string(), ty);
 }
 
-fn bind_agreed_record(
+fn bind_agreed_type(
     plan: &mut LowerPlan<'_>,
     name: &str,
-    then_recs: &std::collections::HashMap<String, String>,
-    else_recs: &std::collections::HashMap<String, String>,
+    snaps: &[std::collections::HashMap<String, Type>],
 ) {
-    let (Some(a), Some(b)) = (then_recs.get(name), else_recs.get(name)) else {
+    let Some(first) = snaps.first().and_then(|s| s.get(name)).cloned() else {
         return;
     };
-    if a == b {
-        bind_type(plan, name, Type::Named(a.clone(), ty_span()));
-    }
-}
-
-fn bind_agreed_records(
-    plan: &mut LowerPlan<'_>,
-    names: &[String],
-    snaps: &[std::collections::HashMap<String, String>],
-) {
-    for name in names {
-        let Some(first) = snaps.first().and_then(|s| s.get(name)).cloned() else {
-            continue;
-        };
-        if snaps
-            .iter()
-            .all(|s| s.get(name).is_some_and(|t| t == &first))
-        {
-            bind_type(plan, name, Type::Named(first, ty_span()));
-        }
+    if snaps
+        .iter()
+        .all(|s| s.get(name).is_some_and(|ty| types_match(ty, &first)))
+    {
+        bind_type(plan, name, first);
     }
 }
 
@@ -1633,10 +1643,9 @@ fn operand_fits(
             Type::Named(name, _) if name == "i64" => fits_i64(*n),
             _ => false,
         },
-        Operand::Name(name, _) => match known.get(name) {
-            Some(got) => types_match(got, expected),
-            None => true,
-        },
+        Operand::Name(name, _) => known
+            .get(name)
+            .is_some_and(|got| types_match(got, expected)),
     }
 }
 

@@ -685,6 +685,71 @@ end
     }
 
     #[test]
+    fn if_join_result_projects_payload_field() {
+        let src = r#"strake 1
+
+type A { n: i64 }
+
+fn pick(c: bool) -> i64
+  t = { n: 3 }
+  e = { n: 4 }
+  if c
+    r = ok A t
+  else
+    r = ok A e
+  end
+  match r
+    ok p ->
+      v = p.n
+      ret v
+    err _ ->
+      ret 0
+  end
+end
+
+fn pack() -> i64
+  n = call pick(true)
+  ret n
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 3);
+    }
+
+    #[test]
+    fn if_join_scalar_disambiguates_record_field() {
+        let src = r#"strake 1
+
+type A { x: i64 }
+type B { x: bool }
+
+fn pick(c: bool) -> i64
+  if c
+    v = 1
+  else
+    v = 2
+  end
+  p = { x: v }
+  n = p.x
+  ret n
+end
+
+fn pack() -> i64
+  n = call pick(true)
+  ret n
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "pack"), 1);
+    }
+
+    #[test]
     fn match_join_projects_record_when_arms_agree() {
         let src = r#"strake 1
 

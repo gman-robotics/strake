@@ -1300,13 +1300,15 @@ fn cmp_forbidden(
 fn eq_forbidden_ty(ty: &Type, state: &CheckState) -> bool {
     match ty {
         Type::List(_, _) | Type::Result(_, _, _) => true,
-        Type::Named(n, _) => state.sum_types.contains_key(n) || state.record_types.contains_key(n),
+        Type::Named(n, _) => {
+            n == "unit" || state.sum_types.contains_key(n) || state.record_types.contains_key(n)
+        }
     }
 }
 
 fn ordered_forbidden_ty(ty: &Type, state: &CheckState) -> bool {
     match ty {
-        Type::Named(n, _) if n == "bytes" => true,
+        Type::Named(n, _) if n == "bytes" || n == "bool" => true,
         _ => eq_forbidden_ty(ty, state),
     }
 }
@@ -2203,6 +2205,20 @@ mod tests {
             "strake 1\n\nfn f() -> i64\n  c = lt i64 1 2\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
         assert!(check_ok(eq_bytes));
         assert!(check_ok(lt_i64));
+    }
+
+    #[test]
+    fn eq_unit_ne_unit_and_lt_bool_are_etype() {
+        let eq_unit = "strake 1\n\nfn f() -> i64\n  c = eq unit unit unit\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let ne_unit = "strake 1\n\nfn f() -> i64\n  c = ne unit unit unit\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let lt_bool = "strake 1\n\nfn f(a: bool, b: bool) -> i64\n  c = lt bool a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(eq_unit));
+        assert!(check_errs(ne_unit));
+        assert!(check_errs(lt_bool));
+        let eq_bool = "strake 1\n\nfn f(a: bool, b: bool) -> i64\n  c = eq bool a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let eq_bytes = "strake 1\n\nfn f(a: bytes, b: bytes) -> i64\n  c = eq bytes a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_ok(eq_bool));
+        assert!(check_ok(eq_bytes));
     }
 
     #[test]
