@@ -40,16 +40,21 @@ struct CheckState {
     next_site_id: u32,
     partial_used: bool,
     sum_types: HashMap<String, SumTypeInfo>,
+    record_types: HashMap<String, Vec<(String, Type)>>,
 }
 
 impl CheckState {
-    fn new(sum_types: HashMap<String, SumTypeInfo>) -> Self {
+    fn new(
+        sum_types: HashMap<String, SumTypeInfo>,
+        record_types: HashMap<String, Vec<(String, Type)>>,
+    ) -> Self {
         Self {
             carry: CarryPlan::default(),
             loop_stack: Vec::new(),
             next_site_id: 0,
             partial_used: false,
             sum_types,
+            record_types,
         }
     }
 
@@ -63,7 +68,8 @@ impl CheckState {
 pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure> {
     let mut diags = Vec::new();
     let sum_types = build_sum_type_index(module);
-    let mut state = CheckState::new(sum_types);
+    let record_types = build_record_type_index(module);
+    let mut state = CheckState::new(sum_types, record_types);
     let fn_table: Vec<&FnItem> = module
         .items
         .iter()
@@ -104,6 +110,22 @@ fn build_sum_type_index(module: &Module) -> HashMap<String, SumTypeInfo> {
                 let payloads: Vec<Option<Type>> =
                     variants.iter().map(|v| v.payload.clone()).collect();
                 out.insert(td.name.clone(), SumTypeInfo { tags, payloads });
+            }
+        }
+    }
+    out
+}
+
+fn build_record_type_index(module: &Module) -> HashMap<String, Vec<(String, Type)>> {
+    let mut out = HashMap::new();
+    for item in &module.items {
+        if let Item::TypeDef(td) = item {
+            if let TypeDefKind::Record(fields) = &td.kind {
+                let decls = fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.ty.clone()))
+                    .collect();
+                out.insert(td.name.clone(), decls);
             }
         }
     }
@@ -896,18 +918,16 @@ fn check_if(
         }
         match (supply.then_arm, supply.else_arm) {
             (ArmSrc::Assign, ArmSrc::Assign) => {
-                let ty = then_tops
-                    .get(name)
-                    .map(|(t, _)| t.clone())
-                    .or_else(|| else_tops.get(name).map(|(t, _)| t.clone()));
-                if let Some(ty) = ty {
-                    if ctx.types.contains_key(name) {
-                        diags.push(shadow_diag(span.clone()));
-                    } else {
-                        ctx.types.insert(name.clone(), ty);
-                        ctx.phi_gaps.remove(name);
-                    }
-                }
+                bind_both_assign_join(
+                    name,
+                    &span,
+                    then_ctx.types.get(name),
+                    else_ctx.types.get(name),
+                    &then_tops,
+                    &else_tops,
+                    ctx,
+                    diags,
+                );
             }
             (ArmSrc::Assign, ArmSrc::LoopExit)
             | (ArmSrc::LoopExit, ArmSrc::Assign)
@@ -974,6 +994,42 @@ fn check_if(
         if let Some(ty) = ty {
             ctx.publish_if_name(&name, ty);
         }
+    }
+}
+
+fn bind_both_assign_join(
+    name: &str,
+    span: &Span,
+    then_ty: Option<&Type>,
+    else_ty: Option<&Type>,
+    then_tops: &HashMap<String, (Type, Span)>,
+    else_tops: &HashMap<String, (Type, Span)>,
+    ctx: &mut Ctx,
+    diags: &mut Vec<Diag>,
+) {
+    match (then_ty, else_ty) {
+        (Some(a), Some(b)) if types_compatible(a, b) => {
+            insert_join_type(ctx, name, a.clone(), span, diags);
+        }
+        (Some(_), Some(_)) => diags.push(type_diag(span.clone())),
+        _ => {
+            let ty = then_tops
+                .get(name)
+                .map(|(t, _)| t.clone())
+                .or_else(|| else_tops.get(name).map(|(t, _)| t.clone()));
+            if let Some(ty) = ty {
+                insert_join_type(ctx, name, ty, span, diags);
+            }
+        }
+    }
+}
+
+fn insert_join_type(ctx: &mut Ctx, name: &str, ty: Type, span: &Span, diags: &mut Vec<Diag>) {
+    if ctx.types.contains_key(name) {
+        diags.push(shadow_diag(span.clone()));
+    } else {
+        ctx.types.insert(name.to_string(), ty);
+        ctx.phi_gaps.remove(name);
     }
 }
 
@@ -1154,7 +1210,7 @@ fn top_level_assigns(body: &[Stmt]) -> HashMap<String, (Type, Span)> {
 
 fn rhs_ty_hint(rhs: &Rhs) -> Type {
     match rhs {
-        Rhs::BinOp { ty, .. } => ty.clone(),
+        Rhs::BinOp { op, ty, span, .. } => binop_result_ty(op, ty, span),
         Rhs::Hole { ty, .. } => ty.clone(),
         _ => scalar("i64", empty_span()),
     }
@@ -1181,24 +1237,16 @@ fn check_rhs(
             span,
             op,
         } => {
-            if matches!(op, BinOp::Eq | BinOp::Ne) {
-                if type_is_list(ty) {
-                    diags.push(type_diag(span.clone()));
-                    return ty.clone();
-                }
-                if type_is_result_or_sum(lhs, &ctx.types, &state.sum_types)
-                    || type_is_result_or_sum(rhs, &ctx.types, &state.sum_types)
-                {
-                    diags.push(type_diag(span.clone()));
-                    return ty.clone();
-                }
+            if cmp_forbidden(op, ty, lhs, rhs, ctx, state) {
+                diags.push(type_diag(span.clone()));
+                return ty.clone();
             }
             let lt = operand_ty(lhs, ctx, state, fns, Some(ty), diags);
             let rt = operand_ty(rhs, ctx, state, fns, Some(ty), diags);
             if !types_compatible(&lt, ty) || !types_compatible(&rt, ty) {
                 diags.push(type_diag(span.clone()));
             }
-            ty.clone()
+            binop_result_ty(op, ty, span)
         }
         Rhs::Call { span, callee, args } => {
             let sig = resolve_fn(callee, fns);
@@ -1240,7 +1288,304 @@ fn check_rhs(
         }
         Rhs::Operand(op) => operand_ty(op, ctx, state, fns, None, diags),
         Rhs::Hole { ty, .. } => ty.clone(),
+        Rhs::ListEmpty { span, elem } => Type::List(Box::new(elem.clone()), span.clone()),
+        Rhs::ListCons { span, head, tail } => {
+            check_list_cons(span, head, tail, ctx, state, fns, diags)
+        }
+        Rhs::ListLen { span, list } => check_list_len(span, list, ctx, state, fns, diags),
+        Rhs::ListGet { span, list, index } => {
+            check_list_get(span, list, index, ctx, state, fns, diags)
+        }
+        Rhs::BytesNew { span, .. } => scalar("bytes", span.clone()),
+        Rhs::BytesLen { span, bytes } => check_bytes_len(span, bytes, ctx, state, fns, diags),
+        Rhs::BytesGet { span, bytes, index } => {
+            check_bytes_get(span, bytes, index, ctx, state, fns, diags)
+        }
+        Rhs::Record { span, fields } => check_record(span, fields, ctx, state, fns, diags),
+        Rhs::Project { span, base, field } => check_project(span, base, field, ctx, state, diags),
         _ => scalar("i64", empty_span()),
+    }
+}
+
+/// Compares yield `bool`; arithmetic yields the operand type.
+fn binop_result_ty(op: &BinOp, ty: &Type, span: &Span) -> Type {
+    match op {
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            scalar("bool", span.clone())
+        }
+        _ => ty.clone(),
+    }
+}
+
+fn cmp_forbidden(
+    op: &BinOp,
+    ty: &Type,
+    lhs: &Operand,
+    rhs: &Operand,
+    ctx: &Ctx,
+    state: &CheckState,
+) -> bool {
+    let forbid = match op {
+        BinOp::Eq | BinOp::Ne => eq_forbidden_ty,
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => ordered_forbidden_ty,
+        _ => return false,
+    };
+    forbid(ty, state)
+        || forbid_operand(lhs, ctx, state, forbid)
+        || forbid_operand(rhs, ctx, state, forbid)
+}
+
+fn eq_forbidden_ty(ty: &Type, state: &CheckState) -> bool {
+    match ty {
+        Type::List(_, _) | Type::Result(_, _, _) => true,
+        Type::Named(n, _) => {
+            n == "unit" || state.sum_types.contains_key(n) || state.record_types.contains_key(n)
+        }
+    }
+}
+
+fn ordered_forbidden_ty(ty: &Type, state: &CheckState) -> bool {
+    match ty {
+        Type::Named(n, _) if n == "bytes" || n == "bool" => true,
+        _ => eq_forbidden_ty(ty, state),
+    }
+}
+
+fn forbid_operand(
+    op: &Operand,
+    ctx: &Ctx,
+    state: &CheckState,
+    forbid: fn(&Type, &CheckState) -> bool,
+) -> bool {
+    match op {
+        Operand::Name(name, _) => ctx.types.get(name).is_some_and(|t| forbid(t, state)),
+        _ => false,
+    }
+}
+
+fn check_list_cons(
+    span: &Span,
+    head: &Operand,
+    tail: &Operand,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    let tail_ty = operand_ty(tail, ctx, state, fns, None, diags);
+    let Type::List(inner, _) = tail_ty else {
+        let head_ty = operand_ty(head, ctx, state, fns, None, diags);
+        diags.push(type_diag(span.clone()));
+        return Type::List(Box::new(head_ty), span.clone());
+    };
+    let head_ty = operand_ty(head, ctx, state, fns, Some(inner.as_ref()), diags);
+    if !types_compatible(&head_ty, &inner) {
+        diags.push(type_diag(span.clone()));
+    }
+    Type::List(inner, span.clone())
+}
+
+fn check_list_len(
+    span: &Span,
+    list: &Operand,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    let ty = operand_ty(list, ctx, state, fns, None, diags);
+    if !matches!(ty, Type::List(_, _)) {
+        diags.push(type_diag(span.clone()));
+    }
+    scalar("i64", span.clone())
+}
+
+fn check_list_get(
+    span: &Span,
+    list: &Operand,
+    index: &Operand,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    let list_ty = operand_ty(list, ctx, state, fns, None, diags);
+    let index_ty = operand_ty(
+        index,
+        ctx,
+        state,
+        fns,
+        Some(&scalar("i64", span.clone())),
+        diags,
+    );
+    if !types_compatible(&index_ty, &scalar("i64", span.clone())) {
+        diags.push(type_diag(span.clone()));
+    }
+    let elem = match list_ty {
+        Type::List(inner, _) => *inner,
+        _ => {
+            diags.push(type_diag(span.clone()));
+            scalar("i64", span.clone())
+        }
+    };
+    Type::Result(
+        Box::new(elem),
+        Box::new(scalar("unit", span.clone())),
+        span.clone(),
+    )
+}
+
+fn is_bytes_ty(ty: &Type) -> bool {
+    matches!(ty, Type::Named(n, _) if n == "bytes")
+}
+
+fn check_bytes_len(
+    span: &Span,
+    bytes: &Operand,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    let ty = operand_ty(bytes, ctx, state, fns, None, diags);
+    if !is_bytes_ty(&ty) {
+        diags.push(type_diag(span.clone()));
+    }
+    scalar("i64", span.clone())
+}
+
+fn check_bytes_get(
+    span: &Span,
+    bytes: &Operand,
+    index: &Operand,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    let bytes_ty = operand_ty(bytes, ctx, state, fns, None, diags);
+    let index_ty = operand_ty(
+        index,
+        ctx,
+        state,
+        fns,
+        Some(&scalar("i64", span.clone())),
+        diags,
+    );
+    if !is_bytes_ty(&bytes_ty) || !types_compatible(&index_ty, &scalar("i64", span.clone())) {
+        diags.push(type_diag(span.clone()));
+    }
+    Type::Result(
+        Box::new(scalar("i64", span.clone())),
+        Box::new(scalar("unit", span.clone())),
+        span.clone(),
+    )
+}
+
+fn check_record(
+    span: &Span,
+    fields: &[(String, Operand)],
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    let mut names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
+    names.sort_unstable();
+    if names.windows(2).any(|w| w[0] == w[1]) {
+        diags.push(type_diag(span.clone()));
+        return scalar("i64", span.clone());
+    }
+    let records = state.record_types.clone();
+    let Some(rname) = unique_record(&records, &names, fields, ctx, state, fns) else {
+        diags.push(type_diag(span.clone()));
+        for (_, op) in fields {
+            operand_ty(op, ctx, state, fns, None, diags);
+        }
+        return scalar("i64", span.clone());
+    };
+    let decls = state.record_types.get(&rname).cloned().unwrap_or_default();
+    for (fname, fty) in &decls {
+        let Some((_, op)) = fields.iter().find(|(n, _)| n == fname) else {
+            diags.push(type_diag(span.clone()));
+            continue;
+        };
+        let got = operand_ty(op, ctx, state, fns, Some(fty), diags);
+        if !types_compatible(&got, fty) {
+            diags.push(type_diag(span.clone()));
+        }
+    }
+    Type::Named(rname, span.clone())
+}
+
+fn unique_record(
+    records: &HashMap<String, Vec<(String, Type)>>,
+    names: &[&str],
+    fields: &[(String, Operand)],
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+) -> Option<String> {
+    let saved_partial = state.partial_used;
+    let mut hits = Vec::new();
+    for (rname, decls) in records {
+        let mut dn: Vec<&str> = decls.iter().map(|(n, _)| n.as_str()).collect();
+        dn.sort_unstable();
+        if dn == names && record_operands_fit(decls, fields, ctx, state, fns) {
+            hits.push(rname.clone());
+        }
+    }
+    state.partial_used = saved_partial;
+    if hits.len() == 1 {
+        hits.pop()
+    } else {
+        None
+    }
+}
+
+fn record_operands_fit(
+    decls: &[(String, Type)],
+    fields: &[(String, Operand)],
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+) -> bool {
+    let mut scratch = Vec::new();
+    for (fname, fty) in decls {
+        let Some((_, op)) = fields.iter().find(|(n, _)| n == fname) else {
+            return false;
+        };
+        let before = scratch.len();
+        let got = operand_ty(op, ctx, state, fns, Some(fty), &mut scratch);
+        if scratch.len() != before || !types_compatible(&got, fty) {
+            return false;
+        }
+    }
+    true
+}
+
+fn check_project(
+    span: &Span,
+    base: &str,
+    field: &str,
+    ctx: &Ctx,
+    state: &CheckState,
+    diags: &mut Vec<Diag>,
+) -> Type {
+    let Some(Type::Named(rname, _)) = ctx.types.get(base) else {
+        diags.push(type_diag(span.clone()));
+        return scalar("i64", span.clone());
+    };
+    let Some(fields) = state.record_types.get(rname) else {
+        diags.push(type_diag(span.clone()));
+        return scalar("i64", span.clone());
+    };
+    match fields.iter().find(|(n, _)| n == field) {
+        Some((_, ty)) => ty.clone(),
+        None => {
+            diags.push(type_diag(span.clone()));
+            scalar("i64", span.clone())
+        }
     }
 }
 
@@ -1264,25 +1609,6 @@ fn check_ok_err_rhs(
     } else {
         Type::Result(Box::new(unit), Box::new(written.clone()), span.clone())
     }
-}
-
-fn type_is_result_or_sum(
-    op: &Operand,
-    env: &HashMap<String, Type>,
-    sum_types: &HashMap<String, SumTypeInfo>,
-) -> bool {
-    match op {
-        Operand::Name(name, _) => env.get(name).is_some_and(|t| match t {
-            Type::Result(_, _, _) => true,
-            Type::Named(n, _) => sum_types.contains_key(n),
-            _ => false,
-        }),
-        _ => false,
-    }
-}
-
-fn type_is_list(ty: &Type) -> bool {
-    matches!(ty, Type::List(_, _))
 }
 
 fn resolve_fn(name: &str, fns: &[&FnItem]) -> Option<(Vec<Type>, Type)> {
@@ -1677,6 +2003,47 @@ mod tests {
         )
     }
 
+    fn check_ok(src: &str) -> bool {
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        check(&m, false).is_ok()
+    }
+
+    #[test]
+    fn list_cons_type_mismatch_is_etype() {
+        let src = "strake 1\n\nfn f() -> i64\n  e = list.empty bool\n  xs = list.cons 1 e\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(src));
+        let ok = "strake 1\n\nfn f() -> i64\n  e = list.empty i64\n  xs = list.cons 1 e\n  n = list.len xs\n  ret n\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_ok(ok));
+    }
+
+    #[test]
+    fn list_get_i32_index_is_etype() {
+        let src = "strake 1\n\nfn f() -> i64\n  e = list.empty i64\n  i = add i32 0 0\n  r = list.get e i\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(src));
+    }
+
+    #[test]
+    fn eq_list_and_record_is_etype() {
+        let list = "strake 1\n\nfn f() -> i64\n  e = list.empty i64\n  c = eq list i64 e e\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let rec = "strake 1\n\ntype Point { x: i64, y: i64 }\n\nfn f(a: Point, b: Point) -> i64\n  c = eq Point a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let sum = "strake 1\n\ntype Color { Blue unit | Red i64 }\n\nfn f(a: Color, b: Color) -> i64\n  c = eq Color a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(list));
+        assert!(check_errs(rec));
+        assert!(check_errs(sum));
+    }
+
+    #[test]
+    fn record_construct_and_project_types() {
+        let ok = "strake 1\n\ntype Point { x: i64, y: i64 }\n\nfn f() -> i64\n  p = { y: 5, x: 4 }\n  v = p.x\n  ret v\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_ok(ok));
+        let missing = "strake 1\n\ntype Point { x: i64, y: i64 }\n\nfn f() -> i64\n  p = { x: 4 }\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let bad_ty = "strake 1\n\ntype Point { x: i64, y: i64 }\n\nfn f() -> i64\n  p = { x: true, y: 1 }\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let unk = "strake 1\n\ntype Point { x: i64, y: i64 }\n\nfn g(p: Point) -> i64\n  v = p.z\n  ret v\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(missing));
+        assert!(check_errs(bad_ty));
+        assert!(check_errs(unk));
+    }
+
     #[test]
     fn ret_i32_accepts_small_literal() {
         let src = "strake 1\n\nfn f() -> i32\n  ret 1\nend\n\ntest t\n  ret 0\nend\n";
@@ -1847,5 +2214,58 @@ mod tests {
             })
             .collect();
         assert!(!test_matches_only_fn(tests[0], "target", &m));
+    }
+
+    #[test]
+    fn list_cons_onto_i32_accepts_fitting_literal() {
+        let ok = "strake 1\n\nfn f() -> i64\n  e = list.empty i32\n  xs = list.cons 1 e\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_ok(ok));
+        let wide = "strake 1\n\nfn f() -> i64\n  e = list.empty i32\n  xs = list.cons 3000000000 e\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let bool_head = "strake 1\n\nfn f() -> i64\n  e = list.empty i32\n  xs = list.cons true e\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(wide));
+        assert!(check_errs(bool_head));
+    }
+
+    #[test]
+    fn ordered_cmp_on_list_record_sum_result_bytes_is_etype() {
+        let list = "strake 1\n\nfn f() -> i64\n  e = list.empty i64\n  c = lt list i64 e e\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let rec = "strake 1\n\ntype Point { x: i64, y: i64 }\n\nfn f(a: Point, b: Point) -> i64\n  c = le Point a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let sum = "strake 1\n\ntype Color { Blue unit | Red i64 }\n\nfn f(a: Color, b: Color) -> i64\n  c = gt Color a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let result = "strake 1\n\nfn f(a: result i64 unit, b: result i64 unit) -> i64\n  c = ge result i64 unit a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let bytes = "strake 1\n\nfn f(a: bytes, b: bytes) -> i64\n  c = lt bytes a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(list));
+        assert!(check_errs(rec));
+        assert!(check_errs(sum));
+        assert!(check_errs(result));
+        assert!(check_errs(bytes));
+        let eq_bytes = "strake 1\n\nfn f(a: bytes, b: bytes) -> i64\n  c = eq bytes a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let lt_i64 =
+            "strake 1\n\nfn f() -> i64\n  c = lt i64 1 2\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_ok(eq_bytes));
+        assert!(check_ok(lt_i64));
+    }
+
+    #[test]
+    fn eq_unit_ne_unit_and_lt_bool_are_etype() {
+        let eq_unit = "strake 1\n\nfn f() -> i64\n  c = eq unit unit unit\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let ne_unit = "strake 1\n\nfn f() -> i64\n  c = ne unit unit unit\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let lt_bool = "strake 1\n\nfn f(a: bool, b: bool) -> i64\n  c = lt bool a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(eq_unit));
+        assert!(check_errs(ne_unit));
+        assert!(check_errs(lt_bool));
+        let eq_bool = "strake 1\n\nfn f(a: bool, b: bool) -> i64\n  c = eq bool a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let eq_bytes = "strake 1\n\nfn f(a: bytes, b: bytes) -> i64\n  c = eq bytes a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_ok(eq_bool));
+        assert!(check_ok(eq_bytes));
+    }
+
+    #[test]
+    fn record_literal_keeps_single_field_type_survivor() {
+        let ok = "strake 1\n\ntype A { x: i64 }\n\ntype B { x: bool }\n\nfn f() -> i64\n  p = { x: true }\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_ok(ok));
+        let amb = "strake 1\n\ntype A { x: i64 }\n\ntype C { x: i32 }\n\nfn f() -> i64\n  p = { x: 1 }\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let neither = "strake 1\n\ntype A { x: i64 }\n\ntype B { x: bool }\n\nfn f() -> i64\n  p = { x: x\"00\" }\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_errs(amb));
+        assert!(check_errs(neither));
     }
 }

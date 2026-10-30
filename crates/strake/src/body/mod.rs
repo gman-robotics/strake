@@ -6,6 +6,9 @@ pub mod interp;
 pub mod lower;
 pub mod syntax;
 
+#[cfg(test)]
+mod ssa_invariant;
+
 use interp::Program;
 use lower::LowerError;
 use syntax::Module;

@@ -1,10 +1,13 @@
 //! Reference interpreter for finished `Program`s.
 
+mod heap;
 pub(crate) mod ir;
 mod op;
 
 pub(crate) use ir::{Builder, FinishError};
 pub use ir::{Inst, Program};
+
+use heap::Heap;
 
 use crate::body::diag::{
     render_scalar_bool, render_scalar_i64, trap_diag, Code, Diag, ExportOutcome, Kind, Span,
@@ -23,7 +26,11 @@ pub enum Value {
     #[allow(dead_code)]
     Unit,
     Sum(u32),
+    /// Index into the append-only value heap.
+    Handle(u32),
 }
+
+pub(crate) type Val = Value;
 
 #[derive(Clone, Debug, PartialEq)]
 struct SumCell {
@@ -41,6 +48,10 @@ pub(crate) struct Machine<'a> {
     test_channel: bool,
     /// Successful call entries (host entry is call 1).
     pub(crate) call_entries: u64,
+    /// Append-only, like `sums`. Heap edges are strictly smaller indices.
+    /// A sum payload may hold a `Value::Handle` issued before that sum.
+    /// Neither store is rewritten, so no cycle can exist. `E_CYCLE` has no constructor.
+    heap: Heap,
     sums: Vec<SumCell>,
 }
 
@@ -83,6 +94,7 @@ impl<'a> Machine<'a> {
             result_diags: Vec::new(),
             test_channel,
             call_entries: 0,
+            heap: Heap::new(),
             sums: Vec::new(),
         }
     }
@@ -270,8 +282,16 @@ impl<'a> Machine<'a> {
                         _ => return Err(ExecFault::Codeless("eq bool type".into())),
                     }
                 } else {
-                    let (a, b) = self.two_i64(inst)?;
-                    a == b
+                    let a = self.read_reg(inst.args[0])?;
+                    let b = self.read_reg(inst.args[1])?;
+                    match (&a, &b) {
+                        (Value::Handle(x), Value::Handle(y)) => self.heap.bytes_eq(*x, *y)?,
+                        _ => {
+                            let ai = value_as_i64(&a)?;
+                            let bi = value_as_i64(&b)?;
+                            ai == bi
+                        }
+                    }
                 };
                 self.write_reg(inst.dst, Value::Bool(eq))?;
             }
@@ -329,27 +349,24 @@ impl<'a> Machine<'a> {
                     _ => RetImm::Normal,
                 };
                 let v = self.read_reg(inst.args[0])?;
-                let ret_i64 = value_as_i64(&v)?;
                 let is_normal_ret = matches!(&ret_imm, RetImm::Normal);
-                match ret_imm {
-                    RetImm::TestFail {
-                        want,
-                        got,
-                        diag_span,
-                    } => {
-                        let want_v = self.read_reg(want)?;
-                        let got_v = self.read_reg(got)?;
-                        let (want_s, got_s) = render_test_fail_scalars(&want_v, &got_v)?;
-                        self.result_diags.push(Diag {
-                            code: Code::ETest,
-                            kind: Kind::Result,
-                            span: diag_span,
-                            want: Some(want_s),
-                            got: Some(got_s),
-                            patch: None,
-                        });
-                    }
-                    RetImm::Normal => {}
+                if let RetImm::TestFail {
+                    want,
+                    got,
+                    diag_span,
+                } = &ret_imm
+                {
+                    let want_v = self.read_reg(*want)?;
+                    let got_v = self.read_reg(*got)?;
+                    let (want_s, got_s) = render_test_fail_scalars(&want_v, &got_v)?;
+                    self.result_diags.push(Diag {
+                        code: Code::ETest,
+                        kind: Kind::Result,
+                        span: diag_span.clone(),
+                        want: Some(want_s),
+                        got: Some(got_s),
+                        patch: None,
+                    });
                 }
                 let call_dst = self.frames.last().unwrap().pending_call_dst;
                 self.frames.pop();
@@ -359,6 +376,7 @@ impl<'a> Machine<'a> {
                         caller.regs[dst as usize] = Some(v);
                     }
                 } else if self.frames.is_empty() {
+                    let ret_i64 = value_as_i64(&v)?;
                     if self.test_channel && ret_i64 == 77 && is_normal_ret {
                         self.result_diags.push(Diag {
                             code: Code::ERefused,
@@ -453,6 +471,69 @@ impl<'a> Machine<'a> {
                 };
                 return Err(ExecFault::Trap { code, span });
             }
+            Op::ListEmpty => {
+                let h = self.heap.list_empty()?;
+                self.write_reg(inst.dst, Value::Handle(h))?;
+            }
+            Op::ListCons => {
+                let head = self.read_reg(inst.args[0])?;
+                let tail = self.reg_handle(inst.args[1])?;
+                let h = self.heap.list_cons(head, tail)?;
+                self.write_reg(inst.dst, Value::Handle(h))?;
+            }
+            Op::ListLen => {
+                let h = self.reg_handle(inst.args[0])?;
+                let n = self.heap.list_len(h)?;
+                self.write_reg(inst.dst, Value::I64(n))?;
+            }
+            Op::ListGet => {
+                let h = self.reg_handle(inst.args[0])?;
+                let idx = value_as_i64(&self.read_reg(inst.args[1])?)?;
+                let sum = match self.heap.list_get(h, idx)? {
+                    Some(v) => self.alloc_sum(0, v),
+                    None => self.alloc_sum(1, Value::Unit),
+                };
+                self.write_reg(inst.dst, sum)?;
+            }
+            Op::BytesNew => {
+                let bytes = match &inst.imm {
+                    Imm::Bytes(b) => b.clone(),
+                    _ => return Err(ExecFault::Codeless("bad bytes.new".into())),
+                };
+                let h = self.heap.bytes_new(bytes)?;
+                self.write_reg(inst.dst, Value::Handle(h))?;
+            }
+            Op::BytesLen => {
+                let h = self.reg_handle(inst.args[0])?;
+                let n = self.heap.bytes_len(h)?;
+                self.write_reg(inst.dst, Value::I64(n))?;
+            }
+            Op::BytesGet => {
+                let h = self.reg_handle(inst.args[0])?;
+                let idx = value_as_i64(&self.read_reg(inst.args[1])?)?;
+                let sum = match self.heap.bytes_get(h, idx)? {
+                    Some(n) => self.alloc_sum(0, Value::I64(n)),
+                    None => self.alloc_sum(1, Value::Unit),
+                };
+                self.write_reg(inst.dst, sum)?;
+            }
+            Op::RecNew => {
+                let mut fields = Vec::new();
+                for arg in &inst.args {
+                    fields.push(self.read_reg(*arg)?);
+                }
+                let h = self.heap.rec_new(fields)?;
+                self.write_reg(inst.dst, Value::Handle(h))?;
+            }
+            Op::RecGet => {
+                let h = self.reg_handle(inst.args[0])?;
+                let field = match inst.imm {
+                    Imm::U32(i) => i as usize,
+                    _ => return Err(ExecFault::Codeless("bad rec.get".into())),
+                };
+                let v = self.heap.rec_get(h, field)?;
+                self.write_reg(inst.dst, v)?;
+            }
             _ => {
                 return Err(ExecFault::Codeless(format!(
                     "unimplemented op {:?}",
@@ -488,6 +569,13 @@ impl<'a> Machine<'a> {
         let a = value_as_f64(&self.read_reg(inst.args[0])?)?;
         let b = value_as_f64(&self.read_reg(inst.args[1])?)?;
         Ok((a, b))
+    }
+
+    fn reg_handle(&self, r: VReg) -> Result<u32, ExecFault> {
+        match self.read_reg(r)? {
+            Value::Handle(h) => Ok(h),
+            _ => Err(ExecFault::Codeless("expected heap handle".into())),
+        }
     }
 
     fn read_reg(&self, r: VReg) -> Result<Value, ExecFault> {

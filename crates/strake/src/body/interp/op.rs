@@ -30,6 +30,15 @@ pub(crate) enum Op {
     SumNew,
     SumTag,
     SumPayload,
+    ListEmpty,
+    ListCons,
+    ListLen,
+    ListGet,
+    BytesNew,
+    BytesLen,
+    BytesGet,
+    RecNew,
+    RecGet,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

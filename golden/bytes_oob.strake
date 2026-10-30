@@ -1,0 +1,24 @@
+strake 1
+
+fn slot(b: bytes, i: i64) -> i64
+  r = bytes.get b i
+  match r
+    ok v ->
+      out = v
+    err _ ->
+      out = -1
+  end
+  ret out
+end
+
+test bytes.oob
+  b = bytes.new x"ff0a"
+  miss = call slot(b, 2)
+  assert.eq miss -1
+  neg = call slot(b, -1)
+  assert.eq neg -1
+  hit = call slot(b, 0)
+  assert.eq hit 255
+  mid = call slot(b, 1)
+  assert.eq mid 10
+end
