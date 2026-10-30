@@ -1182,7 +1182,7 @@ fn top_level_assigns(body: &[Stmt]) -> HashMap<String, (Type, Span)> {
 
 fn rhs_ty_hint(rhs: &Rhs) -> Type {
     match rhs {
-        Rhs::BinOp { ty, .. } => ty.clone(),
+        Rhs::BinOp { op, ty, span, .. } => binop_result_ty(op, ty, span),
         Rhs::Hole { ty, .. } => ty.clone(),
         _ => scalar("i64", empty_span()),
     }
@@ -1218,7 +1218,7 @@ fn check_rhs(
             if !types_compatible(&lt, ty) || !types_compatible(&rt, ty) {
                 diags.push(type_diag(span.clone()));
             }
-            ty.clone()
+            binop_result_ty(op, ty, span)
         }
         Rhs::Call { span, callee, args } => {
             let sig = resolve_fn(callee, fns);
@@ -1276,6 +1276,16 @@ fn check_rhs(
         Rhs::Record { span, fields } => check_record(span, fields, ctx, state, fns, diags),
         Rhs::Project { span, base, field } => check_project(span, base, field, ctx, state, diags),
         _ => scalar("i64", empty_span()),
+    }
+}
+
+/// Compares yield `bool`; arithmetic yields the operand type.
+fn binop_result_ty(op: &BinOp, ty: &Type, span: &Span) -> Type {
+    match op {
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            scalar("bool", span.clone())
+        }
+        _ => ty.clone(),
     }
 }
 

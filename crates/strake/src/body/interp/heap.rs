@@ -445,6 +445,34 @@ end
     }
 
     #[test]
+    fn compare_result_is_bool_for_record_pick() {
+        let src = r#"strake 1
+
+type A { y: i64, x: bytes }
+type B { x: bool, y: i64 }
+
+fn gety(p: B) -> i64
+  v = p.y
+  ret v
+end
+
+fn run() -> i64
+  a = bytes.new x"ff00"
+  b = bytes.new x"00ff"
+  c = ne bytes a b
+  p = { y: 7, x: c }
+  r = call gety(p)
+  ret r
+end
+
+test t
+  ret 0
+end
+"#;
+        assert_eq!(compile_run(src, "run"), 7);
+    }
+
+    #[test]
     fn ne_bytes_is_bytewise() {
         let src = r#"strake 1
 
