@@ -32,6 +32,20 @@ reference interpreter and `golden/` exist — Wasm/Cranelift are not part of the
 
 Eng is gated until a written re-review accepts the current docs tip.
 
+## Run the ub-gates report
+
+The `ub-gates` job in `.github/workflows/ci.yml` scores the merge-base diff with crapper, dryer, and mutator. It sets advisory mode (`UB_GATES_ADVISORY=1`), so findings and tool errors are reported and the job exits 0. The job does not fail the build.
+
+Rust coverage is `cargo llvm-cov` at the version in `scripts/ub-tools.lock`. The command creates `target/coverage/rust` and writes `lcov.info` there. The mutator test command is `cargo test --locked`.
+
+Before you open a pull request, run the gates on your machine in blocking mode. The container installs the tools. Nothing is installed on the host.
+
+```bash
+bash scripts/ub_gates_container.sh
+```
+
+`UB_GATES_ADVISORY` defaults to `0`, so a local run fails on findings in changed code. For a local report that exits 0, set `UB_GATES_ADVISORY=1`. The first line of output is the temp directory that received `.metrics`, including `ub-gates-outcome.txt`.
+
 ## License
 
 Licensed under either of
