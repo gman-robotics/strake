@@ -1519,6 +1519,11 @@ fn infer_rhs_type(
             Box::new(ty.clone()),
             span.clone(),
         )),
+        Rhs::BinOp {
+            op: BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
+            span,
+            ..
+        } => Some(Type::Named("bool".into(), span.clone())),
         Rhs::BinOp { ty, .. } => Some(ty.clone()),
         Rhs::Not { span, .. } => Some(Type::Named("bool".into(), span.clone())),
         Rhs::Hole { ty, .. } => Some(ty.clone()),
