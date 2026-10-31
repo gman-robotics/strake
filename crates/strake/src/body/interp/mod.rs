@@ -226,52 +226,113 @@ impl<'a> Machine<'a> {
         if inst.op != Op::Call && !skip_fuel {
             self.charge(1, span.clone())?;
         }
-        match inst.op {
-            Op::ConstI64 => {
-                let v = match inst.imm {
-                    Imm::I64(n) => Value::I64(n),
-                    _ => return Err(ExecFault::Codeless("bad const".into())),
-                };
-                self.write_reg(inst.dst, v)?;
+        let finished = match inst.op {
+            Op::ConstI64 | Op::ConstF64 | Op::ConstBool => {
+                self.exec_const(inst)?;
+                false
             }
-            Op::ConstF64 => {
-                let bits = match inst.imm {
-                    Imm::F64(b) => b,
-                    _ => return Err(ExecFault::Codeless("bad const".into())),
-                };
-                self.write_reg(inst.dst, Value::F64(f64::from_bits(bits)))?;
-            }
-            Op::ConstBool => {
-                let v = match inst.imm {
-                    Imm::Bool(b) => Value::Bool(b),
-                    _ => return Err(ExecFault::Codeless("bad const".into())),
-                };
-                self.write_reg(inst.dst, v)?;
-            }
-            Op::Add => {
-                let (a, b) = self.two_i64(inst)?;
-                self.write_reg(inst.dst, Value::I64(a.wrapping_add(b)))?;
-            }
-            Op::Sub => {
-                let (a, b) = self.two_i64(inst)?;
-                self.write_reg(inst.dst, Value::I64(a.wrapping_sub(b)))?;
-            }
-            Op::Mul => {
-                let (a, b) = self.two_i64(inst)?;
-                self.write_reg(inst.dst, Value::I64(a.wrapping_mul(b)))?;
+            Op::Add | Op::Sub | Op::Mul => {
+                self.exec_i64_binop(inst)?;
+                false
             }
             Op::Div => {
-                if matches!(inst.imm, Imm::F64(_)) {
-                    let (a, b) = self.two_f64(inst)?;
-                    self.write_reg(inst.dst, Value::F64(a / b))?;
-                } else if matches!(inst.imm, Imm::I32Width) {
-                    let (a, b) = self.two_i32(inst)?;
-                    self.write_reg(inst.dst, Value::I32(i32_div(a, b, span)?))?;
-                } else {
-                    let (a, b) = self.two_i64(inst)?;
-                    self.write_reg(inst.dst, Value::I64(i64_div(a, b, span)?))?;
-                }
+                self.exec_div(inst)?;
+                false
             }
+            Op::Eq | Op::Ge => {
+                self.exec_compare(inst)?;
+                false
+            }
+            Op::Call | Op::Ret | Op::Br | Op::BrIf | Op::BrTable | Op::Phi | Op::Trap => {
+                self.exec_control(inst, span)?
+            }
+            Op::SumNew
+            | Op::SumTag
+            | Op::SumPayload
+            | Op::ListEmpty
+            | Op::ListCons
+            | Op::ListLen
+            | Op::ListGet
+            | Op::BytesNew
+            | Op::BytesLen
+            | Op::BytesGet
+            | Op::RecNew
+            | Op::RecGet => {
+                self.exec_heap(inst)?;
+                false
+            }
+            _ => {
+                return Err(ExecFault::Codeless(format!(
+                    "unimplemented op {:?}",
+                    inst.op
+                )))
+            }
+        };
+        Ok(finished)
+    }
+
+    fn exec_const(&mut self, inst: &Inst) -> Result<(), ExecFault> {
+        match inst.op {
+            Op::ConstI64 => self.exec_const_i64(inst),
+            Op::ConstF64 => self.exec_const_f64(inst),
+            Op::ConstBool => self.exec_const_bool(inst),
+            _ => Err(ExecFault::Codeless("exec_const op".into())),
+        }
+    }
+
+    fn exec_const_i64(&mut self, inst: &Inst) -> Result<(), ExecFault> {
+        let v = match inst.imm {
+            Imm::I64(n) => Value::I64(n),
+            _ => return Err(ExecFault::Codeless("bad const".into())),
+        };
+        self.write_reg(inst.dst, v)
+    }
+
+    fn exec_const_f64(&mut self, inst: &Inst) -> Result<(), ExecFault> {
+        let bits = match inst.imm {
+            Imm::F64(b) => b,
+            _ => return Err(ExecFault::Codeless("bad const".into())),
+        };
+        self.write_reg(inst.dst, Value::F64(f64::from_bits(bits)))
+    }
+
+    fn exec_const_bool(&mut self, inst: &Inst) -> Result<(), ExecFault> {
+        let v = match inst.imm {
+            Imm::Bool(b) => Value::Bool(b),
+            _ => return Err(ExecFault::Codeless("bad const".into())),
+        };
+        self.write_reg(inst.dst, v)
+    }
+
+    fn exec_i64_binop(&mut self, inst: &Inst) -> Result<(), ExecFault> {
+        let (a, b) = self.two_i64(inst)?;
+        let out = match inst.op {
+            Op::Add => a.wrapping_add(b),
+            Op::Sub => a.wrapping_sub(b),
+            Op::Mul => a.wrapping_mul(b),
+            _ => return Err(ExecFault::Codeless("exec_i64_binop op".into())),
+        };
+        self.write_reg(inst.dst, Value::I64(out))?;
+        Ok(())
+    }
+
+    fn exec_div(&mut self, inst: &Inst) -> Result<(), ExecFault> {
+        let span = inst.span.clone();
+        if matches!(inst.imm, Imm::F64(_)) {
+            let (a, b) = self.two_f64(inst)?;
+            self.write_reg(inst.dst, Value::F64(a / b))?;
+        } else if matches!(inst.imm, Imm::I32Width) {
+            let (a, b) = self.two_i32(inst)?;
+            self.write_reg(inst.dst, Value::I32(i32_div(a, b, span)?))?;
+        } else {
+            let (a, b) = self.two_i64(inst)?;
+            self.write_reg(inst.dst, Value::I64(i64_div(a, b, span)?))?;
+        }
+        Ok(())
+    }
+
+    fn exec_compare(&mut self, inst: &Inst) -> Result<(), ExecFault> {
+        match inst.op {
             Op::Eq => {
                 let bool_cmp = matches!(inst.imm, Imm::Bool(true));
                 let eq = if bool_cmp {
@@ -299,6 +360,13 @@ impl<'a> Machine<'a> {
                 let (a, b) = self.two_i64(inst)?;
                 self.write_reg(inst.dst, Value::Bool(a >= b))?;
             }
+            _ => return Err(ExecFault::Codeless("exec_compare op".into())),
+        }
+        Ok(())
+    }
+
+    fn exec_control(&mut self, inst: &Inst, span: Span) -> Result<bool, ExecFault> {
+        match inst.op {
             Op::Call => {
                 let args: Vec<Value> = inst
                     .args
@@ -419,33 +487,6 @@ impl<'a> Machine<'a> {
                 }
                 self.jump(targets[idx], 0)?;
             }
-            Op::SumNew => {
-                let tag = match inst.imm {
-                    Imm::I32(t) => t as u32,
-                    _ => return Err(ExecFault::Codeless("bad sum.new tag".into())),
-                };
-                let payload = self.read_reg(inst.args[0])?;
-                let handle = self.alloc_sum(tag, payload);
-                self.write_reg(inst.dst, handle)?;
-            }
-            Op::SumTag => {
-                let scrut = self.read_reg(inst.args[0])?;
-                let handle = match scrut {
-                    Value::Sum(h) => h,
-                    _ => return Err(ExecFault::Codeless("sum.tag needs sum".into())),
-                };
-                let tag = self.sum_tag_of(handle)?;
-                self.write_reg(inst.dst, Value::I64(tag as i64))?;
-            }
-            Op::SumPayload => {
-                let scrut = self.read_reg(inst.args[0])?;
-                let handle = match scrut {
-                    Value::Sum(h) => h,
-                    _ => return Err(ExecFault::Codeless("sum.payload needs sum".into())),
-                };
-                let payload = self.sum_payload_of(handle)?;
-                self.write_reg(inst.dst, payload)?;
-            }
             Op::Phi => {
                 let preds = blocks_imm(&inst.imm)?;
                 let pred = self.frames.last().unwrap().edge_pred;
@@ -474,6 +515,40 @@ impl<'a> Machine<'a> {
                     TrapImm::Fallthrough => Code::EType,
                 };
                 return Err(ExecFault::Trap { code, span });
+            }
+            _ => return Err(ExecFault::Codeless("exec_control op".into())),
+        }
+        Ok(false)
+    }
+
+    fn exec_heap(&mut self, inst: &Inst) -> Result<(), ExecFault> {
+        match inst.op {
+            Op::SumNew => {
+                let tag = match inst.imm {
+                    Imm::I32(t) => t as u32,
+                    _ => return Err(ExecFault::Codeless("bad sum.new tag".into())),
+                };
+                let payload = self.read_reg(inst.args[0])?;
+                let handle = self.alloc_sum(tag, payload);
+                self.write_reg(inst.dst, handle)?;
+            }
+            Op::SumTag => {
+                let scrut = self.read_reg(inst.args[0])?;
+                let handle = match scrut {
+                    Value::Sum(h) => h,
+                    _ => return Err(ExecFault::Codeless("sum.tag needs sum".into())),
+                };
+                let tag = self.sum_tag_of(handle)?;
+                self.write_reg(inst.dst, Value::I64(tag as i64))?;
+            }
+            Op::SumPayload => {
+                let scrut = self.read_reg(inst.args[0])?;
+                let handle = match scrut {
+                    Value::Sum(h) => h,
+                    _ => return Err(ExecFault::Codeless("sum.payload needs sum".into())),
+                };
+                let payload = self.sum_payload_of(handle)?;
+                self.write_reg(inst.dst, payload)?;
             }
             Op::ListEmpty => {
                 let h = self.heap.list_empty()?;
@@ -538,14 +613,9 @@ impl<'a> Machine<'a> {
                 let v = self.heap.rec_get(h, field)?;
                 self.write_reg(inst.dst, v)?;
             }
-            _ => {
-                return Err(ExecFault::Codeless(format!(
-                    "unimplemented op {:?}",
-                    inst.op
-                )))
-            }
+            _ => return Err(ExecFault::Codeless("exec_heap op".into())),
         }
-        Ok(false)
+        Ok(())
     }
 
     fn jump(&mut self, block: usize, ip: usize) -> Result<(), ExecFault> {
@@ -966,5 +1036,73 @@ end
         let program = b.finish().expect("finish");
         let mut m = Machine::new(&program, 100, &EmptyHost);
         assert!(m.run_root_function(fidx).is_ok());
+    }
+
+    #[test]
+    fn exec_const_and_mul_via_test_exec_inst() {
+        let span = Span {
+            file: "t".into(),
+            start: 0,
+            end: 1,
+        };
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let entry = 0;
+        let _c = b.const_i64(entry, span.clone(), 5);
+        b.ret_i64(entry, span.clone(), 0);
+        let program = b.finish().expect("finish");
+        let mut m = Machine::new(&program, 10, &EmptyHost);
+        m.frames.push(Frame {
+            fn_idx: fidx,
+            block: 0,
+            ip: 0,
+            edge_pred: 0,
+            regs: vec![None],
+            pending_call_dst: None,
+        });
+        let inst = program.functions[fidx].blocks[0].insts[0].clone();
+        assert!(matches!(inst.op, Op::ConstI64));
+        assert!(!m.test_exec_inst(&inst).expect("const"));
+        let mul_inst = Inst {
+            op: Op::Mul,
+            dst: Some(2),
+            args: vec![0, 1],
+            imm: Imm::None,
+            span: span.clone(),
+        };
+        m.frames.last_mut().unwrap().regs = vec![Some(Value::I64(2)), Some(Value::I64(3)), None];
+        assert!(!m.test_exec_inst(&mul_inst).expect("mul"));
+        assert_eq!(m.frames.last().unwrap().regs[2], Some(Value::I64(6)));
+    }
+
+    #[test]
+    fn ge_i64_via_test_exec_inst() {
+        let span = Span {
+            file: "t".into(),
+            start: 0,
+            end: 1,
+        };
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let entry = 0;
+        let two = b.const_i64(entry, span.clone(), 2);
+        let three = b.const_i64(entry, span.clone(), 3);
+        let ge = b.ge_i64(entry, span.clone(), three, two);
+        b.ret_i64(entry, span.clone(), 0);
+        let program = b.finish().expect("finish");
+        let mut m = Machine::new(&program, 100, &EmptyHost);
+        m.frames.push(Frame {
+            fn_idx: fidx,
+            block: 0,
+            ip: 2,
+            edge_pred: 0,
+            regs: vec![Some(Value::I64(2)), Some(Value::I64(3)), None],
+            pending_call_dst: None,
+        });
+        let inst = program.functions[fidx].blocks[0].insts[2].clone();
+        assert_eq!(inst.op, Op::Ge);
+        assert!(!m.test_exec_inst(&inst).expect("ge"));
+        let out = m.frames.last().unwrap().regs[ge as usize].clone().unwrap();
+        assert_eq!(out, Value::Bool(true));
     }
 }

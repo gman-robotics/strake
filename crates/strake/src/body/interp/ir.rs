@@ -354,6 +354,29 @@ impl Builder {
         self.functions[fn_idx].blocks[block].insts.push(inst);
     }
 
+    fn emit_i64_binop(
+        &mut self,
+        block: usize,
+        span: Span,
+        op: Op,
+        lhs: VReg,
+        rhs: VReg,
+        imm: Imm,
+    ) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op,
+                dst: Some(dst),
+                args: vec![lhs, rhs],
+                imm,
+                span,
+            },
+        );
+        dst
+    }
+
     pub(crate) fn const_bool(&mut self, block: usize, span: Span, value: bool) -> VReg {
         let dst = self.alloc_vreg();
         self.emit(
@@ -385,48 +408,15 @@ impl Builder {
     }
 
     pub(crate) fn add_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
-        let dst = self.alloc_vreg();
-        self.emit(
-            block,
-            Inst {
-                op: Op::Add,
-                dst: Some(dst),
-                args: vec![lhs, rhs],
-                imm: Imm::None,
-                span,
-            },
-        );
-        dst
+        self.emit_i64_binop(block, span, Op::Add, lhs, rhs, Imm::None)
     }
 
     pub(crate) fn mul_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
-        let dst = self.alloc_vreg();
-        self.emit(
-            block,
-            Inst {
-                op: Op::Mul,
-                dst: Some(dst),
-                args: vec![lhs, rhs],
-                imm: Imm::None,
-                span,
-            },
-        );
-        dst
+        self.emit_i64_binop(block, span, Op::Mul, lhs, rhs, Imm::None)
     }
 
     pub(crate) fn sub_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
-        let dst = self.alloc_vreg();
-        self.emit(
-            block,
-            Inst {
-                op: Op::Sub,
-                dst: Some(dst),
-                args: vec![lhs, rhs],
-                imm: Imm::None,
-                span,
-            },
-        );
-        dst
+        self.emit_i64_binop(block, span, Op::Sub, lhs, rhs, Imm::None)
     }
 
     pub(crate) fn div_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
@@ -475,18 +465,7 @@ impl Builder {
     }
 
     pub(crate) fn eq_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
-        let dst = self.alloc_vreg();
-        self.emit(
-            block,
-            Inst {
-                op: Op::Eq,
-                dst: Some(dst),
-                args: vec![lhs, rhs],
-                imm: Imm::None,
-                span,
-            },
-        );
-        dst
+        self.emit_i64_binop(block, span, Op::Eq, lhs, rhs, Imm::None)
     }
 
     pub(crate) fn eq_bool(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
@@ -729,18 +708,7 @@ impl Builder {
     }
 
     pub(crate) fn ge_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
-        let dst = self.alloc_vreg();
-        self.emit(
-            block,
-            Inst {
-                op: Op::Ge,
-                dst: Some(dst),
-                args: vec![lhs, rhs],
-                imm: Imm::None,
-                span,
-            },
-        );
-        dst
+        self.emit_i64_binop(block, span, Op::Ge, lhs, rhs, Imm::None)
     }
 
     pub(crate) fn trap_lower(&mut self, block: usize, span: Span) {
