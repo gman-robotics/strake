@@ -520,7 +520,9 @@ fn check_stmt(
         ),
         Stmt::Loop {
             span, params, body, ..
-        } => check_stmt_loop_block(ctx, state, fns, in_fn, fn_ret, span, params, body, diags),
+        } => check_stmt_loop_block(
+            ctx, state, fns, in_fn, fn_ret, span, params, body, diags, false,
+        ),
         Stmt::Forall {
             span,
             binder,
@@ -685,6 +687,7 @@ fn check_stmt_loop_block(
     params: &[LoopParam],
     body: &[Stmt],
     diags: &mut Vec<Diag>,
+    nested: bool,
 ) {
     if params.is_empty() {
         diags.push(type_diag(span.clone()));
@@ -738,6 +741,9 @@ fn check_stmt_loop_block(
     if !site.breaks.is_empty() {
         for p in params {
             if let Some(ty) = loop_ctx.types.get(&p.name) {
+                if nested {
+                    loop_ctx.phi_gaps.remove(&p.name);
+                }
                 ctx.phi_gaps.remove(&p.name);
                 ctx.types.insert(p.name.clone(), ty.clone());
             }
@@ -877,64 +883,9 @@ fn check_nested_loop_in_loop_body(
     fn_ret: Option<&Type>,
     diags: &mut Vec<Diag>,
 ) {
-    if params.is_empty() {
-        diags.push(type_diag(span.clone()));
-        return;
-    }
-    let site_idx = state.carry.loops.len();
-    let param_names_vec: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-    let site_id = state.alloc_site_id();
-    state.carry.loops.push(LoopSite {
-        id: site_id,
-        span: span.clone(),
-        params: param_names_vec.clone(),
-        backedges: Vec::new(),
-        breaks: Vec::new(),
-    });
-    state.loop_stack.push(site_idx);
-    let mut loop_ctx = Ctx {
-        types: ctx.types.clone(),
-        phi_gaps: ctx.phi_gaps.clone(),
-        match_partial: ctx.match_partial.clone(),
-    };
-    let inner_params: HashSet<String> = param_names_vec.iter().cloned().collect();
-    for p in params {
-        let ty = operand_ty(&p.init, &loop_ctx, state, fns, None, diags);
-        loop_ctx.bind(&p.name, ty, p.span.clone(), diags);
-    }
-    for s in body {
-        check_stmt_loop(
-            s,
-            &mut loop_ctx,
-            state,
-            &inner_params,
-            fns,
-            in_fn,
-            fn_ret,
-            diags,
-        );
-    }
-    if stmts_may_fall_through(body) {
-        let operands: Vec<Operand> = param_names_vec
-            .iter()
-            .map(|n| Operand::Name(n.clone(), span.clone()))
-            .collect();
-        state.carry.loops[site_idx].backedges.push(BackEdge {
-            span: span.clone(),
-            operands,
-        });
-    }
-    state.loop_stack.pop();
-    let site = &state.carry.loops[site_idx];
-    if !site.breaks.is_empty() {
-        for p in params {
-            if let Some(ty) = loop_ctx.types.get(&p.name) {
-                loop_ctx.phi_gaps.remove(&p.name);
-                ctx.phi_gaps.remove(&p.name);
-                ctx.types.insert(p.name.clone(), ty.clone());
-            }
-        }
-    }
+    check_stmt_loop_block(
+        ctx, state, fns, in_fn, fn_ret, span, params, body, diags, true,
+    );
 }
 
 fn check_stmt_forall(
