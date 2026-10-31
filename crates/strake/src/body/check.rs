@@ -1208,20 +1208,39 @@ fn check_stmt_in_arm(
             binder,
             list,
             body,
-        } => {
-            if !ctx.types.contains_key(list) {
-                diags.push(type_diag(span.clone()));
-            }
-            if ctx.types.contains_key(binder) {
-                diags.push(shadow_diag(span.clone()));
-            } else {
-                ctx.types
-                    .insert(binder.clone(), scalar("i64", span.clone()));
-            }
-            for s in body {
-                check_stmt_in_arm(s, ctx, pre, state, fns, in_fn, fn_ret, loop_params, diags);
-            }
-        }
+        } => check_stmt_for_in_arm(
+            ctx,
+            pre,
+            state,
+            fns,
+            in_fn,
+            fn_ret,
+            loop_params,
+            span,
+            binder,
+            list,
+            body,
+            diags,
+        ),
+        Stmt::Forall {
+            span,
+            binder,
+            bound,
+            body,
+        } => check_stmt_forall_in_arm(
+            ctx,
+            pre,
+            state,
+            fns,
+            in_fn,
+            fn_ret,
+            loop_params,
+            span,
+            binder,
+            bound,
+            body,
+            diags,
+        ),
         Stmt::Loop {
             span, params, body, ..
         } => check_nested_loop_in_loop_body(
@@ -1252,7 +1271,101 @@ fn check_stmt_in_arm(
             diags,
         ),
         Stmt::Trap { .. } => {}
-        _ => {}
+        Stmt::AssertEq { span, got, want } => {
+            check_stmt_assert_eq(ctx, state, fns, in_fn, span, got, want, diags);
+        }
+    }
+}
+
+fn check_stmt_for_in_arm(
+    ctx: &mut Ctx,
+    pre: &HashMap<String, Type>,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    in_fn: bool,
+    fn_ret: Option<&Type>,
+    loop_params: Option<&HashSet<String>>,
+    span: &Span,
+    binder: &str,
+    list: &str,
+    body: &[Stmt],
+    diags: &mut Vec<Diag>,
+) {
+    if pre.contains_key(binder) {
+        diags.push(shadow_diag(span.clone()));
+        return;
+    }
+    let list_ty = ctx.types.get(list).cloned();
+    match list_ty {
+        Some(Type::List(elem, _)) => {
+            if ctx.types.contains_key(binder) {
+                diags.push(shadow_diag(span.clone()));
+            } else {
+                ctx.bind(binder, (*elem).clone(), span.clone(), diags);
+            }
+        }
+        _ => {
+            diags.push(type_diag(span.clone()));
+            if !ctx.types.contains_key(binder) {
+                ctx.bind(binder, scalar("i64", span.clone()), span.clone(), diags);
+            }
+        }
+    }
+    for s in body {
+        check_stmt_in_arm(s, ctx, pre, state, fns, in_fn, fn_ret, loop_params, diags);
+    }
+}
+
+fn check_stmt_forall_in_arm(
+    ctx: &mut Ctx,
+    pre: &HashMap<String, Type>,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    in_fn: bool,
+    fn_ret: Option<&Type>,
+    loop_params: Option<&HashSet<String>>,
+    span: &Span,
+    binder: &str,
+    bound: &ForallBound,
+    body: &[Stmt],
+    diags: &mut Vec<Diag>,
+) {
+    check_forall_bound(bound, state, diags);
+    let ty = forall_binder_ty(bound);
+    if pre.contains_key(binder) {
+        diags.push(shadow_diag(span.clone()));
+    }
+    let mut inner = Ctx {
+        types: ctx.types.clone(),
+        phi_gaps: ctx.phi_gaps.clone(),
+        match_partial: ctx.match_partial.clone(),
+    };
+    if inner.types.contains_key(binder) {
+        diags.push(shadow_diag(span.clone()));
+    } else {
+        inner.bind(binder, ty, span.clone(), diags);
+    }
+    let binder_name = binder.to_string();
+    for s in body {
+        if let Stmt::Assign {
+            name, span: sspan, ..
+        } = s
+        {
+            if name == &binder_name {
+                diags.push(shadow_diag(sspan.clone()));
+            }
+        }
+        check_stmt_in_arm(
+            s,
+            &mut inner,
+            pre,
+            state,
+            fns,
+            in_fn,
+            fn_ret,
+            loop_params,
+            diags,
+        );
     }
 }
 
@@ -1311,8 +1424,6 @@ fn check_forall_bound(bound: &ForallBound, state: &CheckState, diags: &mut Vec<D
             if hi_v < lo_v || span128 <= 0 || span128 > i64::MAX as i128 {
                 diags.push(forall_diag(span.clone()));
             }
-        } else {
-            diags.push(forall_diag(span.clone()));
         }
     }
 }
@@ -2302,6 +2413,18 @@ mod tests {
             CheckFailure::Codeless(_) => panic!("expected diags"),
         };
         assert!(err.iter().all(|d| d.code == Code::EForall));
+        assert_eq!(err.len(), 2, "one E_FORALL per missing module bind");
+    }
+
+    #[test]
+    fn forall_rev_in_match_arm_is_e_forall() {
+        let src = include_str!("../../../../golden/forall_rev_match_arm.strake");
+        let m = syntax::parse(src, "forall_rev_match_arm.strake").expect("parse");
+        let err = match check(&m, false).unwrap_err() {
+            CheckFailure::Diags(d) => d,
+            CheckFailure::Codeless(_) => panic!("expected diags"),
+        };
+        assert!(err.iter().any(|d| d.code == Code::EForall));
     }
 
     #[test]

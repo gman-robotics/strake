@@ -1,0 +1,14 @@
+strake 1
+
+test if_arm_for
+  e = list.empty i64
+  xs = list.cons 7 e
+  c = true
+  if c
+    for elt in xs
+      assert.eq elt 7
+    end
+  else
+    assert.eq 0 1
+  end
+end

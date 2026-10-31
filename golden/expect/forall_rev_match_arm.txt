@@ -1,0 +1,5 @@
+args: test golden/forall_rev_match_arm.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_FORALL","kind":"check","msg":"forall span empty, reversed, does not fit i64, or bounds not static i64","span":{"file":"golden/forall_rev_match_arm.strake","start":132,"end":133}}

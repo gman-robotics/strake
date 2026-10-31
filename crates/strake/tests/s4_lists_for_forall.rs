@@ -51,6 +51,38 @@ fn forall_list_bad_exits_3_no_e_forall() {
 }
 
 #[test]
+fn forall_rev_in_match_arm_exits_1_e_forall() {
+    let path = golden("forall_rev_match_arm.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(1));
+    assert!(stderr.contains("E_FORALL"));
+}
+
+#[test]
+fn if_arm_for_exits_0() {
+    let path = golden("if_arm_for.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn if_arm_forall_exits_0() {
+    let path = golden("if_arm_forall.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0));
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn match_arm_for_exits_0() {
+    let path = golden("match_arm_for.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0));
+    assert!(stderr.is_empty());
+}
+
+#[test]
 fn forall_rev_exec_counter_stays_zero() {
     let path = golden("forall_rev.strake");
     let bin = env!("CARGO_BIN_EXE_strake");

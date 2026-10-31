@@ -495,9 +495,14 @@ fn lower_stmt(
             b.trap_user(block, span.clone());
             Ok(block)
         }
-        _ => Err(LowerError::unsupported(
-            "statement not supported in this slice",
-        )),
+        Stmt::AssertEq { span, got, want } => {
+            if !in_test {
+                return Err(LowerError::unsupported(
+                    "assert.eq outside test/property body",
+                ));
+            }
+            lower_assert_eq(b, block, span, got, want, env, &plan.known_ty)
+        }
     }
 }
 
@@ -940,68 +945,12 @@ fn lower_if_arm(
     let mut cur = block;
     let mut join_v = None;
     for stmt in body {
-        cur = match stmt {
-            Stmt::Assign { name, rhs, .. } => {
-                let (next, v) = lower_assign_rhs(b, cur, rhs, &env, plan, maps).map_err(|_| ())?;
-                cur = next;
-                note_record(plan, name, rhs);
-                if join_v.is_none() {
-                    join_v = Some(v);
-                }
-                env.insert(name.clone(), v);
-                cur
+        cur = lower_stmt(b, cur, stmt, &mut env, loops, plan, maps, in_test).map_err(|_| ())?;
+        if join_v.is_none() {
+            if let Stmt::Assign { name, .. } = stmt {
+                join_v = env.get(name).copied();
             }
-            Stmt::If {
-                span,
-                cond,
-                then_body,
-                else_body,
-            } => lower_if(
-                b, cur, span, cond, then_body, else_body, &mut env, loops, plan, maps, in_test,
-            )
-            .map_err(|_| ())?,
-            Stmt::Loop { span, params, body } => {
-                cur = lower_loop(
-                    b, cur, span, params, body, &mut env, loops, plan, maps, in_test,
-                )
-                .map_err(|_| ())?;
-                cur
-            }
-            Stmt::Break { span } => {
-                let frame = loops.last_mut().ok_or(())?;
-                record_break(b, cur, span.clone(), frame, &env).map_err(|_| ())?;
-                cur
-            }
-            Stmt::Continue { span, edges } => {
-                let frame = loops.last_mut().ok_or(())?;
-                record_continue(b, cur, span.clone(), edges, frame, &env).map_err(|_| ())?;
-                cur
-            }
-            Stmt::Match {
-                span,
-                scrutinee,
-                arms,
-            } => lower_match(
-                b, cur, span, scrutinee, arms, &mut env, loops, plan, maps, in_test,
-            )
-            .map_err(|_| ())?,
-            Stmt::Ret { span, value } => {
-                let v = lower_operand(b, cur, value, &env).map_err(|_| ())?;
-                b.ret(cur, span.clone(), v);
-                cur
-            }
-            Stmt::Trap { span } => {
-                b.trap_user(cur, span.clone());
-                cur
-            }
-            Stmt::AssertEq { span, got, want } => {
-                if !in_test {
-                    return Err(());
-                }
-                lower_assert_eq(b, cur, span, got, want, &env, &plan.known_ty).map_err(|_| ())?
-            }
-            _ => return Err(()),
-        };
+        }
     }
     let span = Span {
         file: "lower".into(),

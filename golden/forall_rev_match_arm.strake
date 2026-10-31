@@ -1,0 +1,15 @@
+strake 1
+
+type r { ok i64 | err unit }
+
+property forall_rev_in_match
+  v = ok i64 0
+  match v
+    ok _ ->
+      forall n: i64 in 5..1
+        trap
+      end
+    err _ ->
+      trap
+  end
+end
