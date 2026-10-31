@@ -54,6 +54,33 @@ _SPANS = [
         "path": "lib/a.py",
     },
 ]
+_TIMEOUT_AFTER_LOG = """#!/usr/bin/env python3
+import os
+import signal
+import subprocess
+import sys
+import time
+
+cmd = sys.argv[2:]
+log = LOG_PATH
+proc = subprocess.Popen(cmd, start_new_session=True)
+deadline = time.time() + 15
+while time.time() < deadline:
+    if os.path.isfile(log) and os.path.getsize(log) > 0:
+        break
+    if proc.poll() is not None:
+        break
+    time.sleep(0.05)
+try:
+    os.killpg(proc.pid, signal.SIGTERM)
+except ProcessLookupError:
+    pass
+proc.wait()
+if not (os.path.isfile(log) and os.path.getsize(log) > 0):
+    sys.stderr.write("mutator log missing\\n")
+    sys.exit(2)
+sys.exit(124)
+"""
 _TIMEOUT_SHIM = """#!/usr/bin/env bash
 secs="$1"
 shift
@@ -340,11 +367,18 @@ class AdvisoryGateTests(unittest.TestCase):
                 dry="{:candidates []}\n",
                 mutator="#!/usr/bin/env bash\necho \"$@\" >> LOG\nsleep 30\nexit 0\n",
             )
-            env["UB_GATES_MUTATOR_BUDGET_SECS"] = "1"
+            # A 1-second wall clock can end inside the scope-lines process,
+            # before the mutator writes its log. This stub returns 124 only
+            # after that log exists; the budget is large enough to start.
+            _write_exe(
+                bin_dir / "timeout",
+                _TIMEOUT_AFTER_LOG.replace("LOG_PATH", repr(str(repo / "mutator.log"))),
+            )
+            env["UB_GATES_MUTATOR_BUDGET_SECS"] = "60"
             proc = _run_ci(repo, env)
             self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             text = proc.stdout + proc.stderr
-            self.assertIn("mutator budget 1s", text)
+            self.assertIn("mutator budget 60s", text)
             self.assertIn("non-blocking", text)
             outcome = _outcome(repo)
             self.assertIn("mutator_timeout=1", outcome)
