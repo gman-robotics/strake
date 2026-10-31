@@ -1,0 +1,9 @@
+strake 1
+
+property bad_list
+  t0 = list.empty i64
+  xs = list.cons 1 t0
+  forall n: i64 in xs
+    assert.eq n n
+  end
+end

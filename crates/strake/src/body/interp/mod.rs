@@ -295,6 +295,10 @@ impl<'a> Machine<'a> {
                 };
                 self.write_reg(inst.dst, Value::Bool(eq))?;
             }
+            Op::Ge => {
+                let (a, b) = self.two_i64(inst)?;
+                self.write_reg(inst.dst, Value::Bool(a >= b))?;
+            }
             Op::Call => {
                 let args: Vec<Value> = inst
                     .args

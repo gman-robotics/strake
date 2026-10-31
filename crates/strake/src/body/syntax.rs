@@ -20,6 +20,16 @@ pub enum Item {
     Use(UseDecl),
     Fuel(i128, Span),
     Pages(i128, Span),
+    Bind {
+        span: Span,
+        name: String,
+        value: i128,
+    },
+    ListBind {
+        span: Span,
+        name: String,
+        rhs: Rhs,
+    },
     Fn(FnItem),
     Test(TestItem),
     Property(PropertyItem),
@@ -189,12 +199,18 @@ pub struct MatchArm {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum StaticI64 {
+    Lit(i128, Span),
+    Name(String, Span),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ForallBound {
     Range {
         span: Span,
         ty: Type,
-        lo: i128,
-        hi: i128,
+        lo: StaticI64,
+        hi: StaticI64,
     },
     List {
         span: Span,
@@ -322,6 +338,14 @@ pub fn format(module: &Module) -> String {
 pub fn codeless_rejection(module: &Module) -> Option<&'static str> {
     let mut fuel = 0u32;
     let mut pages = 0u32;
+    let module_list_names: std::collections::HashSet<String> = module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::ListBind { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
     let priv_fns: std::collections::HashSet<String> = module
         .items
         .iter()
@@ -347,10 +371,59 @@ pub fn codeless_rejection(module: &Module) -> Option<&'static str> {
             Item::Test(t) if test_calls_priv(t, &priv_fns) => {
                 return Some("tests must call exported functions only");
             }
+            Item::Property(p) => {
+                if block_has_forall_list_bad(&p.body, &module_list_names) {
+                    return Some("list forall must use a module-level list literal binding");
+                }
+            }
             _ => {}
         }
     }
     None
+}
+
+fn block_has_forall_list_bad(
+    stmts: &[Stmt],
+    module_list_names: &std::collections::HashSet<String>,
+) -> bool {
+    for stmt in stmts {
+        if let Stmt::Forall {
+            bound: ForallBound::List { name, .. },
+            ..
+        } = stmt
+        {
+            if !module_list_names.contains(name) {
+                return true;
+            }
+        }
+        if walk_stmt_forall_list(stmt, module_list_names) {
+            return true;
+        }
+    }
+    false
+}
+
+fn walk_stmt_forall_list(
+    stmt: &Stmt,
+    module_list_names: &std::collections::HashSet<String>,
+) -> bool {
+    match stmt {
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            block_has_forall_list_bad(then_body, module_list_names)
+                || block_has_forall_list_bad(else_body, module_list_names)
+        }
+        Stmt::Loop { body, .. } | Stmt::For { body, .. } | Stmt::Forall { body, .. } => {
+            block_has_forall_list_bad(body, module_list_names)
+        }
+        Stmt::Match { arms, .. } => arms
+            .iter()
+            .any(|a| block_has_forall_list_bad(&a.body, module_list_names)),
+        _ => false,
+    }
 }
 
 fn test_calls_priv(test: &TestItem, priv_fns: &std::collections::HashSet<String>) -> bool {
@@ -630,9 +703,20 @@ impl<'a> Lexer<'a> {
         let start = self.byte_pos();
         let mut s = String::new();
         while let Some(b) = self.peek_byte() {
-            if b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'%' {
+            if b.is_ascii_alphanumeric() || b == b'_' || b == b'%' {
                 s.push(b as char);
                 self.bump();
+            } else if b == b'.' {
+                let next = self.src[self.i + 1..].bytes().next();
+                if next == Some(b'.') {
+                    break;
+                }
+                if next.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                    s.push('.');
+                    self.bump();
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
@@ -909,6 +993,9 @@ impl<'a> Parser<'a> {
                 },
             ));
         }
+        if let Some(item) = self.try_parse_module_bind(s)? {
+            return Ok(item);
+        }
         let private = self.eat_ident("priv")?;
         if self.eat_ident("fn")? {
             return Ok(Item::Fn(self.parse_fn(s, private)?));
@@ -918,6 +1005,48 @@ impl<'a> Parser<'a> {
         }
         if self.eat_ident("property")? {
             return Ok(Item::Property(self.parse_property(s)?));
+        }
+        Err(self.err_here())
+    }
+
+    fn try_parse_module_bind(&mut self, start: u32) -> Result<Option<Item>, Diag> {
+        let Some((Tok::Ident(name), nst, nen)) = self.cur.clone() else {
+            return Ok(None);
+        };
+        if matches!(
+            name.as_str(),
+            "type" | "import" | "use" | "fuel" | "pages" | "priv" | "fn" | "test" | "property"
+        ) {
+            return Ok(None);
+        }
+        Self::check_user_name(&name, (nst, nen), self.file)?;
+        match self.peek_token_at(nen) {
+            Ok(Some((Tok::Eq, _, _))) => {}
+            _ => return Ok(None),
+        }
+        self.bump()?;
+        if !self.eat_tok(Tok::Eq)? {
+            return Ok(None);
+        }
+        if let Some((Tok::Int(v), _, ven)) = self.cur.clone() {
+            self.bump()?;
+            return Ok(Some(Item::Bind {
+                span: span(self.file, start, ven),
+                name,
+                value: v,
+            }));
+        }
+        if self.cur_ident() == Some("list.empty") || self.cur_ident() == Some("list.cons") {
+            let rhs = self.parse_rhs(start)?;
+            if !rhs_is_list_literal(&rhs) {
+                return Err(self.err_here());
+            }
+            let end = self.lex.byte_pos();
+            return Ok(Some(Item::ListBind {
+                span: span(self.file, start, end),
+                name,
+                rhs,
+            }));
         }
         Err(self.err_here())
     }
@@ -1404,25 +1533,61 @@ impl<'a> Parser<'a> {
             return Err(self.err_here());
         }
         let bound = if matches!(&self.cur, Some((Tok::Int(_), _, _))) {
-            let (lo, lst, _len) = self.expect_int()?;
+            let (lo_n, lst, len) = self.expect_int()?;
+            let lo = StaticI64::Lit(lo_n, span(self.file, lst, len));
             if !self.eat_tok(Tok::DotDot)? {
                 return Err(self.err_here());
             }
-            let (hi, _hst, hen) = self.expect_int()?;
+            let hi = if matches!(&self.cur, Some((Tok::Int(_), _, _))) {
+                let (n, hst, hen) = self.expect_int()?;
+                StaticI64::Lit(n, span(self.file, hst, hen))
+            } else {
+                let (name, hst, hen) = self.expect_ident()?;
+                Self::check_user_name(&name, (hst, hen), self.file)?;
+                StaticI64::Name(name, span(self.file, hst, hen))
+            };
+            let bound_span = match &hi {
+                StaticI64::Lit(_, s) => s.clone(),
+                StaticI64::Name(_, s) => s.clone(),
+            };
             ForallBound::Range {
-                span: span(self.file, lst, hen),
+                span: bound_span,
                 ty,
                 lo,
                 hi,
             }
-        } else {
+        } else if matches!(&self.cur, Some((Tok::Ident(_), _, _))) {
             let (name, nst, nen) = self.expect_ident()?;
             Self::check_user_name(&name, (nst, nen), self.file)?;
-            ForallBound::List {
-                span: span(self.file, nst, nen),
-                ty,
-                name,
+            if self.eat_tok(Tok::DotDot)? {
+                let lo = StaticI64::Name(name, span(self.file, nst, nen));
+                let hi = if matches!(&self.cur, Some((Tok::Int(_), _, _))) {
+                    let (n, hst, hen) = self.expect_int()?;
+                    StaticI64::Lit(n, span(self.file, hst, hen))
+                } else {
+                    let (hi_name, hst, hen) = self.expect_ident()?;
+                    Self::check_user_name(&hi_name, (hst, hen), self.file)?;
+                    StaticI64::Name(hi_name, span(self.file, hst, hen))
+                };
+                let bound_span = match &hi {
+                    StaticI64::Lit(_, s) => s.clone(),
+                    StaticI64::Name(_, s) => s.clone(),
+                };
+                ForallBound::Range {
+                    span: bound_span,
+                    ty,
+                    lo,
+                    hi,
+                }
+            } else {
+                ForallBound::List {
+                    span: span(self.file, nst, nen),
+                    ty,
+                    name,
+                }
             }
+        } else {
+            return Err(self.err_here());
         };
         let body = self.parse_block(ctx)?;
         let end = self.lex.byte_pos();
@@ -1764,6 +1929,17 @@ fn operand_span_end(op: &Operand) -> u32 {
     }
 }
 
+fn format_static_i64(b: &StaticI64) -> String {
+    match b {
+        StaticI64::Lit(n, _) => n.to_string(),
+        StaticI64::Name(name, _) => name.clone(),
+    }
+}
+
+fn rhs_is_list_literal(rhs: &Rhs) -> bool {
+    matches!(rhs, Rhs::ListEmpty { .. } | Rhs::ListCons { .. })
+}
+
 fn span(file: &str, start: u32, end: u32) -> Span {
     Span {
         file: file.to_string(),
@@ -1944,6 +2120,12 @@ impl Fmt {
             Item::Use(u) => self.format_use(u),
             Item::Fuel(n, _) => self.writeln(&format!("fuel {}", n)),
             Item::Pages(n, _) => self.writeln(&format!("pages {}", n)),
+            Item::Bind { name, value, .. } => {
+                self.writeln(&format!("{name} = {value}"));
+            }
+            Item::ListBind { name, rhs, .. } => {
+                self.writeln(&format!("{name} = {}", self.format_rhs(rhs)));
+            }
             Item::Fn(f) => self.format_fn(f),
             Item::Test(t) => self.format_test(t),
             Item::Property(p) => self.format_property(p),
@@ -2170,8 +2352,8 @@ impl Fmt {
                             "forall {}: {} in {}..{}",
                             binder,
                             self.type_string(ty),
-                            lo,
-                            hi
+                            format_static_i64(lo),
+                            format_static_i64(hi)
                         )
                     }
                     ForallBound::List { ty, name, .. } => {
@@ -2632,6 +2814,21 @@ end
         let m = parse(src, "t.strake").expect("parse");
         let f = format(&m);
         assert!(f.contains("forall n: i32 in 0..1"));
+    }
+
+    #[test]
+    fn parse_forall_list_local_name() {
+        let src =
+            "strake 1\n\nproperty p\n  t0 = list.empty i64\n  forall n: i64 in t0\n  end\nend\n";
+        parse(src, "t.strake").expect("parse forall list");
+    }
+
+    #[test]
+    fn forall_module_bind_range_lo_dotdot_hi_parses() {
+        let src = "strake 1\n\nlo = 0\nhi = 2\n\nproperty p\n  forall n: i64 in lo..hi\n    ret 0\n  end\nend\n";
+        parse(src, "t.strake").expect("lo..hi range");
+        let spaced = "strake 1\n\nlo = 0\nhi = 2\n\nproperty p\n  forall n: i64 in lo .. hi\n    ret 0\n  end\nend\n";
+        parse(spaced, "t.strake").expect("lo .. hi range");
     }
 
     #[test]

@@ -728,6 +728,34 @@ impl Builder {
         );
     }
 
+    pub(crate) fn ge_i64(&mut self, block: usize, span: Span, lhs: VReg, rhs: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Ge,
+                dst: Some(dst),
+                args: vec![lhs, rhs],
+                imm: Imm::None,
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn trap_lower(&mut self, block: usize, span: Span) {
+        self.emit(
+            block,
+            Inst {
+                op: Op::Trap,
+                dst: None,
+                args: Vec::new(),
+                imm: Imm::Trap(TrapImm::Lower),
+                span,
+            },
+        );
+    }
+
     fn br(&mut self, block: usize, span: Span, target: usize) {
         self.emit(
             block,
@@ -971,6 +999,17 @@ impl Builder {
                 span,
             },
         );
+    }
+
+    pub(crate) fn cond_branch(
+        &mut self,
+        block: usize,
+        span: Span,
+        cond: VReg,
+        then_target: usize,
+        else_target: usize,
+    ) {
+        self.br_if(block, span, cond, then_target, else_target);
     }
 
     /// `assert.eq` desugar: on mismatch `ret` with `TestFail` sidecar, else continue.
@@ -1219,6 +1258,18 @@ mod tests {
             start: 0,
             end: 1,
         }
+    }
+
+    #[test]
+    fn trap_lower_emits_trap_opcode() {
+        let mut b = Builder::new();
+        b.begin_function("f", 0);
+        let entry = 0;
+        b.trap_lower(entry, span());
+        let program = b.finish().expect("finish");
+        let inst = &program.functions[0].blocks[0].insts[0];
+        assert_eq!(inst.op, Op::Trap);
+        assert!(matches!(inst.imm, Imm::Trap(TrapImm::Lower)));
     }
 
     #[test]
