@@ -2897,6 +2897,68 @@ end
     }
 
     #[test]
+    fn parse_forall_eparse_branches() {
+        let bad = [
+            "forall n i64 in 0..1",
+            "forall n: i64 0..1",
+            "forall n: i64 in 0",
+            "forall n: i64 in ..1",
+        ];
+        for body in bad {
+            let src = format!("strake 1\n\nproperty p\n  {body}\n  end\nend\n");
+            let err = parse(&src, "t.strake").unwrap_err();
+            assert_eq!(err.code, Code::EParse, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn parse_forall_range_literal_and_name_hi() {
+        let lit = "strake 1\n\nproperty p\n  forall n: i64 in 0..2\n  end\nend\n";
+        let m = parse(lit, "t.strake").expect("lit range");
+        let Item::Property(p) = &m.items[0] else {
+            panic!("property")
+        };
+        let Stmt::Forall { bound, .. } = &p.body[0] else {
+            panic!("forall")
+        };
+        assert!(matches!(bound, ForallBound::Range { .. }));
+        let name_hi = "strake 1\n\nhi = 2\n\nproperty p\n  forall n: i64 in 0..hi\n  end\nend\n";
+        parse(name_hi, "t.strake").expect("name hi");
+    }
+
+    #[test]
+    fn try_parse_module_bind_skips_item_keywords() {
+        let src = "strake 1\n\nfn f() -> unit\n  ret unit\nend\n\ntest t\n  ret 0\nend\n";
+        parse(src, "t.strake").expect("fn not module bind");
+        let pages = "strake 1\npages 1\n\nfn f() -> unit\n  ret unit\nend\n";
+        parse(pages, "t.strake").expect("pages");
+    }
+
+    #[test]
+    fn format_item_module_binds_and_property() {
+        let src = "strake 1\n\nlo = 1\nxs = list.empty i64\n\nproperty p\n  forall n: i64 in lo..2\n  end\nend\n\nfn f() -> i64\n  ret lo\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let out = format(&m);
+        assert!(out.contains("lo = 1"));
+        assert!(out.contains("xs = list.empty i64"));
+        assert!(out.contains("forall n: i64 in lo..2"));
+        let m2 = parse(&out, "t.strake").expect("reparse");
+        assert_eq!(format(&m2), out);
+    }
+
+    #[test]
+    fn parse_item_fn_test_property_paths() {
+        let src = "strake 1\n\npriv fn h() -> unit\n  ret unit\nend\n\ntest t\n  ret 0\nend\n\nproperty p\n  forall n: i64 in 0..0\n  end\nend\n";
+        parse(src, "t.strake").expect("exports");
+    }
+
+    #[test]
+    fn lex_dotted_field_name_in_assign() {
+        let src = "strake 1\n\ntype pair { x: i64 }\n\nfn f(p: pair) -> i64\n  v = p.x\n  w = add i64 v 1\n  ret w\nend\n";
+        parse(src, "t.strake").expect("dotted");
+    }
+
+    #[test]
     fn forall_module_bind_range_lo_dotdot_hi_parses() {
         let src = "strake 1\n\nlo = 0\nhi = 2\n\nproperty p\n  forall n: i64 in lo..hi\n    ret 0\n  end\nend\n";
         parse(src, "t.strake").expect("lo..hi range");
@@ -3361,5 +3423,32 @@ end
         let src = "strake 1\n\ntype r { ok i64 | err unit }\n\nproperty p\n  x = ok i64 0\n  match x\n    ok _ ->\n      forall n: i64 in xs\n      end\n  end\nend\n";
         let m = parse(src, "t.strake").expect("parse");
         assert!(codeless_rejection(&m).is_some());
+    }
+
+    #[test]
+    fn parse_int_module_bind_and_item_keywords() {
+        let src = "strake 1\nfuel 5\npages 2\n\nlo = 0\n\nfn f() -> i64\n  ret lo\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        assert!(matches!(&m.items[0], Item::Fuel(5, _)));
+        assert!(matches!(&m.items[1], Item::Pages(2, _)));
+        assert!(
+            matches!(&m.items[2], Item::Bind { name, value, .. } if name == "lo" && *value == 0)
+        );
+        let round = format(&m);
+        let m2 = parse(&round, "t.strake").expect("reparse");
+        assert_eq!(format(&m2), round);
+    }
+
+    #[test]
+    fn parse_forall_list_with_module_list_bind() {
+        let src = "strake 1\n\nxs = list.empty i64\n\nproperty p\n  forall x: i64 in xs\n    y = add i64 x 0\n  end\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let Item::Property(p) = &m.items[1] else {
+            panic!("property")
+        };
+        let Stmt::Forall { bound, .. } = &p.body[0] else {
+            panic!("forall")
+        };
+        assert!(matches!(bound, ForallBound::List { name, .. } if name == "xs"));
     }
 }

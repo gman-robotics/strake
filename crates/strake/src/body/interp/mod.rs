@@ -665,6 +665,24 @@ fn exec_codeless(msg: &str) -> ExecFault {
     ExecFault::Codeless(msg.into())
 }
 
+macro_rules! value_or_err {
+    ($v:expr, $msg:expr, $($pat:pat => $out:expr),+ $(,)?) => {
+        match $v {
+            $($pat => Ok($out),)+
+            _ => Err(exec_codeless($msg)),
+        }
+    };
+}
+
+macro_rules! imm_or_err {
+    ($imm:expr, $msg:expr, $($pat:pat => $out:expr),+ $(,)?) => {
+        match $imm {
+            $($pat => Ok($out),)+
+            _ => Err(exec_codeless($msg)),
+        }
+    };
+}
+
 fn value_as_i64(v: &Value) -> Result<i64, ExecFault> {
     match v {
         Value::I64(n) => Ok(*n),
@@ -675,32 +693,22 @@ fn value_as_i64(v: &Value) -> Result<i64, ExecFault> {
 }
 
 fn value_as_i32(v: &Value) -> Result<i32, ExecFault> {
-    match v {
-        Value::I32(n) => Ok(*n),
-        Value::I64(n) => Ok(*n as i32),
-        _ => Err(exec_codeless("expected i32")),
-    }
+    value_or_err!(v, "expected i32",
+        Value::I32(n) => *n,
+        Value::I64(n) => *n as i32,
+    )
 }
 
 fn value_as_f64(v: &Value) -> Result<f64, ExecFault> {
-    match v {
-        Value::F64(n) => Ok(*n),
-        _ => Err(exec_codeless("expected f64")),
-    }
+    value_or_err!(v, "expected f64", Value::F64(n) => *n)
 }
 
 fn block_imm(imm: &Imm) -> Result<usize, ExecFault> {
-    match imm {
-        Imm::Block(b) => Ok(*b),
-        _ => Err(exec_codeless("expected block imm")),
-    }
+    imm_or_err!(imm, "expected block imm", Imm::Block(b) => *b)
 }
 
 fn blocks_imm(imm: &Imm) -> Result<Vec<usize>, ExecFault> {
-    match imm {
-        Imm::Blocks(b) => Ok(b.clone()),
-        _ => Err(exec_codeless("expected blocks imm")),
-    }
+    imm_or_err!(imm, "expected blocks imm", Imm::Blocks(b) => b.clone())
 }
 
 /// One test/property export run: status input plus any result-channel diags.
@@ -1052,5 +1060,18 @@ end
         m.test_exec_ge(&inst).expect("ge");
         let out = m.frames.last().unwrap().regs[ge as usize].clone().unwrap();
         assert_eq!(out, Value::Bool(true));
+    }
+
+    #[test]
+    fn value_as_and_imm_helpers() {
+        assert_eq!(value_as_i32(&Value::I32(7)).unwrap(), 7);
+        assert_eq!(value_as_i32(&Value::I64(9)).unwrap(), 9);
+        assert!(value_as_i32(&Value::Bool(true)).is_err());
+        assert_eq!(value_as_f64(&Value::F64(1.5)).unwrap(), 1.5);
+        assert!(value_as_f64(&Value::I64(1)).is_err());
+        assert_eq!(block_imm(&Imm::Block(3)).unwrap(), 3);
+        assert!(block_imm(&Imm::Blocks(vec![1])).is_err());
+        assert_eq!(blocks_imm(&Imm::Blocks(vec![1, 2])).unwrap(), vec![1, 2]);
+        assert!(blocks_imm(&Imm::Block(0)).is_err());
     }
 }

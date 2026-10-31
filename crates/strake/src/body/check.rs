@@ -2401,4 +2401,31 @@ mod tests {
         assert!(check_errs(amb));
         assert!(check_errs(neither));
     }
+
+    #[test]
+    fn for_over_list_and_module_int_bind() {
+        let for_src = "strake 1\n\nfn f() -> unit\n  t0 = list.empty i64\n  for x in t0\n    ret unit\n  end\n  ret unit\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_ok(for_src));
+        let bind_src = "strake 1\n\nlo = 0\n\nproperty p\n  forall n: i64 in lo..1\n  end\nend\n";
+        assert!(check_ok(bind_src));
+    }
+
+    #[test]
+    fn check_stmt_if_and_assign_paths() {
+        let src = "strake 1\n\nfn f(flag: bool) -> i64\n  if flag\n    x = add i64 1 2\n  else\n    x = add i64 3 4\n  end\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_ok(src));
+    }
+
+    #[test]
+    fn check_stmt_for_and_forall_in_property() {
+        let src = "strake 1\n\nproperty p\n  t0 = list.empty i64\n  for x in t0\n    assert.eq x x\n  end\n  forall n: i64 in 0..1\n    assert.eq n n\n  end\nend\n";
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        assert!(check(&m, false).is_ok());
+    }
+
+    #[test]
+    fn check_rhs_list_and_binop_paths() {
+        let src = "strake 1\n\nfn f() -> i64\n  e = list.empty i64\n  xs = list.cons 1 e\n  n = list.len xs\n  s = add i64 n 0\n  ret s\nend\n\ntest t\n  ret 0\nend\n";
+        assert!(check_ok(src));
+    }
 }

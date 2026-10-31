@@ -2060,4 +2060,100 @@ end
         assert_eq!(sliced.start, 40);
         assert_eq!(sliced.end, 41);
     }
+
+    #[test]
+    fn forall_property_lowering_uses_ge() {
+        let src = include_str!("../../../../golden/forall_ok.strake");
+        let prog = compile_golden("forall_ok.strake", src);
+        let prop = fn_named(&prog, "property.small");
+        assert!(
+            prop.blocks
+                .iter()
+                .flat_map(|b| &b.insts)
+                .any(|i| i.op == Op::Ge),
+            "forall range must lower to ge_i64"
+        );
+    }
+
+    #[test]
+    fn for_list_lowering_compiles() {
+        let src = include_str!("../../../../golden/for_list.strake");
+        let prog = compile_golden("for_list.strake", src);
+        let probe = fn_named(&prog, "probe");
+        assert!(probe.blocks.iter().flat_map(|b| &b.insts).any(|i| {
+            matches!(
+                i.op,
+                Op::ListGet | Op::ListLen | Op::ListCons | Op::ListEmpty
+            )
+        }));
+    }
+
+    #[test]
+    fn nested_loop_lower_still_reaches_header() {
+        let src = include_str!("../../../../golden/nested_loop.strake");
+        let prog = compile_golden("nested_loop.strake", src);
+        let f = fn_named(&prog, "test.nested_loop");
+        assert!(f.blocks.len() > 2);
+    }
+
+    #[test]
+    fn gma422_goldens_compile() {
+        for (file, src) in [
+            (
+                "forall_ok.strake",
+                include_str!("../../../../golden/forall_ok.strake"),
+            ),
+            (
+                "forall_list_bad.strake",
+                include_str!("../../../../golden/forall_list_bad.strake"),
+            ),
+            (
+                "for_list.strake",
+                include_str!("../../../../golden/for_list.strake"),
+            ),
+        ] {
+            let _ = compile_golden(file, src);
+        }
+    }
+
+    #[test]
+    fn lower_rhs_surface_compile() {
+        let src = r#"strake 1
+
+type pair { a: i64, b: i64 }
+
+fn f() -> i64
+  e = list.empty i64
+  xs = list.cons 1 e
+  n = list.len xs
+  p = { a: 1, b: 2 }
+  v = p.a
+  okv = ok i64 3
+  c = add i64 n v
+  d = mul i64 c 1
+  ret d
+end
+
+test t
+  ret 0
+end
+"#;
+        let _ = compile_golden("rhs_surface.strake", src);
+    }
+
+    #[test]
+    fn add2_property_lowering_uses_arithmetic_ops() {
+        let src = include_str!("../../../../golden/add2_worked.strake");
+        let prog = compile_golden("add2_worked.strake", src);
+        let prop = fn_named(&prog, "property.add2.zero");
+        let ops: Vec<Op> = prop
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .map(|i| i.op)
+            .collect();
+        assert!(ops.contains(&Op::Mul));
+        assert!(ops.contains(&Op::Add));
+        assert!(ops.contains(&Op::Ge));
+    }
 }
