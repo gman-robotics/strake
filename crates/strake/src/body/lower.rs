@@ -1742,36 +1742,48 @@ fn lower_rhs_binop(
     rhs: &Operand,
     env: &std::collections::HashMap<String, u32>,
 ) -> Result<u32, LowerError> {
-    match op {
-        BinOp::Add | BinOp::Sub | BinOp::Mul => {
-            let l = lower_operand(b, block, lhs, env)?;
-            let r = lower_operand(b, block, rhs, env)?;
-            Ok(match op {
-                BinOp::Add => b.add_i64(block, span.clone(), l, r),
-                BinOp::Sub => b.sub_i64(block, span.clone(), l, r),
-                BinOp::Mul => b.mul_i64(block, span.clone(), l, r),
-                _ => unreachable!(),
-            })
-        }
-        BinOp::Div => {
-            let l = lower_operand(b, block, lhs, env)?;
-            let r = lower_operand(b, block, rhs, env)?;
-            lower_div(block, span.clone(), ty, l, r, b)
-        }
-        BinOp::Eq | BinOp::Ne => {
-            let l = lower_operand(b, block, lhs, env)?;
-            let r = lower_operand(b, block, rhs, env)?;
-            match op {
-                BinOp::Eq if type_is_bool(ty) => Ok(b.eq_bool(block, span.clone(), l, r)),
-                BinOp::Eq => Ok(b.eq_i64(block, span.clone(), l, r)),
-                BinOp::Ne => lower_rhs_ne(b, block, span, ty, l, r),
-                _ => unreachable!(),
-            }
-        }
-        _ => Err(LowerError::unsupported(
+    if !matches!(
+        op,
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Eq | BinOp::Ne
+    ) {
+        return Err(LowerError::unsupported(
             "binary operator not lowered in this slice",
-        )),
+        ));
     }
+    let (l, r) = lower_operand_pair(b, block, lhs, rhs, env)?;
+    lower_binop_values(b, block, span, op, ty, l, r)
+}
+
+fn lower_binop_values(
+    b: &mut Builder,
+    block: usize,
+    span: &Span,
+    op: &BinOp,
+    ty: &Type,
+    l: u32,
+    r: u32,
+) -> Result<u32, LowerError> {
+    match op {
+        BinOp::Add => Ok(b.add_i64(block, span.clone(), l, r)),
+        BinOp::Sub => Ok(b.sub_i64(block, span.clone(), l, r)),
+        BinOp::Mul => Ok(b.mul_i64(block, span.clone(), l, r)),
+        BinOp::Div => lower_div(block, span.clone(), ty, l, r, b),
+        BinOp::Eq if type_is_bool(ty) => Ok(b.eq_bool(block, span.clone(), l, r)),
+        BinOp::Eq => Ok(b.eq_i64(block, span.clone(), l, r)),
+        _ => lower_rhs_ne(b, block, span, ty, l, r),
+    }
+}
+
+fn lower_operand_pair(
+    b: &mut Builder,
+    block: usize,
+    first: &Operand,
+    second: &Operand,
+    env: &std::collections::HashMap<String, u32>,
+) -> Result<(u32, u32), LowerError> {
+    let x = lower_operand(b, block, first, env)?;
+    let y = lower_operand(b, block, second, env)?;
+    Ok((x, y))
 }
 
 fn lower_rhs_ne(
@@ -1800,8 +1812,7 @@ fn lower_rhs_list(
     match rhs {
         Rhs::ListEmpty { span, .. } => Ok(b.list_empty(block, span.clone())),
         Rhs::ListCons { span, head, tail } => {
-            let h = lower_operand(b, block, head, env)?;
-            let t = lower_operand(b, block, tail, env)?;
+            let (h, t) = lower_operand_pair(b, block, head, tail, env)?;
             Ok(b.list_cons(block, span.clone(), h, t))
         }
         Rhs::ListLen { span, list } => {
@@ -1809,8 +1820,7 @@ fn lower_rhs_list(
             Ok(b.list_len(block, span.clone(), l))
         }
         Rhs::ListGet { span, list, index } => {
-            let l = lower_operand(b, block, list, env)?;
-            let i = lower_operand(b, block, index, env)?;
+            let (l, i) = lower_operand_pair(b, block, list, index, env)?;
             Ok(b.list_get(block, span.clone(), l, i))
         }
         _ => Err(LowerError::unsupported("list rhs form")),
