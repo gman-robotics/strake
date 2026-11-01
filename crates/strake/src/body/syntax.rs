@@ -1000,54 +1000,73 @@ impl<'a> Parser<'a> {
 
     fn parse_item_fn_like(&mut self, start: u32) -> Result<Item, Diag> {
         let private = self.eat_ident("priv")?;
-        if self.eat_ident("fn")? {
-            return Ok(Item::Fn(self.parse_fn(start, private)?));
+        let Some(kw) = self.take_keyword(&["fn", "test", "property"])? else {
+            return Err(self.err_here());
+        };
+        match kw {
+            "fn" => self.parse_fn(start, private).map(Item::Fn),
+            "test" => self.parse_test(start).map(Item::Test),
+            _ => self.parse_property(start).map(Item::Property),
         }
-        if self.eat_ident("test")? {
-            return Ok(Item::Test(self.parse_test(start)?));
+    }
+
+    /// Consumes the current identifier when it is one of `kws` and returns it.
+    fn take_keyword(&mut self, kws: &[&'static str]) -> Result<Option<&'static str>, Diag> {
+        let kw = self
+            .cur_ident()
+            .and_then(|cur| kws.iter().copied().find(|k| *k == cur));
+        if kw.is_some() {
+            self.bump()?;
         }
-        if self.eat_ident("property")? {
-            return Ok(Item::Property(self.parse_property(start)?));
+        Ok(kw)
+    }
+
+    fn parse_item_keyword(&mut self, start: u32) -> Result<Option<Item>, Diag> {
+        let Some(kw) = self.take_keyword(&["type", "import", "use", "fuel", "pages"])? else {
+            return Ok(None);
+        };
+        self.parse_keyword_item(kw, start).map(Some)
+    }
+
+    fn parse_keyword_item(&mut self, kw: &str, start: u32) -> Result<Item, Diag> {
+        match kw {
+            "type" => self.parse_type_def(start).map(Item::TypeDef),
+            "import" => self.parse_import(start).map(Item::Import),
+            "use" => self.parse_use(start).map(Item::Use),
+            "fuel" => self.expect_int_span().map(|(n, sp)| Item::Fuel(n, sp)),
+            _ => self.expect_int_span().map(|(n, sp)| Item::Pages(n, sp)),
+        }
+    }
+
+    fn expect_int_span(&mut self) -> Result<(i128, Span), Diag> {
+        let (n, st, en) = self.expect_int()?;
+        Ok((n, span(self.file, st, en)))
+    }
+
+    fn try_parse_module_bind(&mut self, start: u32) -> Result<Option<Item>, Diag> {
+        let Some(name) = self.module_bind_name()? else {
+            return Ok(None);
+        };
+        self.bump()?;
+        if !self.eat_tok(Tok::Eq)? {
+            return Ok(None);
+        }
+        self.parse_module_bind_value(start, name).map(Some)
+    }
+
+    fn parse_module_bind_value(&mut self, start: u32, name: String) -> Result<Item, Diag> {
+        if let Some((Tok::Int(v), _, ven)) = self.cur.clone() {
+            self.bump()?;
+            return self.finish_module_int_bind(start, name, v, ven);
+        }
+        if matches!(self.cur_ident(), Some("list.empty" | "list.cons")) {
+            return self.finish_module_list_bind(start, name);
         }
         Err(self.err_here())
     }
 
-    fn parse_item_keyword(&mut self, start: u32) -> Result<Option<Item>, Diag> {
-        if self.eat_ident("type")? {
-            return Ok(Some(Item::TypeDef(self.parse_type_def(start)?)));
-        }
-        if self.eat_ident("import")? {
-            return Ok(Some(Item::Import(self.parse_import(start)?)));
-        }
-        if self.eat_ident("use")? {
-            return Ok(Some(Item::Use(self.parse_use(start)?)));
-        }
-        if self.eat_ident("fuel")? {
-            let (n, st, en) = self.expect_int()?;
-            return Ok(Some(Item::Fuel(
-                n,
-                Span {
-                    file: self.file.to_string(),
-                    start: st,
-                    end: en,
-                },
-            )));
-        }
-        if self.eat_ident("pages")? {
-            let (n, st, en) = self.expect_int()?;
-            return Ok(Some(Item::Pages(
-                n,
-                Span {
-                    file: self.file.to_string(),
-                    start: st,
-                    end: en,
-                },
-            )));
-        }
-        Ok(None)
-    }
-
-    fn try_parse_module_bind(&mut self, start: u32) -> Result<Option<Item>, Diag> {
+    /// Returns the bound name when the cursor is at `<user ident> =`; does not consume.
+    fn module_bind_name(&mut self) -> Result<Option<String>, Diag> {
         let Some((Tok::Ident(name), nst, nen)) = self.cur.clone() else {
             return Ok(None);
         };
@@ -1059,21 +1078,9 @@ impl<'a> Parser<'a> {
         }
         Self::check_user_name(&name, (nst, nen), self.file)?;
         match self.peek_token_at(nen) {
-            Ok(Some((Tok::Eq, _, _))) => {}
-            _ => return Ok(None),
+            Ok(Some((Tok::Eq, _, _))) => Ok(Some(name)),
+            _ => Ok(None),
         }
-        self.bump()?;
-        if !self.eat_tok(Tok::Eq)? {
-            return Ok(None);
-        }
-        if let Some((Tok::Int(v), _, ven)) = self.cur.clone() {
-            self.bump()?;
-            return Ok(Some(self.finish_module_int_bind(start, name, v, ven)?));
-        }
-        if self.cur_ident() == Some("list.empty") || self.cur_ident() == Some("list.cons") {
-            return Ok(Some(self.finish_module_list_bind(start, name)?));
-        }
-        Err(self.err_here())
     }
 
     fn finish_module_int_bind(
