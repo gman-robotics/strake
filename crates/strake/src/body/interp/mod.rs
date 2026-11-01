@@ -204,7 +204,9 @@ impl<'a> Machine<'a> {
             }
             let inst = func.blocks[block].insts[ip].clone();
             self.frames[frame_top].ip += 1;
-            if self.exec_inst(&inst)? {
+            if inst.op == Op::Ge {
+                self.exec_ge(&inst)?;
+            } else if self.exec_inst(&inst)? {
                 break;
             }
         }
@@ -215,6 +217,11 @@ impl<'a> Machine<'a> {
     #[cfg(test)]
     pub(crate) fn test_exec_inst(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
         self.exec_inst(inst)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_exec_ge(&mut self, inst: &Inst) -> Result<(), ExecFault> {
+        self.exec_ge(inst)
     }
 
     fn exec_inst(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
@@ -544,6 +551,14 @@ impl<'a> Machine<'a> {
         Ok(false)
     }
 
+    fn exec_ge(&mut self, inst: &Inst) -> Result<(), ExecFault> {
+        let span = inst.span.clone();
+        self.charge(1, span.clone())?;
+        let (a, b) = self.two_i64(inst)?;
+        self.write_reg(inst.dst, Value::Bool(a >= b))?;
+        Ok(())
+    }
+
     fn jump(&mut self, block: usize, ip: usize) -> Result<(), ExecFault> {
         let frame = self.frames.last_mut().unwrap();
         let from = frame.block;
@@ -604,24 +619,27 @@ impl<'a> Machine<'a> {
     }
 }
 
+macro_rules! checked_int_div {
+    ($ty:ty, $a:expr, $b:expr, $span:expr) => {{
+        let a = $a;
+        let b = $b;
+        if b == 0 || (a == <$ty>::MIN && b == -1) {
+            Err(ExecFault::Trap {
+                code: Code::EDiv0,
+                span: $span,
+            })
+        } else {
+            Ok(a / b)
+        }
+    }};
+}
+
 fn i64_div(a: i64, b: i64, span: Span) -> Result<i64, ExecFault> {
-    if b == 0 || (a == i64::MIN && b == -1) {
-        return Err(ExecFault::Trap {
-            code: Code::EDiv0,
-            span,
-        });
-    }
-    Ok(a / b)
+    checked_int_div!(i64, a, b, span)
 }
 
 fn i32_div(a: i32, b: i32, span: Span) -> Result<i32, ExecFault> {
-    if b == 0 || (a == i32::MIN && b == -1) {
-        return Err(ExecFault::Trap {
-            code: Code::EDiv0,
-            span,
-        });
-    }
-    Ok(a / b)
+    checked_int_div!(i32, a, b, span)
 }
 
 fn ensure_reg(regs: &mut Vec<Option<Value>>, idx: usize) {
@@ -643,42 +661,54 @@ fn render_scalar_for_test(v: &Value) -> Result<String, ExecFault> {
     }
 }
 
+fn exec_codeless(msg: &str) -> ExecFault {
+    ExecFault::Codeless(msg.into())
+}
+
+macro_rules! value_or_err {
+    ($v:expr, $msg:expr, $($pat:pat => $out:expr),+ $(,)?) => {
+        match $v {
+            $($pat => Ok($out),)+
+            _ => Err(exec_codeless($msg)),
+        }
+    };
+}
+
+macro_rules! imm_or_err {
+    ($imm:expr, $msg:expr, $($pat:pat => $out:expr),+ $(,)?) => {
+        match $imm {
+            $($pat => Ok($out),)+
+            _ => Err(exec_codeless($msg)),
+        }
+    };
+}
+
 fn value_as_i64(v: &Value) -> Result<i64, ExecFault> {
     match v {
         Value::I64(n) => Ok(*n),
         Value::I32(n) => Ok(*n as i64),
-        Value::Sum(_) => Err(ExecFault::Codeless("expected i64".into())),
-        _ => Err(ExecFault::Codeless("expected i64".into())),
+        Value::Sum(_) => Err(exec_codeless("expected i64")),
+        _ => Err(exec_codeless("expected i64")),
     }
 }
 
 fn value_as_i32(v: &Value) -> Result<i32, ExecFault> {
-    match v {
-        Value::I32(n) => Ok(*n),
-        Value::I64(n) => Ok(*n as i32),
-        _ => Err(ExecFault::Codeless("expected i32".into())),
-    }
+    value_or_err!(v, "expected i32",
+        Value::I32(n) => *n,
+        Value::I64(n) => *n as i32,
+    )
 }
 
 fn value_as_f64(v: &Value) -> Result<f64, ExecFault> {
-    match v {
-        Value::F64(n) => Ok(*n),
-        _ => Err(ExecFault::Codeless("expected f64".into())),
-    }
+    value_or_err!(v, "expected f64", Value::F64(n) => *n)
 }
 
 fn block_imm(imm: &Imm) -> Result<usize, ExecFault> {
-    match imm {
-        Imm::Block(b) => Ok(*b),
-        _ => Err(ExecFault::Codeless("expected block imm".into())),
-    }
+    imm_or_err!(imm, "expected block imm", Imm::Block(b) => *b)
 }
 
 fn blocks_imm(imm: &Imm) -> Result<Vec<usize>, ExecFault> {
-    match imm {
-        Imm::Blocks(b) => Ok(b.clone()),
-        _ => Err(ExecFault::Codeless("expected blocks imm".into())),
-    }
+    imm_or_err!(imm, "expected blocks imm", Imm::Blocks(b) => b.clone())
 }
 
 /// One test/property export run: status input plus any result-channel diags.
@@ -962,5 +992,86 @@ end
         let program = b.finish().expect("finish");
         let mut m = Machine::new(&program, 100, &EmptyHost);
         assert!(m.run_root_function(fidx).is_ok());
+    }
+
+    #[test]
+    fn exec_const_and_mul_via_test_exec_inst() {
+        let span = Span {
+            file: "t".into(),
+            start: 0,
+            end: 1,
+        };
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let entry = 0;
+        let _c = b.const_i64(entry, span.clone(), 5);
+        b.ret_i64(entry, span.clone(), 0);
+        let program = b.finish().expect("finish");
+        let mut m = Machine::new(&program, 10, &EmptyHost);
+        m.frames.push(Frame {
+            fn_idx: fidx,
+            block: 0,
+            ip: 0,
+            edge_pred: 0,
+            regs: vec![None],
+            pending_call_dst: None,
+        });
+        let inst = program.functions[fidx].blocks[0].insts[0].clone();
+        assert!(matches!(inst.op, Op::ConstI64));
+        assert!(!m.test_exec_inst(&inst).expect("const"));
+        let mul_inst = Inst {
+            op: Op::Mul,
+            dst: Some(2),
+            args: vec![0, 1],
+            imm: Imm::None,
+            span: span.clone(),
+        };
+        m.frames.last_mut().unwrap().regs = vec![Some(Value::I64(2)), Some(Value::I64(3)), None];
+        assert!(!m.test_exec_inst(&mul_inst).expect("mul"));
+        assert_eq!(m.frames.last().unwrap().regs[2], Some(Value::I64(6)));
+    }
+
+    #[test]
+    fn ge_i64_via_test_exec_inst() {
+        let span = Span {
+            file: "t".into(),
+            start: 0,
+            end: 1,
+        };
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let entry = 0;
+        let two = b.const_i64(entry, span.clone(), 2);
+        let three = b.const_i64(entry, span.clone(), 3);
+        let ge = b.ge_i64(entry, span.clone(), three, two);
+        b.ret_i64(entry, span.clone(), 0);
+        let program = b.finish().expect("finish");
+        let mut m = Machine::new(&program, 100, &EmptyHost);
+        m.frames.push(Frame {
+            fn_idx: fidx,
+            block: 0,
+            ip: 2,
+            edge_pred: 0,
+            regs: vec![Some(Value::I64(2)), Some(Value::I64(3)), None],
+            pending_call_dst: None,
+        });
+        let inst = program.functions[fidx].blocks[0].insts[2].clone();
+        assert_eq!(inst.op, Op::Ge);
+        m.test_exec_ge(&inst).expect("ge");
+        let out = m.frames.last().unwrap().regs[ge as usize].clone().unwrap();
+        assert_eq!(out, Value::Bool(true));
+    }
+
+    #[test]
+    fn value_as_and_imm_helpers() {
+        assert_eq!(value_as_i32(&Value::I32(7)).unwrap(), 7);
+        assert_eq!(value_as_i32(&Value::I64(9)).unwrap(), 9);
+        assert!(value_as_i32(&Value::Bool(true)).is_err());
+        assert_eq!(value_as_f64(&Value::F64(1.5)).unwrap(), 1.5);
+        assert!(value_as_f64(&Value::I64(1)).is_err());
+        assert_eq!(block_imm(&Imm::Block(3)).unwrap(), 3);
+        assert!(block_imm(&Imm::Blocks(vec![1])).is_err());
+        assert_eq!(blocks_imm(&Imm::Blocks(vec![1, 2])).unwrap(), vec![1, 2]);
+        assert!(blocks_imm(&Imm::Block(0)).is_err());
     }
 }

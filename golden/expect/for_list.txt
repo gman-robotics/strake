@@ -1,0 +1,4 @@
+args: test golden/for_list.strake
+exit: 0
+--- stdout
+--- stderr

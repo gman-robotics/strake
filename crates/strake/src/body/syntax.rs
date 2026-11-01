@@ -20,6 +20,16 @@ pub enum Item {
     Use(UseDecl),
     Fuel(i128, Span),
     Pages(i128, Span),
+    Bind {
+        span: Span,
+        name: String,
+        value: i128,
+    },
+    ListBind {
+        span: Span,
+        name: String,
+        rhs: Rhs,
+    },
     Fn(FnItem),
     Test(TestItem),
     Property(PropertyItem),
@@ -189,12 +199,18 @@ pub struct MatchArm {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub enum StaticI64 {
+    Lit(i128, Span),
+    Name(String, Span),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ForallBound {
     Range {
         span: Span,
         ty: Type,
-        lo: i128,
-        hi: i128,
+        lo: StaticI64,
+        hi: StaticI64,
     },
     List {
         span: Span,
@@ -320,37 +336,121 @@ pub fn format(module: &Module) -> String {
 }
 
 pub fn codeless_rejection(module: &Module) -> Option<&'static str> {
+    let module_list_names = module_list_bind_names(module);
+    let priv_fns = module_private_fn_names(module);
     let mut fuel = 0u32;
     let mut pages = 0u32;
-    let priv_fns: std::collections::HashSet<String> = module
+    for item in &module.items {
+        if let Some(msg) =
+            codeless_item_rejection(item, &mut fuel, &mut pages, &module_list_names, &priv_fns)
+        {
+            return Some(msg);
+        }
+    }
+    None
+}
+
+fn module_list_bind_names(module: &Module) -> std::collections::HashSet<String> {
+    module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::ListBind { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn module_private_fn_names(module: &Module) -> std::collections::HashSet<String> {
+    module
         .items
         .iter()
         .filter_map(|item| match item {
             Item::Fn(f) if f.private => Some(f.name.clone()),
             _ => None,
         })
-        .collect();
-    for item in &module.items {
-        match item {
-            Item::Fuel(_, _) => {
-                fuel += 1;
-                if fuel > 1 {
-                    return Some("module may contain at most one fuel directive");
-                }
+        .collect()
+}
+
+fn codeless_item_rejection(
+    item: &Item,
+    fuel: &mut u32,
+    pages: &mut u32,
+    module_list_names: &std::collections::HashSet<String>,
+    priv_fns: &std::collections::HashSet<String>,
+) -> Option<&'static str> {
+    match item {
+        Item::Fuel(_, _) => {
+            *fuel += 1;
+            if *fuel > 1 {
+                return Some("module may contain at most one fuel directive");
             }
-            Item::Pages(_, _) => {
-                pages += 1;
-                if pages > 1 {
-                    return Some("module may contain at most one pages directive");
-                }
-            }
-            Item::Test(t) if test_calls_priv(t, &priv_fns) => {
-                return Some("tests must call exported functions only");
-            }
-            _ => {}
         }
+        Item::Pages(_, _) => {
+            *pages += 1;
+            if *pages > 1 {
+                return Some("module may contain at most one pages directive");
+            }
+        }
+        Item::Test(t) if test_calls_priv(t, priv_fns) => {
+            return Some("tests must call exported functions only");
+        }
+        Item::Property(p) => {
+            if block_has_forall_list_bad(&p.body, module_list_names) {
+                return Some("list forall must use a module-level list literal binding");
+            }
+        }
+        _ => {}
     }
     None
+}
+
+fn block_has_forall_list_bad(
+    stmts: &[Stmt],
+    module_list_names: &std::collections::HashSet<String>,
+) -> bool {
+    stmts
+        .iter()
+        .any(|stmt| stmt_forall_list_bad(stmt, module_list_names))
+}
+
+fn stmt_forall_list_bad(
+    stmt: &Stmt,
+    module_list_names: &std::collections::HashSet<String>,
+) -> bool {
+    if let Stmt::Forall {
+        bound: ForallBound::List { name, .. },
+        ..
+    } = stmt
+    {
+        if !module_list_names.contains(name) {
+            return true;
+        }
+    }
+    walk_stmt_forall_list(stmt, module_list_names)
+}
+
+fn walk_stmt_forall_list(
+    stmt: &Stmt,
+    module_list_names: &std::collections::HashSet<String>,
+) -> bool {
+    match stmt {
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            block_has_forall_list_bad(then_body, module_list_names)
+                || block_has_forall_list_bad(else_body, module_list_names)
+        }
+        Stmt::Loop { body, .. } | Stmt::For { body, .. } | Stmt::Forall { body, .. } => {
+            block_has_forall_list_bad(body, module_list_names)
+        }
+        Stmt::Match { arms, .. } => arms
+            .iter()
+            .any(|a| block_has_forall_list_bad(&a.body, module_list_names)),
+        _ => false,
+    }
 }
 
 fn test_calls_priv(test: &TestItem, priv_fns: &std::collections::HashSet<String>) -> bool {
@@ -630,9 +730,20 @@ impl<'a> Lexer<'a> {
         let start = self.byte_pos();
         let mut s = String::new();
         while let Some(b) = self.peek_byte() {
-            if b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'%' {
+            if b.is_ascii_alphanumeric() || b == b'_' || b == b'%' {
                 s.push(b as char);
                 self.bump();
+            } else if b == b'.' {
+                let next = self.src[self.i + 1..].bytes().next();
+                if next == Some(b'.') {
+                    break;
+                }
+                if next.is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_') {
+                    s.push('.');
+                    self.bump();
+                } else {
+                    break;
+                }
             } else {
                 break;
             }
@@ -878,48 +989,118 @@ impl<'a> Parser<'a> {
 
     fn parse_item(&mut self) -> Result<Item, Diag> {
         let (s, _) = self.span_of();
+        if let Some(item) = self.parse_item_keyword(s)? {
+            return Ok(item);
+        }
+        if let Some(item) = self.try_parse_module_bind(s)? {
+            return Ok(item);
+        }
+        self.parse_item_fn_like(s)
+    }
+
+    fn parse_item_fn_like(&mut self, start: u32) -> Result<Item, Diag> {
+        let private = self.eat_ident("priv")?;
+        if self.eat_ident("fn")? {
+            return Ok(Item::Fn(self.parse_fn(start, private)?));
+        }
+        if self.eat_ident("test")? {
+            return Ok(Item::Test(self.parse_test(start)?));
+        }
+        if self.eat_ident("property")? {
+            return Ok(Item::Property(self.parse_property(start)?));
+        }
+        Err(self.err_here())
+    }
+
+    fn parse_item_keyword(&mut self, start: u32) -> Result<Option<Item>, Diag> {
         if self.eat_ident("type")? {
-            return Ok(Item::TypeDef(self.parse_type_def(s)?));
+            return Ok(Some(Item::TypeDef(self.parse_type_def(start)?)));
         }
         if self.eat_ident("import")? {
-            return Ok(Item::Import(self.parse_import(s)?));
+            return Ok(Some(Item::Import(self.parse_import(start)?)));
         }
         if self.eat_ident("use")? {
-            return Ok(Item::Use(self.parse_use(s)?));
+            return Ok(Some(Item::Use(self.parse_use(start)?)));
         }
         if self.eat_ident("fuel")? {
             let (n, st, en) = self.expect_int()?;
-            return Ok(Item::Fuel(
+            return Ok(Some(Item::Fuel(
                 n,
                 Span {
                     file: self.file.to_string(),
                     start: st,
                     end: en,
                 },
-            ));
+            )));
         }
         if self.eat_ident("pages")? {
             let (n, st, en) = self.expect_int()?;
-            return Ok(Item::Pages(
+            return Ok(Some(Item::Pages(
                 n,
                 Span {
                     file: self.file.to_string(),
                     start: st,
                     end: en,
                 },
-            ));
+            )));
         }
-        let private = self.eat_ident("priv")?;
-        if self.eat_ident("fn")? {
-            return Ok(Item::Fn(self.parse_fn(s, private)?));
+        Ok(None)
+    }
+
+    fn try_parse_module_bind(&mut self, start: u32) -> Result<Option<Item>, Diag> {
+        let Some((Tok::Ident(name), nst, nen)) = self.cur.clone() else {
+            return Ok(None);
+        };
+        if matches!(
+            name.as_str(),
+            "type" | "import" | "use" | "fuel" | "pages" | "priv" | "fn" | "test" | "property"
+        ) {
+            return Ok(None);
         }
-        if self.eat_ident("test")? {
-            return Ok(Item::Test(self.parse_test(s)?));
+        Self::check_user_name(&name, (nst, nen), self.file)?;
+        match self.peek_token_at(nen) {
+            Ok(Some((Tok::Eq, _, _))) => {}
+            _ => return Ok(None),
         }
-        if self.eat_ident("property")? {
-            return Ok(Item::Property(self.parse_property(s)?));
+        self.bump()?;
+        if !self.eat_tok(Tok::Eq)? {
+            return Ok(None);
+        }
+        if let Some((Tok::Int(v), _, ven)) = self.cur.clone() {
+            self.bump()?;
+            return Ok(Some(self.finish_module_int_bind(start, name, v, ven)?));
+        }
+        if self.cur_ident() == Some("list.empty") || self.cur_ident() == Some("list.cons") {
+            return Ok(Some(self.finish_module_list_bind(start, name)?));
         }
         Err(self.err_here())
+    }
+
+    fn finish_module_int_bind(
+        &mut self,
+        start: u32,
+        name: String,
+        value: i128,
+        end: u32,
+    ) -> Result<Item, Diag> {
+        Ok(Item::Bind {
+            span: span(self.file, start, end),
+            name,
+            value,
+        })
+    }
+
+    fn finish_module_list_bind(&mut self, start: u32, name: String) -> Result<Item, Diag> {
+        let rhs = self.parse_rhs(start)?;
+        if !rhs_is_list_literal(&rhs) {
+            return Err(self.err_here());
+        }
+        let end = self.lex.byte_pos();
+        Ok(Item::ListBind {
+            span: span(self.file, start, end),
+            name,
+            rhs,
+        })
     }
 
     fn parse_type_def(&mut self, start: u32) -> Result<TypeDef, Diag> {
@@ -1393,6 +1574,30 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_static_i64_end(&mut self) -> Result<StaticI64, Diag> {
+        if matches!(&self.cur, Some((Tok::Int(_), _, _))) {
+            let (n, hst, hen) = self.expect_int()?;
+            Ok(StaticI64::Lit(n, span(self.file, hst, hen)))
+        } else {
+            let (name, hst, hen) = self.expect_ident()?;
+            Self::check_user_name(&name, (hst, hen), self.file)?;
+            Ok(StaticI64::Name(name, span(self.file, hst, hen)))
+        }
+    }
+
+    fn finish_forall_range(&mut self, ty: Type, lo: StaticI64) -> Result<ForallBound, Diag> {
+        let hi = self.parse_static_i64_end()?;
+        let bound_span = match &hi {
+            StaticI64::Lit(_, s) | StaticI64::Name(_, s) => s.clone(),
+        };
+        Ok(ForallBound::Range {
+            span: bound_span,
+            ty,
+            lo,
+            hi,
+        })
+    }
+
     fn parse_forall(&mut self, start: u32, ctx: BodyCtx) -> Result<Stmt, Diag> {
         let (binder, bst, ben) = self.expect_ident()?;
         Self::check_user_name(&binder, (bst, ben), self.file)?;
@@ -1404,25 +1609,27 @@ impl<'a> Parser<'a> {
             return Err(self.err_here());
         }
         let bound = if matches!(&self.cur, Some((Tok::Int(_), _, _))) {
-            let (lo, lst, _len) = self.expect_int()?;
+            let (lo_n, lst, len) = self.expect_int()?;
+            let lo = StaticI64::Lit(lo_n, span(self.file, lst, len));
             if !self.eat_tok(Tok::DotDot)? {
                 return Err(self.err_here());
             }
-            let (hi, _hst, hen) = self.expect_int()?;
-            ForallBound::Range {
-                span: span(self.file, lst, hen),
-                ty,
-                lo,
-                hi,
-            }
-        } else {
+            self.finish_forall_range(ty, lo)?
+        } else if matches!(&self.cur, Some((Tok::Ident(_), _, _))) {
             let (name, nst, nen) = self.expect_ident()?;
             Self::check_user_name(&name, (nst, nen), self.file)?;
-            ForallBound::List {
-                span: span(self.file, nst, nen),
-                ty,
-                name,
+            if self.eat_tok(Tok::DotDot)? {
+                let lo = StaticI64::Name(name, span(self.file, nst, nen));
+                self.finish_forall_range(ty, lo)?
+            } else {
+                ForallBound::List {
+                    span: span(self.file, nst, nen),
+                    ty,
+                    name,
+                }
             }
+        } else {
+            return Err(self.err_here());
         };
         let body = self.parse_block(ctx)?;
         let end = self.lex.byte_pos();
@@ -1764,6 +1971,17 @@ fn operand_span_end(op: &Operand) -> u32 {
     }
 }
 
+fn format_static_i64(b: &StaticI64) -> String {
+    match b {
+        StaticI64::Lit(n, _) => n.to_string(),
+        StaticI64::Name(name, _) => name.clone(),
+    }
+}
+
+fn rhs_is_list_literal(rhs: &Rhs) -> bool {
+    matches!(rhs, Rhs::ListEmpty { .. } | Rhs::ListCons { .. })
+}
+
 fn span(file: &str, start: u32, end: u32) -> Span {
     Span {
         file: file.to_string(),
@@ -1944,9 +2162,34 @@ impl Fmt {
             Item::Use(u) => self.format_use(u),
             Item::Fuel(n, _) => self.writeln(&format!("fuel {}", n)),
             Item::Pages(n, _) => self.writeln(&format!("pages {}", n)),
+            Item::Bind { name, value, .. } => self.format_module_int_bind(name, *value),
+            Item::ListBind { name, rhs, .. } => self.format_module_list_bind(name, rhs),
             Item::Fn(f) => self.format_fn(f),
             Item::Test(t) => self.format_test(t),
             Item::Property(p) => self.format_property(p),
+        }
+    }
+
+    fn format_module_int_bind(&mut self, name: &str, value: i128) {
+        self.writeln(&format!("{name} = {value}"));
+    }
+
+    fn format_module_list_bind(&mut self, name: &str, rhs: &Rhs) {
+        self.writeln(&format!("{name} = {}", self.format_rhs(rhs)));
+    }
+
+    fn format_forall_header(&self, binder: &str, bound: &ForallBound) -> String {
+        match bound {
+            ForallBound::Range { ty, lo, hi, .. } => format!(
+                "forall {}: {} in {}..{}",
+                binder,
+                self.type_string(ty),
+                format_static_i64(lo),
+                format_static_i64(hi)
+            ),
+            ForallBound::List { ty, name, .. } => {
+                format!("forall {}: {} in {}", binder, self.type_string(ty), name)
+            }
         }
     }
 
@@ -2077,115 +2320,35 @@ impl Fmt {
                 then_body,
                 else_body,
                 ..
-            } => {
-                self.writeln(&format!("if {}", self.format_operand(cond)));
-                self.indent += 1;
-                for s in then_body {
-                    self.format_stmt(s);
-                }
-                self.indent -= 1;
-                if !else_body.is_empty() {
-                    self.writeln("else");
-                    self.indent += 1;
-                    for s in else_body {
-                        self.format_stmt(s);
-                    }
-                    self.indent -= 1;
-                }
-                self.writeln("end");
-            }
-            Stmt::Loop { params, body, .. } => {
-                if params.is_empty() {
-                    self.writeln("loop");
-                } else {
-                    let p = params
-                        .iter()
-                        .map(|lp| format!("{} = {}", lp.name, self.format_operand(&lp.init)))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    self.writeln(&format!("loop {}", p));
-                }
-                self.indent += 1;
-                for s in body {
-                    self.format_stmt(s);
-                }
-                self.indent -= 1;
-                self.writeln("end");
-            }
-            Stmt::Break { .. } => self.writeln("break"),
-            Stmt::Continue { edges, .. } => {
-                if edges.is_empty() {
-                    self.writeln("continue");
-                } else {
-                    let e = edges
-                        .iter()
-                        .map(|edge| format!("{} = {}", edge.name, self.format_operand(&edge.value)))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    self.writeln(&format!("continue {}", e));
-                }
-            }
+            } => self.format_stmt_if(cond, then_body, else_body),
+            Stmt::Loop { params, body, .. } => self.format_stmt_loop(params, body),
+            Stmt::Break { .. } | Stmt::Continue { .. } => self.format_stmt_break_continue(stmt),
             Stmt::For {
                 binder, list, body, ..
-            } => {
-                self.writeln(&format!("for {} in {}", binder, list));
-                self.indent += 1;
-                for s in body {
-                    self.format_stmt(s);
-                }
-                self.indent -= 1;
-                self.writeln("end");
-            }
+            } => self.format_stmt_for(binder, list, body),
             Stmt::Match {
                 scrutinee, arms, ..
-            } => {
-                self.writeln(&format!("match {}", scrutinee));
-                self.indent += 1;
-                for arm in arms {
-                    let mut line = arm.tag.clone();
-                    if let Some(b) = &arm.binder {
-                        line.push(' ');
-                        line.push_str(b);
-                    }
-                    line.push_str(" ->");
-                    self.writeln(&line);
-                    self.indent += 1;
-                    for s in &arm.body {
-                        self.format_stmt(s);
-                    }
-                    self.indent -= 1;
-                }
-                self.indent -= 1;
-                self.writeln("end");
-            }
+            } => self.format_stmt_match(scrutinee, arms),
             Stmt::Forall {
                 binder,
                 bound,
                 body,
                 ..
-            } => {
-                let header = match bound {
-                    ForallBound::Range { ty, lo, hi, .. } => {
-                        format!(
-                            "forall {}: {} in {}..{}",
-                            binder,
-                            self.type_string(ty),
-                            lo,
-                            hi
-                        )
-                    }
-                    ForallBound::List { ty, name, .. } => {
-                        format!("forall {}: {} in {}", binder, self.type_string(ty), name)
-                    }
-                };
-                self.writeln(&header);
-                self.indent += 1;
-                for s in body {
-                    self.format_stmt(s);
-                }
-                self.indent -= 1;
-                self.writeln("end");
-            }
+            } => self.format_stmt_forall(binder, bound, body),
+            Stmt::Trap { .. } | Stmt::AssertEq { .. } => self.format_stmt_trap_or_assert(stmt),
+        }
+    }
+
+    fn format_stmt_break_continue(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Break { .. } => self.writeln("break"),
+            Stmt::Continue { edges, .. } => self.format_stmt_continue(edges),
+            _ => {}
+        }
+    }
+
+    fn format_stmt_trap_or_assert(&mut self, stmt: &Stmt) {
+        match stmt {
             Stmt::Trap { .. } => self.writeln("trap"),
             Stmt::AssertEq { got, want, .. } => {
                 self.writeln(&format!(
@@ -2194,7 +2357,99 @@ impl Fmt {
                     self.format_operand(want)
                 ));
             }
+            _ => {}
         }
+    }
+
+    fn format_stmt_if(&mut self, cond: &Operand, then_body: &[Stmt], else_body: &[Stmt]) {
+        self.writeln(&format!("if {}", self.format_operand(cond)));
+        self.indent += 1;
+        for s in then_body {
+            self.format_stmt(s);
+        }
+        self.indent -= 1;
+        if !else_body.is_empty() {
+            self.writeln("else");
+            self.indent += 1;
+            for s in else_body {
+                self.format_stmt(s);
+            }
+            self.indent -= 1;
+        }
+        self.writeln("end");
+    }
+
+    fn format_stmt_loop(&mut self, params: &[LoopParam], body: &[Stmt]) {
+        if params.is_empty() {
+            self.writeln("loop");
+        } else {
+            let p = params
+                .iter()
+                .map(|lp| format!("{} = {}", lp.name, self.format_operand(&lp.init)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.writeln(&format!("loop {}", p));
+        }
+        self.indent += 1;
+        for s in body {
+            self.format_stmt(s);
+        }
+        self.indent -= 1;
+        self.writeln("end");
+    }
+
+    fn format_stmt_continue(&mut self, edges: &[ContinueEdge]) {
+        if edges.is_empty() {
+            self.writeln("continue");
+        } else {
+            let e = edges
+                .iter()
+                .map(|edge| format!("{} = {}", edge.name, self.format_operand(&edge.value)))
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.writeln(&format!("continue {}", e));
+        }
+    }
+
+    fn format_stmt_for(&mut self, binder: &str, list: &str, body: &[Stmt]) {
+        self.writeln(&format!("for {} in {}", binder, list));
+        self.indent += 1;
+        for s in body {
+            self.format_stmt(s);
+        }
+        self.indent -= 1;
+        self.writeln("end");
+    }
+
+    fn format_stmt_match(&mut self, scrutinee: &str, arms: &[MatchArm]) {
+        self.writeln(&format!("match {}", scrutinee));
+        self.indent += 1;
+        for arm in arms {
+            let mut line = arm.tag.clone();
+            if let Some(b) = &arm.binder {
+                line.push(' ');
+                line.push_str(b);
+            }
+            line.push_str(" ->");
+            self.writeln(&line);
+            self.indent += 1;
+            for s in &arm.body {
+                self.format_stmt(s);
+            }
+            self.indent -= 1;
+        }
+        self.indent -= 1;
+        self.writeln("end");
+    }
+
+    fn format_stmt_forall(&mut self, binder: &str, bound: &ForallBound, body: &[Stmt]) {
+        self.writeln(&self.format_forall_header(binder, bound));
+        self.indent += 1;
+        for s in body {
+            self.format_stmt(s);
+        }
+        self.indent -= 1;
+        self.writeln("end");
     }
 
     fn format_rhs(&self, rhs: &Rhs) -> String {
@@ -2635,6 +2890,83 @@ end
     }
 
     #[test]
+    fn parse_forall_list_local_name() {
+        let src =
+            "strake 1\n\nproperty p\n  t0 = list.empty i64\n  forall n: i64 in t0\n  end\nend\n";
+        parse(src, "t.strake").expect("parse forall list");
+    }
+
+    #[test]
+    fn parse_forall_eparse_branches() {
+        let bad = [
+            "forall n i64 in 0..1",
+            "forall n: i64 0..1",
+            "forall n: i64 in 0",
+            "forall n: i64 in ..1",
+        ];
+        for body in bad {
+            let src = format!("strake 1\n\nproperty p\n  {body}\n  end\nend\n");
+            let err = parse(&src, "t.strake").unwrap_err();
+            assert_eq!(err.code, Code::EParse, "body: {body}");
+        }
+    }
+
+    #[test]
+    fn parse_forall_range_literal_and_name_hi() {
+        let lit = "strake 1\n\nproperty p\n  forall n: i64 in 0..2\n  end\nend\n";
+        let m = parse(lit, "t.strake").expect("lit range");
+        let Item::Property(p) = &m.items[0] else {
+            panic!("property")
+        };
+        let Stmt::Forall { bound, .. } = &p.body[0] else {
+            panic!("forall")
+        };
+        assert!(matches!(bound, ForallBound::Range { .. }));
+        let name_hi = "strake 1\n\nhi = 2\n\nproperty p\n  forall n: i64 in 0..hi\n  end\nend\n";
+        parse(name_hi, "t.strake").expect("name hi");
+    }
+
+    #[test]
+    fn try_parse_module_bind_skips_item_keywords() {
+        let src = "strake 1\n\nfn f() -> unit\n  ret unit\nend\n\ntest t\n  ret 0\nend\n";
+        parse(src, "t.strake").expect("fn not module bind");
+        let pages = "strake 1\npages 1\n\nfn f() -> unit\n  ret unit\nend\n";
+        parse(pages, "t.strake").expect("pages");
+    }
+
+    #[test]
+    fn format_item_module_binds_and_property() {
+        let src = "strake 1\n\nlo = 1\nxs = list.empty i64\n\nproperty p\n  forall n: i64 in lo..2\n  end\nend\n\nfn f() -> i64\n  ret lo\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let out = format(&m);
+        assert!(out.contains("lo = 1"));
+        assert!(out.contains("xs = list.empty i64"));
+        assert!(out.contains("forall n: i64 in lo..2"));
+        let m2 = parse(&out, "t.strake").expect("reparse");
+        assert_eq!(format(&m2), out);
+    }
+
+    #[test]
+    fn parse_item_fn_test_property_paths() {
+        let src = "strake 1\n\npriv fn h() -> unit\n  ret unit\nend\n\ntest t\n  ret 0\nend\n\nproperty p\n  forall n: i64 in 0..0\n  end\nend\n";
+        parse(src, "t.strake").expect("exports");
+    }
+
+    #[test]
+    fn lex_dotted_field_name_in_assign() {
+        let src = "strake 1\n\ntype pair { x: i64 }\n\nfn f(p: pair) -> i64\n  v = p.x\n  w = add i64 v 1\n  ret w\nend\n";
+        parse(src, "t.strake").expect("dotted");
+    }
+
+    #[test]
+    fn forall_module_bind_range_lo_dotdot_hi_parses() {
+        let src = "strake 1\n\nlo = 0\nhi = 2\n\nproperty p\n  forall n: i64 in lo..hi\n    ret 0\n  end\nend\n";
+        parse(src, "t.strake").expect("lo..hi range");
+        let spaced = "strake 1\n\nlo = 0\nhi = 2\n\nproperty p\n  forall n: i64 in lo .. hi\n    ret 0\n  end\nend\n";
+        parse(spaced, "t.strake").expect("lo .. hi range");
+    }
+
+    #[test]
     fn match_arm_stops_on_custom_tag() {
         let src = r#"strake 1
 
@@ -2978,5 +3310,145 @@ end
         };
         let slice = &src[u.span.start as usize..u.span.end as usize];
         assert_eq!(slice, "use pkg@blake3:abcd");
+    }
+
+    #[test]
+    fn module_int_bind_parses_and_fmt() {
+        let src = "strake 1\n\nn = 42\n\nfn f() -> unit\n  ret unit\nend\n";
+        let m = parse(src, "t.strake").expect("parse bind");
+        let Item::Bind { name, value, .. } = &m.items[0] else {
+            panic!("bind")
+        };
+        assert_eq!(name, "n");
+        assert_eq!(*value, 42);
+        let f = format(&m);
+        assert!(f.contains("n = 42\n"));
+        parse(&f, "t.strake").expect("reparse bind");
+    }
+
+    #[test]
+    fn module_list_bind_parses_and_fmt() {
+        let src =
+            "strake 1\n\nt0 = list.empty i64\n\nproperty p\n  forall n: i64 in t0\n  end\nend\n";
+        let m = parse(src, "t.strake").expect("parse list bind");
+        let f = format(&m);
+        assert!(f.contains("t0 = list.empty i64\n"));
+        parse(&f, "t.strake").expect("reparse");
+    }
+
+    #[test]
+    fn parse_forall_range_hi_name() {
+        let src = "strake 1\n\nhi = 3\n\nproperty p\n  forall n: i64 in 0..hi\n  end\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let Item::Property(p) = &m.items[1] else {
+            panic!("property")
+        };
+        let Stmt::Forall { bound, .. } = &p.body[0] else {
+            panic!("forall")
+        };
+        let ForallBound::Range { hi, .. } = bound else {
+            panic!("range")
+        };
+        assert!(matches!(hi, StaticI64::Name(n, _) if n == "hi"));
+    }
+
+    #[test]
+    fn parse_forall_range_lo_name_hi_lit() {
+        let src = "strake 1\n\nlo = 1\n\nproperty p\n  forall n: i64 in lo..2\n  end\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let Item::Property(p) = &m.items[1] else {
+            panic!("property")
+        };
+        let Stmt::Forall { bound, .. } = &p.body[0] else {
+            panic!("forall")
+        };
+        let ForallBound::Range { lo, hi, .. } = bound else {
+            panic!("range")
+        };
+        assert!(matches!(lo, StaticI64::Name(n, _) if n == "lo"));
+        assert!(matches!(hi, StaticI64::Lit(v, _) if *v == 2));
+    }
+
+    #[test]
+    fn codeless_rejects_nested_forall_list_without_module_bind() {
+        let src =
+            "strake 1\n\nproperty p\n  if true\n    forall n: i64 in xs\n    end\n  end\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        assert_eq!(
+            codeless_rejection(&m),
+            Some("list forall must use a module-level list literal binding")
+        );
+    }
+
+    #[test]
+    fn codeless_rejects_forall_list_in_loop_body() {
+        let src = "strake 1\n\nproperty p\n  loop\n    forall n: i64 in xs\n    end\n  end\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        assert!(codeless_rejection(&m).is_some());
+    }
+
+    #[test]
+    fn format_stmt_control_and_forall_roundtrip() {
+        let src = r#"strake 1
+
+property p
+  if flag
+    x = add i64 1 2
+  else
+    y = mul i64 2 3
+  end
+  loop i = 0
+    break
+  end
+  for v in xs
+    trap
+  end
+  match r
+    ok val ->
+      trap
+  end
+  forall n: i64 in 0..1
+    trap
+  end
+end
+"#;
+        let m = parse(src, "t.strake").expect("parse");
+        let f = format(&m);
+        parse(&f, "t.strake").expect("reparse fmt");
+        assert!(f.contains("forall n: i64 in 0..1"));
+    }
+
+    #[test]
+    fn codeless_rejects_forall_list_in_match_arm() {
+        let src = "strake 1\n\ntype r { ok i64 | err unit }\n\nproperty p\n  x = ok i64 0\n  match x\n    ok _ ->\n      forall n: i64 in xs\n      end\n  end\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        assert!(codeless_rejection(&m).is_some());
+    }
+
+    #[test]
+    fn parse_int_module_bind_and_item_keywords() {
+        let src = "strake 1\nfuel 5\npages 2\n\nlo = 0\n\nfn f() -> i64\n  ret lo\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        assert!(matches!(&m.items[0], Item::Fuel(5, _)));
+        assert!(matches!(&m.items[1], Item::Pages(2, _)));
+        assert!(
+            matches!(&m.items[2], Item::Bind { name, value, .. } if name == "lo" && *value == 0)
+        );
+        let round = format(&m);
+        let m2 = parse(&round, "t.strake").expect("reparse");
+        assert_eq!(format(&m2), round);
+    }
+
+    #[test]
+    fn parse_forall_list_with_module_list_bind() {
+        let src = "strake 1\n\nxs = list.empty i64\n\nproperty p\n  forall x: i64 in xs\n    y = add i64 x 0\n  end\nend\n";
+        let m = parse(src, "t.strake").expect("parse");
+        let Item::Property(p) = &m.items[1] else {
+            panic!("property")
+        };
+        let Stmt::Forall { bound, .. } = &p.body[0] else {
+            panic!("forall")
+        };
+        assert!(matches!(bound, ForallBound::List { name, .. } if name == "xs"));
     }
 }

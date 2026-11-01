@@ -1,0 +1,5 @@
+args: test golden/forall_list_bad.strake
+exit: 3
+--- stdout
+--- stderr
+list forall must use a module-level list literal binding

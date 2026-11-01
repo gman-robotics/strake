@@ -1,0 +1,17 @@
+strake 1
+
+type r { ok i64 | err unit }
+
+test match_arm_for
+  e = list.empty i64
+  xs = list.cons 9 e
+  v = ok i64 0
+  match v
+    ok payload ->
+      for elt in xs
+        assert.eq elt 9
+      end
+    err tag ->
+      assert.eq 0 1
+  end
+end
