@@ -2,8 +2,10 @@
 
 ## Sub-features
 
-- `golden/*.strake` oracles for parse, fmt, check, test (T2–T4 on `main`).
-- Black-box coverage also lives in `crates/strake/tests/t2_golden.rs`, `t3_golden.rs`, and `t4_golden.rs`; this feature is the **CLI smoke** slice in `verify.sh`.
+- `golden/*.strake` oracles for parse, fmt, check, test (T2–T6 on `main`; S1–S4 lowering goldens included).
+- Full matrix: `crates/strake/tests/golden_sweep.rs` runs every golden with a checked-in `golden/expect/<stem>.txt` (Phase 2 T1 harness).
+- Targeted suites: `t2_golden.rs` … `t6_golden.rs`, plus S1–S4 modules (`s1_ssa_golden`, `s2_loop_golden`, `s3_match`, `s4_lists_for_forall`, …).
+- This feature is the **CLI smoke** slice in `verify.sh` (representative rows, not the full sweep).
 
 ## How to get to it (user POV)
 
@@ -13,14 +15,16 @@ From the repo root after building `strake`:
 strake test golden/add2_basic.strake
 strake check golden/priv.strake
 strake fmt golden/add2_worked.strake
+strake test golden/callee_77.strake
 ```
 
 ## Driving it with verify.sh
 
-When `golden/` exists, `verify.sh` runs `GOLDEN_SMOKE` (exit + subcommand args) and a fmt idempotence check on `golden/add2_worked.strake`. Add rows when new goldens ship on `main` (do not enable T5-only fixtures until that code merges).
+When `golden/` exists, `verify.sh` runs `GOLDEN_SMOKE` (exit + subcommand args) and a fmt idempotence check on `golden/add2_worked.strake`. Add smoke rows when a new **user-facing CLI** golden lands on `main`; add or bless `golden/expect/` for every CLI oracle (see `golden_sweep.rs`).
 
 ## Gotchas
 
 - Do not commit verification edits to `golden/*.strake` in verify-skill PRs; only extend this map and `verify.sh` when files are on your branch's base.
 - `fmt` prints formatted source on stdout; the smoke check diffs stdout against the committed golden bytes (does not rewrite files).
-- Codeless rejections (e.g. `fuel_twice.strake`) exit `3` with plain stderr — covered in crate tests, not the minimal smoke list.
+- Codeless rejections (e.g. `fuel_twice.strake`) exit `3` with plain stderr — covered in crate tests and `golden_sweep`, not the minimal smoke list.
+- T5 test channel (`callee_77`, `refused`, `test_fail`, …) is on `main`; smoke includes at least one passing T5 `test` row.
