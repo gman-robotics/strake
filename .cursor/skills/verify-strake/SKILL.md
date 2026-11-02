@@ -9,7 +9,7 @@ description: >-
 
 # verify-strake
 
-Drive the **Strake reference toolchain** the way a user does: compile the CLI, invoke subcommands, and assert exit codes and stdio. On `main` today this skill proves the **shipped CLI contract** (usage, `build` stub, diag wiring), **golden smoke** (`golden/*.strake` via `verify.sh`), and the crate test suite. Extend `features/golden-fixtures.md` and `GOLDEN_SMOKE` in `scripts/verify.sh` when new goldens land (skip unmerged feature branches such as T5 test channel).
+Drive the **Strake reference toolchain** the way a user does: compile the CLI, invoke subcommands, and assert exit codes and stdio. On `main` today this skill proves the **shipped CLI contract** (usage, `build` stub, diag wiring), **golden smoke** (representative `golden/*.strake` CLI rows via `verify.sh`; full matrix in `golden_sweep`), and the crate test suite (T2–T6, S1–S4). Extend `features/golden-fixtures.md` and `GOLDEN_SMOKE` in `scripts/verify.sh` when new CLI goldens ship on `main`.
 
 ## Launch
 

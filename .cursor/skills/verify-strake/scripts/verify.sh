@@ -118,6 +118,7 @@ if [[ -d "$ROOT/golden" ]]; then
   GOLDEN_SMOKE=(
     "0:test golden/add2_basic.strake"
     "0:check golden/priv.strake"
+    "0:test golden/callee_77.strake"
   )
   for entry in "${GOLDEN_SMOKE[@]}"; do
     want_exit="${entry%%:*}"
