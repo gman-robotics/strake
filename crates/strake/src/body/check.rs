@@ -2034,8 +2034,19 @@ fn operand_ty(
         Operand::Int(n, span) => int_literal_ty(*n, span.clone(), expected, diags),
         Operand::Unit(span) => Type::Named("unit".into(), span.clone()),
         Operand::Bool(_, span) => Type::Named("bool".into(), span.clone()),
-        Operand::Float(_, span) => Type::Named("f64".into(), span.clone()),
+        Operand::Float(x, span) => float_literal_ty(*x, span.clone(), expected),
         Operand::Bytes(_, span) => Type::Named("bytes".into(), span.clone()),
+    }
+}
+
+/// A float literal takes the operand type (SPEC "ANF"): `f32` where `f32` is
+/// expected and the literal is exact in `f32`, else `f64`. An inexact literal
+/// stays `f64`, so an `f32` slot reports `E_TYPE` instead of rounding silently.
+fn float_literal_ty(x: f64, span: Span, expected: Option<&Type>) -> Type {
+    let exact_f32 = f64::from(x as f32) == x;
+    match expected {
+        Some(Type::Named(name, _)) if name == "f32" && exact_f32 => scalar("f32", span),
+        _ => scalar("f64", span),
     }
 }
 

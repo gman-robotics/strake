@@ -1185,7 +1185,7 @@ impl<'a> Parser<'a> {
     fn parse_import(&mut self, start: u32) -> Result<ImportDecl, Diag> {
         let (path, pst, pen) = self.expect_ident()?;
         Self::check_user_name(&path, (pst, pen), self.file)?;
-        let sig = if path == "region" {
+        let (sig, end) = if path == "region" {
             let (mem, _, _) = self.expect_ident()?;
             if mem != "mem" {
                 return Err(self.err_here());
@@ -1197,7 +1197,7 @@ impl<'a> Parser<'a> {
             if !type_is_region(&ty) {
                 return Err(self.err_here());
             }
-            ImportSig::Region
+            (ImportSig::Region, type_span_end(&ty))
         } else {
             if !self.eat_tok(Tok::Colon)? {
                 return Err(self.err_here());
@@ -1222,9 +1222,9 @@ impl<'a> Parser<'a> {
                 return Err(self.err_here());
             }
             let ret = self.parse_type()?;
-            ImportSig::Fn { params, ret }
+            let end = type_span_end(&ret);
+            (ImportSig::Fn { params, ret }, end)
         };
-        let end = self.lex.byte_pos();
         Ok(ImportDecl {
             span: span(self.file, start, end),
             path,
@@ -1761,7 +1761,7 @@ impl<'a> Parser<'a> {
             let ty = self.parse_type()?;
             let addr = self.parse_operand()?;
             return Ok(Rhs::Load {
-                span: span(self.file, st, self.lex.byte_pos()),
+                span: span(self.file, st, operand_span_end(&addr)),
                 ty,
                 addr,
             });
@@ -1771,7 +1771,7 @@ impl<'a> Parser<'a> {
             let addr = self.parse_operand()?;
             let value = self.parse_operand()?;
             return Ok(Rhs::Store {
-                span: span(self.file, st, self.lex.byte_pos()),
+                span: span(self.file, st, operand_span_end(&value)),
                 ty,
                 addr,
                 value,
@@ -1964,6 +1964,12 @@ impl<'a> Parser<'a> {
             ));
         }
         Ok(Type::Named(name, span(self.file, st, en)))
+    }
+}
+
+fn type_span_end(ty: &Type) -> u32 {
+    match ty {
+        Type::Named(_, s) | Type::List(_, s) | Type::Result(_, _, s) => s.end,
     }
 }
 

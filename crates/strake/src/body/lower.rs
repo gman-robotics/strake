@@ -1673,7 +1673,7 @@ fn lower_operand(
         Operand::Unit(span) => Ok(b.const_i64(block, span.clone(), 0)),
         Operand::Bool(v, span) => Ok(b.const_bool(block, span.clone(), *v)),
         Operand::Bytes(bytes, span) => Ok(b.bytes_new(block, span.clone(), bytes)),
-        Operand::Float(_, _) => Err(LowerError::unsupported("operand type")),
+        Operand::Float(x, span) => Ok(b.const_f64(block, span.clone(), x.to_bits())),
     }
 }
 
@@ -2123,9 +2123,6 @@ end
             .collect();
         assert_eq!(traps.len(), 1);
         assert!(matches!(traps[0].imm, Imm::Trap(TrapImm::User)));
-        for reserved in [TrapImm::Hole, TrapImm::Lower, TrapImm::Fallthrough] {
-            assert!(!matches!(&traps[0].imm, Imm::Trap(k) if *k == reserved));
-        }
     }
 
     /// `--draft` keeps the hole and lowers it to a `trap` with the `Hole` immediate.
