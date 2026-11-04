@@ -1988,9 +1988,13 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// End of the last token of `ty`. `list` / `result` spans cover only the
+/// keyword, so take the greatest end over the inner types too.
 fn type_span_end(ty: &Type) -> u32 {
     match ty {
-        Type::Named(_, s) | Type::List(_, s) | Type::Result(_, _, s) => s.end,
+        Type::Named(_, s) => s.end,
+        Type::List(inner, s) => s.end.max(type_span_end(inner)),
+        Type::Result(ok, err, s) => s.end.max(type_span_end(ok)).max(type_span_end(err)),
     }
 }
 

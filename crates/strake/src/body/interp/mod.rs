@@ -688,9 +688,11 @@ impl<'a> Machine<'a> {
         if inst.op != Op::Eq || inst.args.len() != 2 {
             return Ok(false);
         }
-        let a = self.read_reg(inst.args[0])?;
-        let b = self.read_reg(inst.args[1])?;
-        Ok(matches!((a, b), (Value::F64(_), Value::F64(_))))
+        // An unreadable vreg is not a float eq here; `exec_inst` charges fuel
+        // before it reads, so `E_FUEL` still comes first (SPEC "Fuel").
+        let a = self.read_reg(inst.args[0]).ok();
+        let b = self.read_reg(inst.args[1]).ok();
+        Ok(matches!((a, b), (Some(Value::F64(_)), Some(Value::F64(_)))))
     }
 
     fn ne_by_identity(&self, a: &Value, b: &Value) -> Result<Option<bool>, ExecFault> {
@@ -1808,6 +1810,66 @@ end
             })
         ));
         assert_eq!(NEG_COST_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    fn float_eq(x: f64, y: f64) -> bool {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let a = b.const_f64(0, span.clone(), x.to_bits());
+        let c = b.const_f64(0, span.clone(), y.to_bits());
+        let e = b.eq_i64(0, span.clone(), a, c);
+        b.ret(0, span.clone(), e);
+        let program = b.finish().expect("finish");
+        let eq = program.functions[fidx].blocks[0]
+            .insts
+            .iter()
+            .find(|i| i.op == Op::Eq)
+            .unwrap()
+            .clone();
+        let regs = vec![Some(Value::F64(x)), Some(Value::F64(y)), None];
+        let mut m = t3_machine_with_regs(&program, regs);
+        let mut eq = eq;
+        eq.args = vec![0, 1];
+        eq.dst = Some(2);
+        m.test_step(&eq).unwrap();
+        matches!(m.read_reg(2).unwrap(), Value::Bool(true))
+    }
+
+    #[test]
+    fn float_eq_is_bitwise() {
+        assert!(float_eq(1.5, 1.5));
+        assert!(!float_eq(0.0, -0.0), "+0 and -0 differ");
+        let nan_a = f64::from_bits(0x7FF8_0000_0000_0001);
+        let nan_b = f64::from_bits(0x7FF8_0000_0000_0002);
+        assert!(float_eq(nan_a, nan_a), "same NaN bits are eq");
+        assert!(!float_eq(nan_a, nan_b), "different NaN payloads differ");
+    }
+
+    #[test]
+    fn float_eq_with_unset_vreg_and_no_fuel_is_e_fuel() {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let _f = b.begin_function("f", 0);
+        let a = b.const_f64(0, span.clone(), 1.5f64.to_bits());
+        let e = b.eq_i64(0, span.clone(), a, a);
+        b.ret(0, span.clone(), e);
+        let program = b.finish().expect("finish");
+        let eq = program.functions[0].blocks[0]
+            .insts
+            .iter()
+            .find(|i| i.op == Op::Eq)
+            .unwrap()
+            .clone();
+        let mut m = t3_machine_with_regs(&program, vec![None, None, None]);
+        m.fuel = 0;
+        assert!(matches!(
+            m.test_step(&eq),
+            Err(ExecFault::Trap {
+                code: Code::EFuel,
+                ..
+            })
+        ));
     }
 
     #[test]

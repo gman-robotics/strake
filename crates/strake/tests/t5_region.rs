@@ -121,3 +121,23 @@ fn load_store_spans_end_at_last_operand() {
     );
     assert!(stderr.contains(&want), "{stderr} want {want}");
 }
+
+#[test]
+fn import_span_ends_after_list_and_result_return_types() {
+    for ret in ["list i64", "result i64 bool"] {
+        let line = format!("import host.f : () -> {ret}");
+        let src = format!("strake 1\n\n{line}\n\ntest t\n  ret 0\nend\n");
+        let (code, stderr) = run_src("span_import_ret", &src);
+        assert_eq!(code, Some(2), "{stderr}");
+        let start = src.find("import").unwrap();
+        let want = format!("\"start\":{},\"end\":{}", start, start + line.len());
+        assert!(stderr.contains(&want), "{stderr} want {want}");
+    }
+}
+
+#[test]
+fn f32_record_field_takes_exact_float_literal() {
+    let src = "strake 1\n\ntype p { v: f32 }\n\ntest t\n  r = { v: 0.25 }\n  ret 0\nend\n";
+    let (code, stderr) = run_src("f32_record", src);
+    assert_eq!(code, Some(0), "{stderr}");
+}
