@@ -1,0 +1,13 @@
+strake 1
+
+t0 = list.empty i64
+
+t1 = list.cons 3 t0
+
+xs = list.cons 2 t1
+
+property in_list
+  forall x: i64 in xs
+    assert.eq x x
+  end
+end

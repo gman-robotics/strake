@@ -2427,6 +2427,54 @@ mod tests {
         assert!(err.iter().any(|d| d.code == Code::EForall));
     }
 
+    fn t4_check_codes(src: &str) -> Vec<Code> {
+        let m = syntax::parse(src, "t.strake").expect("parse");
+        match check(&m, false) {
+            Ok(_) => Vec::new(),
+            Err(CheckFailure::Diags(d)) => d.iter().map(|d| d.code).collect(),
+            Err(CheckFailure::Codeless(c)) => panic!("unexpected codeless: {c:?}"),
+        }
+    }
+
+    #[test]
+    fn t4_named_bounds_check_like_literals() {
+        let max = i64::MAX.to_string();
+        for (lo, hi) in [
+            ("0", "10"),
+            ("5", "1"),
+            ("0", max.as_str()),
+            ("1", max.as_str()),
+            ("-3", "-3"),
+        ] {
+            let lit =
+                format!("strake 1\n\nproperty p\n  forall n: i64 in {lo}..{hi}\n  end\nend\n");
+            let named = format!(
+                "strake 1\n\nlo = {lo}\nhi = {hi}\n\nproperty p\n  forall n: i64 in lo..hi\n  end\nend\n"
+            );
+            assert_eq!(t4_check_codes(&lit), t4_check_codes(&named), "{lo}..{hi}");
+        }
+    }
+
+    #[test]
+    fn t4_module_list_name_as_lo_is_forall() {
+        let src =
+            "strake 1\n\nxs = list.empty i64\n\nproperty p\n  forall n: i64 in xs..3\n  end\nend\n";
+        assert_eq!(t4_check_codes(src), vec![Code::EForall]);
+    }
+
+    #[test]
+    fn t4_module_list_name_as_hi_is_forall() {
+        let src =
+            "strake 1\n\nxs = list.empty i64\n\nproperty p\n  forall n: i64 in 0..xs\n  end\nend\n";
+        assert_eq!(t4_check_codes(src), vec![Code::EForall]);
+    }
+
+    #[test]
+    fn t4_unknown_name_bound_is_forall() {
+        let src = "strake 1\n\nproperty p\n  forall n: i64 in 0..nope\n  end\nend\n";
+        assert_eq!(t4_check_codes(src), vec![Code::EForall]);
+    }
+
     #[test]
     fn forall_range_module_binds_check_ok() {
         let src =

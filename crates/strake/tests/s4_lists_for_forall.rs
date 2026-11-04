@@ -96,3 +96,26 @@ fn forall_rev_exec_counter_stays_zero() {
     assert!(stderr.contains("E_FORALL"));
     assert!(!stderr.contains("exec="));
 }
+
+#[test]
+fn forall_module_list_name_is_legal_and_runs() {
+    let path = golden("forall_list_ok.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert!(stderr.is_empty());
+}
+
+#[test]
+fn forall_module_list_body_sees_every_element() {
+    // Same module list as forall_list_ok ([2, 3]); asserting 2 must fail on 3.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let path = dir.join("forall_list_each.strake");
+    let src = std::fs::read_to_string(golden("forall_list_ok.strake"))
+        .expect("read golden")
+        .replace("assert.eq x x", "assert.eq x 2");
+    std::fs::write(&path, src).expect("write");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("\"E_TEST\""));
+    assert!(stderr.contains("\"got\":\"3\""), "{stderr}");
+}

@@ -1639,42 +1639,21 @@ fn lower_forall_range(
     maps: &CalleeMaps,
     in_test: bool,
 ) -> Result<usize, LowerError> {
-    let entry = block;
-    let lo_v = resolve_static_i64_lower(lo, env, b, entry)?;
-    let hi_v = resolve_static_i64_lower(hi, env, b, entry)?;
-    let header = b.new_block();
-    let body_block = b.new_block();
-    let tail = b.new_block();
-    let exit = b.new_block();
-    let i_phi = b.alloc_vreg();
-    let i_back = b.alloc_vreg();
-    let one = b.const_i64(entry, span.clone(), 1);
-    let hi_plus = b.add_i64(entry, span.clone(), hi_v, one);
-    b.merge_regs(
-        header,
-        span.clone(),
-        i_phi,
-        &[(entry, lo_v), (tail, i_back)],
-    );
-    env.insert(binder.to_string(), i_phi);
-    let done = b.ge_i64(header, span.clone(), i_phi, hi_plus);
-    b.jump(entry, span.clone(), header);
-    b.cond_branch(header, span.clone(), done, exit, body_block);
-    let mut cur = body_block;
-    for stmt in body {
-        cur = if in_test {
-            lower_stmt_test(b, cur, stmt, env, loops, plan, maps, "forall body")?
-        } else {
-            lower_stmt(b, cur, stmt, env, loops, plan, maps, false)?
-        };
-    }
-    if !b.block_terminates(cur) {
-        b.jump(cur, span.clone(), tail);
-    }
-    let step = b.add_i64(tail, span.clone(), i_phi, one);
-    b.copy_i64(tail, span.clone(), i_back, step);
-    b.jump(tail, span.clone(), header);
-    Ok(exit)
+    let lo_v = resolve_static_i64_lower(lo, env, b, block)?;
+    let hi_v = resolve_static_i64_lower(hi, env, b, block)?;
+    let ctx = if in_test { "forall body" } else { "" };
+    b.forall_range(block, span.clone(), lo_v, hi_v, |b, start, n| {
+        env.insert(binder.to_string(), n);
+        let mut cur = start;
+        for stmt in body {
+            cur = if in_test {
+                lower_stmt_test(b, cur, stmt, env, loops, plan, maps, ctx)?
+            } else {
+                lower_stmt(b, cur, stmt, env, loops, plan, maps, false)?
+            };
+        }
+        Ok(cur)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
