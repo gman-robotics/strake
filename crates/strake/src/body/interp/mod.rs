@@ -593,14 +593,18 @@ impl<'a> Machine<'a> {
     /// `load` / `store` (T5). Fuel first, then the i128 range check:
     /// `addr < 0` or `addr + width > pages * 65536` is `E_OOB`. Little-endian,
     /// unaligned is legal. Returns `false` when `inst` is not a region op.
+    fn region_access(&self, inst: &Inst) -> Result<(ScalarTy, std::ops::Range<usize>), ExecFault> {
+        let ty = scalar_imm(&inst.imm)?;
+        let addr = value_as_i64(&self.read_reg(inst.args[0])?)?;
+        Ok((ty, self.region_range(addr, ty, &inst.span)?))
+    }
+
     fn exec_region(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
         if !matches!(inst.op, Op::Load | Op::Store) {
             return Ok(false);
         }
         self.charge(1, inst.span.clone())?;
-        let ty = scalar_imm(&inst.imm)?;
-        let addr = value_as_i64(&self.read_reg(inst.args[0])?)?;
-        let range = self.region_range(addr, ty, &inst.span)?;
+        let (ty, range) = self.region_access(inst)?;
         let out = if inst.op == Op::Load {
             decode_scalar(ty, &self.region_bytes()?[range])?
         } else {

@@ -1064,8 +1064,7 @@ fn lower_rhs(
     plan: &LowerPlan<'_>,
 ) -> Result<u32, LowerError> {
     match rhs {
-        Rhs::BinOp { .. } | Rhs::Not { .. } => lower_rhs_op(b, block, rhs, env),
-        Rhs::Operand(op) => Ok(lower_operand(b, block, op, env)?),
+        Rhs::BinOp { .. } | Rhs::Not { .. } | Rhs::Operand(_) => lower_rhs_op(b, block, rhs, env),
         Rhs::Hole { .. } | Rhs::Call { .. } => Err(lower_rhs_elsewhere(rhs)),
         rhs @ (Rhs::Ok { .. } | Rhs::Err { .. }) => lower_rhs_sum(b, block, rhs, env),
         rhs @ (Rhs::ListEmpty { .. }
@@ -1281,6 +1280,7 @@ fn lower_rhs_op(
             rhs,
         } => lower_rhs_binop(b, block, span, op, ty, lhs, rhs, env),
         Rhs::Not { operand, span } => lower_rhs_not(b, block, span, operand, env),
+        Rhs::Operand(op) => Ok(lower_operand(b, block, op, env)?),
         _ => Err(LowerError::unsupported("op rhs form")),
     }
 }
@@ -1357,6 +1357,12 @@ fn infer_rhs_type(
         Rhs::Ok { .. } | Rhs::Err { .. } | Rhs::BinOp { .. } | Rhs::Not { .. } => {
             infer_op_rhs_type(rhs)
         }
+        _ => infer_leaf_rhs_type(rhs),
+    }
+}
+
+fn infer_leaf_rhs_type(rhs: &Rhs) -> Option<Type> {
+    match rhs {
         Rhs::Hole { ty, .. } | Rhs::Load { ty, .. } => Some(ty.clone()),
         Rhs::ListLen { span, .. } | Rhs::BytesLen { span, .. } => {
             Some(Type::Named("i64".into(), span.clone()))
@@ -1368,6 +1374,7 @@ fn infer_rhs_type(
             unit_ty(span),
             span,
         )),
+        _ => None,
     }
 }
 
