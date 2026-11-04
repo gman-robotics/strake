@@ -311,10 +311,13 @@ impl<'a> Machine<'a> {
                 } else {
                     let a = self.read_reg(inst.args[0])?;
                     let b = self.read_reg(inst.args[1])?;
-                    match self.ne_by_identity(&a, &b)? {
-                        // Handles, bools, and floats (bitwise, SPEC "Prelude") share `ne`'s rule.
-                        Some(ne) => !ne,
-                        None => value_as_i64(&a)? == value_as_i64(&b)?,
+                    match (&a, &b) {
+                        (Value::Handle(x), Value::Handle(y)) => self.heap.bytes_eq(*x, *y)?,
+                        _ => {
+                            let ai = value_as_i64(&a)?;
+                            let bi = value_as_i64(&b)?;
+                            ai == bi
+                        }
                     }
                 };
                 self.write_reg(inst.dst, Value::Bool(eq))?;
@@ -327,34 +330,7 @@ impl<'a> Machine<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let dst = inst.dst;
                 match inst.imm {
-                    Imm::Import(import_idx) => {
-                        let stub = self
-                            .program
-                            .imports
-                            .get(import_idx)
-                            .ok_or_else(|| ExecFault::Codeless("bad import idx".into()))?;
-                        let host_fn = self.host.resolve_import(&stub.path);
-                        let fuel_cost = self.host.fuel_cost(&stub.path);
-                        if host_fn.is_none() || fuel_cost < 0 {
-                            return Err(ExecFault::Trap {
-                                code: Code::EImport,
-                                span,
-                            });
-                        }
-                        if self.frames.len() >= 1024 {
-                            return Err(ExecFault::Trap {
-                                code: Code::EStack,
-                                span,
-                            });
-                        }
-                        let cost = fuel_cost.saturating_add(1);
-                        self.charge(cost, span.clone())?;
-                        self.call_entries += 1;
-                        let host_fn = host_fn.unwrap();
-                        let result = host_fn(self, &args)
-                            .map_err(|_| ExecFault::Codeless("host import failed".into()))?;
-                        self.write_reg(dst, result)?;
-                    }
+                    Imm::Import(import_idx) => self.call_import(import_idx, &args, dst, span)?,
                     Imm::Fn(callee) => {
                         if self.frames.len() >= 1024 {
                             return Err(ExecFault::Trap {
@@ -572,9 +548,49 @@ impl<'a> Machine<'a> {
     /// Card ops kept out of `exec_inst` (T3, GMA-479): `ne lt le gt ge` and
     /// `const.i32`/`const.f32`/`const.unit`. Fuel is charged before the op.
     /// Returns `false` when `inst` is not one of them.
+    /// Import call entry (SPEC "Fuel"): an unbound import or a negative host
+    /// `fuel_cost` is `E_IMPORT` with no push and no charge; then depth, then
+    /// `1 + fuel_cost`.
+    fn call_import(
+        &mut self,
+        import_idx: usize,
+        args: &[Value],
+        dst: Option<VReg>,
+        span: Span,
+    ) -> Result<(), ExecFault> {
+        let stub = self
+            .program
+            .imports
+            .get(import_idx)
+            .ok_or_else(|| ExecFault::Codeless("bad import idx".into()))?;
+        let host_fn = self.host.resolve_import(&stub.path);
+        let fuel_cost = self.host.fuel_cost(&stub.path);
+        if host_fn.is_none() || fuel_cost < 0 {
+            return Err(ExecFault::Trap {
+                code: Code::EImport,
+                span,
+            });
+        }
+        if self.frames.len() >= 1024 {
+            return Err(ExecFault::Trap {
+                code: Code::EStack,
+                span,
+            });
+        }
+        let cost = fuel_cost.saturating_add(1);
+        self.charge(cost, span.clone())?;
+        self.call_entries += 1;
+        let host_fn = host_fn.unwrap();
+        let result =
+            host_fn(self, args).map_err(|_| ExecFault::Codeless("host import failed".into()))?;
+        self.write_reg(dst, result)?;
+        Ok(())
+    }
+
     fn exec_card_ext(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
         let is_const = matches!(inst.op, Op::ConstI32 | Op::ConstF32 | Op::ConstUnit);
-        let is_cmp = matches!(inst.op, Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge);
+        let is_cmp = matches!(inst.op, Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge)
+            || self.is_float_eq(inst)?;
         if !is_const && !is_cmp {
             return Ok(false);
         }
@@ -656,9 +672,9 @@ impl<'a> Machine<'a> {
     fn cmp_holds(&self, inst: &Inst) -> Result<bool, ExecFault> {
         let a = self.read_reg(inst.args[0])?;
         let b = self.read_reg(inst.args[1])?;
-        if inst.op == Op::Ne {
+        if matches!(inst.op, Op::Ne | Op::Eq) {
             if let Some(ne) = self.ne_by_identity(&a, &b)? {
-                return Ok(ne);
+                return Ok(ne == (inst.op == Op::Ne));
             }
         }
         Ok(ord_holds(inst.op, value_order(&a, &b)?))
@@ -666,6 +682,17 @@ impl<'a> Machine<'a> {
 
     /// `ne` cases that are not "not ordered-equal": SPEC "Float compare" makes
     /// f64 `ne` bitwise (NaN payload, +0 vs -0); bools and bytes compare by value.
+    /// `eq` on two floats is bitwise (SPEC "Prelude"), the inverse of `ne`, so it
+    /// runs on the compare card path instead of `exec_inst`'s integer `eq`.
+    fn is_float_eq(&self, inst: &Inst) -> Result<bool, ExecFault> {
+        if inst.op != Op::Eq || inst.args.len() != 2 {
+            return Ok(false);
+        }
+        let a = self.read_reg(inst.args[0])?;
+        let b = self.read_reg(inst.args[1])?;
+        Ok(matches!((a, b), (Value::F64(_), Value::F64(_))))
+    }
+
     fn ne_by_identity(&self, a: &Value, b: &Value) -> Result<Option<bool>, ExecFault> {
         Ok(match (a, b) {
             (Value::F64(x), Value::F64(y)) => Some(x.to_bits() != y.to_bits()),

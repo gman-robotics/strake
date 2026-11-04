@@ -1197,10 +1197,8 @@ impl<'a> Parser<'a> {
         Ok((ImportSig::Region, type_span_end(&ty)))
     }
 
-    fn parse_import_fn_sig(&mut self) -> Result<(ImportSig, u32), Diag> {
-        if !self.eat_tok(Tok::Colon)? {
-            return Err(self.err_here());
-        }
+    /// `( T, ... )` of an import fn signature.
+    fn parse_import_params(&mut self) -> Result<Vec<Type>, Diag> {
         if !self.eat_tok(Tok::LParen)? {
             return Err(self.err_here());
         }
@@ -1208,15 +1206,22 @@ impl<'a> Parser<'a> {
         if !matches!(&self.cur, Some((Tok::RParen, _, _))) {
             loop {
                 params.push(self.parse_type()?);
-                if self.eat_tok(Tok::Comma)? {
-                    continue;
+                if !self.eat_tok(Tok::Comma)? {
+                    break;
                 }
-                break;
             }
         }
         if !self.eat_tok(Tok::RParen)? {
             return Err(self.err_here());
         }
+        Ok(params)
+    }
+
+    fn parse_import_fn_sig(&mut self) -> Result<(ImportSig, u32), Diag> {
+        if !self.eat_tok(Tok::Colon)? {
+            return Err(self.err_here());
+        }
+        let params = self.parse_import_params()?;
         if !self.eat_tok(Tok::Arrow)? {
             return Err(self.err_here());
         }
