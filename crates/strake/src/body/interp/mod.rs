@@ -581,14 +581,7 @@ impl<'a> Machine<'a> {
                 return Ok(ne);
             }
         }
-        let ord = match (&a, &b) {
-            (Value::F64(x), Value::F64(y)) => x.partial_cmp(y),
-            (Value::Bool(_), _) | (_, Value::Bool(_)) => {
-                return Err(ExecFault::Codeless("ordered compare on bool".into()));
-            }
-            _ => Some(value_as_i64(&a)?.cmp(&value_as_i64(&b)?)),
-        };
-        Ok(ord_holds(inst.op, ord))
+        Ok(ord_holds(inst.op, value_order(&a, &b)?))
     }
 
     /// `ne` cases that are not "not ordered-equal": SPEC "Float compare" makes
@@ -759,6 +752,18 @@ fn blocks_imm(imm: &Imm) -> Result<Vec<usize>, ExecFault> {
 pub(crate) struct TestExportRun {
     pub outcome: ExportOutcome,
     pub diags: Vec<Diag>,
+}
+
+/// Order for `lt le gt ge` (and non-identity `ne`): IEEE for f64, signed for
+/// integers. Bools have no order in SPEC.
+fn value_order(a: &Value, b: &Value) -> Result<Option<std::cmp::Ordering>, ExecFault> {
+    match (a, b) {
+        (Value::F64(x), Value::F64(y)) => Ok(x.partial_cmp(y)),
+        (Value::Bool(_), _) | (_, Value::Bool(_)) => {
+            Err(ExecFault::Codeless("ordered compare on bool".into()))
+        }
+        _ => Ok(Some(value_as_i64(a)?.cmp(&value_as_i64(b)?))),
+    }
 }
 
 /// `None` is an unordered float pair (NaN): every ordered compare is false.
