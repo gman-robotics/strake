@@ -1378,6 +1378,60 @@ end
         assert!(t3_for_traps_on(5).is_ok());
     }
 
+    /// `forall n in lo..hi` whose body traps when `n == target`.
+    fn t4_forall_traps_on(lo: i64, hi: i64, target: i64) -> Result<i64, ExecFault> {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let lo_v = b.const_i64(0, span.clone(), lo);
+        let hi_v = b.const_i64(0, span.clone(), hi);
+        let exit = b
+            .forall_range(0, span.clone(), lo_v, hi_v, |b, start, n| {
+                let hit = b.new_block();
+                let next = b.new_block();
+                let want = b.const_i64(start, span.clone(), target);
+                let is_target = b.eq_i64(start, span.clone(), n, want);
+                b.cond_branch(start, span.clone(), is_target, hit, next);
+                b.trap_user(hit, span.clone());
+                Ok::<usize, ()>(next)
+            })
+            .expect("forall_range");
+        b.ret_i64(exit, span.clone(), 0);
+        let program = b.finish().expect("finish");
+        let mut m = Machine::new(&program, 1000, &EmptyHost);
+        m.run_root_function(fidx)
+    }
+
+    fn t4_trapped(res: Result<i64, ExecFault>) -> bool {
+        matches!(
+            res,
+            Err(ExecFault::Trap {
+                code: Code::EType,
+                ..
+            })
+        )
+    }
+
+    #[test]
+    fn t4_forall_range_visits_lo_through_hi_inclusive() {
+        for target in [-1, 0, 1] {
+            assert!(t4_trapped(t4_forall_traps_on(-1, 1, target)), "{target}");
+        }
+        assert!(t4_forall_traps_on(-1, 1, 2).is_ok());
+        assert!(t4_forall_traps_on(-1, 1, -2).is_ok());
+        assert!(
+            t4_trapped(t4_forall_traps_on(7, 7, 7)),
+            "lo == hi runs once"
+        );
+    }
+
+    #[test]
+    fn t4_forall_range_reaches_i64_max_without_wrapping() {
+        let max = i64::MAX;
+        assert!(t4_trapped(t4_forall_traps_on(max - 2, max, max)));
+        assert!(t4_forall_traps_on(max - 2, max, max - 3).is_ok());
+    }
+
     #[test]
     fn value_as_and_imm_helpers() {
         assert_eq!(value_as_i32(&Value::I32(7)).unwrap(), 7);

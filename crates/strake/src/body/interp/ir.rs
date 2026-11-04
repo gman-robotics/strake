@@ -755,6 +755,43 @@ impl Builder {
         Ok(exit)
     }
 
+    /// Normative `forall n in LO..HI` loop (Phase 2 T4). Check has proved
+    /// `LO <= HI` (span >= 1, SPEC "Forall span"), so the body runs first and the
+    /// exit test is `n >= HI` before the step. The index never computes `HI + 1`,
+    /// so `HI = i64::MAX` does not wrap; fuel is the only runtime bound.
+    /// `body` gets its entry block and the index vreg and returns its last block.
+    /// Returns the loop exit block.
+    pub(crate) fn forall_range<E>(
+        &mut self,
+        entry: usize,
+        span: Span,
+        lo: VReg,
+        hi: VReg,
+        body: impl FnOnce(&mut Self, usize, VReg) -> Result<usize, E>,
+    ) -> Result<usize, E> {
+        let [body_block, tail, step, exit] = std::array::from_fn(|_| self.new_block());
+        let i_phi = self.alloc_vreg();
+        let i_back = self.alloc_vreg();
+        self.merge_regs(
+            body_block,
+            span.clone(),
+            i_phi,
+            &[(entry, lo), (step, i_back)],
+        );
+        self.jump(entry, span.clone(), body_block);
+        let last = body(self, body_block, i_phi)?;
+        if !self.block_terminates(last) {
+            self.jump(last, span.clone(), tail);
+        }
+        let done = self.ge_i64(tail, span.clone(), i_phi, hi);
+        self.cond_branch(tail, span.clone(), done, exit, step);
+        let one = self.const_i64(step, span.clone(), 1);
+        let next_i = self.add_i64(step, span.clone(), i_phi, one);
+        self.copy_i64(step, span.clone(), i_back, next_i);
+        self.jump(step, span, body_block);
+        Ok(exit)
+    }
+
     pub(crate) fn trap_lower(&mut self, block: usize, span: Span) {
         self.emit(
             block,

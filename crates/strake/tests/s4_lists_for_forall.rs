@@ -96,3 +96,34 @@ fn forall_rev_exec_counter_stays_zero() {
     assert!(stderr.contains("E_FORALL"));
     assert!(!stderr.contains("exec="));
 }
+
+#[test]
+fn forall_module_list_name_is_legal_and_runs() {
+    let path = golden("forall_list_ok.strake");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert!(stderr.is_empty());
+}
+
+/// Runs forall_list_ok ([2, 3]) with the body asserting `x == want`.
+fn forall_list_ok_asserting(want: &str) -> (std::process::ExitStatus, String) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let path = dir.join(format!("forall_list_each_{want}.strake"));
+    let src = std::fs::read_to_string(golden("forall_list_ok.strake"))
+        .expect("read golden")
+        .replace("assert.eq x x", &format!("assert.eq x {want}"));
+    std::fs::write(&path, src).expect("write");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    (status, stderr)
+}
+
+#[test]
+fn forall_module_list_body_sees_every_element() {
+    // Asserting 2 fails on 3 and asserting 3 fails on 2, so both were visited.
+    for (want, got) in [("2", "3"), ("3", "2")] {
+        let (status, stderr) = forall_list_ok_asserting(want);
+        assert_eq!(status.code(), Some(1), "{stderr}");
+        assert!(stderr.contains("\"E_TEST\""));
+        assert!(stderr.contains(&format!("\"got\":\"{got}\"")), "{stderr}");
+    }
+}
