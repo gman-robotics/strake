@@ -1533,6 +1533,11 @@ fn record_fields_fit(
     })
 }
 
+/// Mirrors check's `float_literal_ty`: `f32` only when the literal is exact in f32.
+fn float_fits(x: f64, expected: &Type) -> bool {
+    type_name_is(expected, "f64") || (type_name_is(expected, "f32") && f64::from(x as f32) == x)
+}
+
 fn operand_fits(
     op: &Operand,
     expected: &Type,
@@ -1540,11 +1545,7 @@ fn operand_fits(
 ) -> bool {
     match op {
         Operand::Bool(_, _) => type_name_is(expected, "bool"),
-        // Mirrors check's `float_literal_ty`: `f32` only when the literal is exact in f32.
-        Operand::Float(x, _) => {
-            type_name_is(expected, "f64")
-                || (type_name_is(expected, "f32") && f64::from(*x as f32) == *x)
-        }
+        Operand::Float(x, _) => float_fits(*x, expected),
         Operand::Bytes(_, _) => type_name_is(expected, "bytes"),
         Operand::Unit(_) => type_name_is(expected, "unit"),
         Operand::Int(n, _) => match expected {
