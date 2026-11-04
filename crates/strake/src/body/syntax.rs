@@ -2607,7 +2607,7 @@ pub(crate) fn region_pages(module: &Module) -> Option<i64> {
         return None;
     }
     let directive = module.items.iter().find_map(|i| match i {
-        Item::Pages(n, _) => Some(*n as i64),
+        Item::Pages(n, _) => Some(i64::try_from(*n).unwrap_or(i64::MAX)),
         _ => None,
     });
     Some(directive.unwrap_or(DEFAULT_PAGES))

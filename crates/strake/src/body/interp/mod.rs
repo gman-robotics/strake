@@ -111,7 +111,7 @@ impl<'a> Machine<'a> {
             sums: Vec::new(),
             region: program
                 .region_pages
-                .map(|pages| vec![0u8; (i128::from(pages) * PAGE_BYTES) as usize]),
+                .map(|pages| vec![0u8; region_len(pages)]),
         }
     }
 
@@ -917,56 +917,71 @@ pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<TestEx
     if let Some(fault) = instantiate_fault(program, host) {
         return vec![fault];
     }
-    program
-        .exports
-        .iter()
-        .filter(|e| e.is_test)
-        .map(|e| {
-            let mut m = Machine::new_test_channel(program, program.fuel, host);
-            let (outcome, trap_diag) = match m.run_root_function(e.fn_idx) {
-                Ok(ret) => (
-                    ExportOutcome {
-                        trapped: false,
-                        ret,
-                    },
-                    None,
-                ),
-                Err(ExecFault::Trap { code, span }) => (
-                    ExportOutcome {
+    let runs = program.exports.iter().filter(|e| e.is_test).map(|e| {
+        let mut m = Machine::new_test_channel(program, program.fuel, host);
+        let (outcome, trap_diag) = match m.run_root_function(e.fn_idx) {
+            Ok(ret) => (
+                ExportOutcome {
+                    trapped: false,
+                    ret,
+                },
+                None,
+            ),
+            Err(ExecFault::Trap { code, span }) => (
+                ExportOutcome {
+                    trapped: true,
+                    ret: 0,
+                },
+                Some(trap_diag(code, span)),
+            ),
+            Err(ExecFault::Codeless(_)) => (
+                ExportOutcome {
+                    trapped: true,
+                    ret: 0,
+                },
+                None,
+            ),
+            Err(ExecFault::Halt(msg)) => {
+                return TestExportRun {
+                    outcome: ExportOutcome {
                         trapped: true,
                         ret: 0,
                     },
-                    Some(trap_diag(code, span)),
-                ),
-                Err(ExecFault::Codeless(_)) => (
-                    ExportOutcome {
-                        trapped: true,
-                        ret: 0,
-                    },
-                    None,
-                ),
-                Err(ExecFault::Halt(msg)) => {
-                    return TestExportRun {
-                        outcome: ExportOutcome {
-                            trapped: true,
-                            ret: 0,
-                        },
-                        diags: Vec::new(),
-                        halt: Some(msg),
-                    };
-                }
-            };
-            let mut diags = m.take_result_diags();
-            if let Some(td) = trap_diag {
-                diags.push(td);
+                    diags: Vec::new(),
+                    halt: Some(msg),
+                };
             }
-            TestExportRun {
-                outcome,
-                diags,
-                halt: None,
-            }
-        })
-        .collect()
+        };
+        let mut diags = m.take_result_diags();
+        if let Some(td) = trap_diag {
+            diags.push(td);
+        }
+        TestExportRun {
+            outcome,
+            diags,
+            halt: None,
+        }
+    });
+    // SPEC §2.17: a halt stops the process; later test exports never run.
+    let mut out = Vec::new();
+    for run in runs {
+        let halted = run.halt.is_some();
+        out.push(run);
+        if halted {
+            break;
+        }
+    }
+    out
+}
+
+/// Region byte length for `pages`. A negative or unrepresentable size is a
+/// host allocation failure, so abort instead of wrapping to a short buffer.
+fn region_len(pages: i64) -> usize {
+    i128::from(pages)
+        .checked_mul(PAGE_BYTES)
+        .filter(|n| *n >= 0)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or_else(|| panic!("region of {pages} pages cannot be allocated"))
 }
 
 /// Instantiate (SPEC "Traps and region"): every `import` fn must have a host
@@ -1588,6 +1603,18 @@ end
     }
 
     #[test]
+    fn t5_region_len_checks_bounds() {
+        assert_eq!(region_len(1), 65536);
+        assert_eq!(region_len(0), 0);
+        for bad in [-1, 1 << 48, i64::MAX] {
+            assert!(
+                std::panic::catch_unwind(|| region_len(bad)).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
     fn t5_scalar_codec_round_trips() {
         let cases = [
             (ScalarTy::I32, Value::I32(-5)),
@@ -1645,6 +1672,31 @@ end
         assert!(runs[0].outcome.trapped);
         assert_eq!(runs[0].diags.len(), 1);
         assert_eq!(runs[0].diags[0].code, Code::EImport);
+        assert_eq!(T5_HOST_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn t5_bool_halt_stops_later_test_exports() {
+        let span = t3_span();
+        let mut b = Builder::new();
+        b.set_region_pages(1);
+        let bound = b.add_import("host.bound", span.clone());
+        let first = b.begin_function("test.a", 0);
+        let addr = b.const_i64(0, span.clone(), 0);
+        let two = b.const_i64(0, span.clone(), 2);
+        let _s = b.store(0, span.clone(), ScalarTy::I64, addr, two);
+        let _l = b.load(0, span.clone(), ScalarTy::Bool, addr);
+        b.ret_i64(0, span.clone(), 0);
+        b.add_export("test.a", first, true);
+        let second = b.begin_function("test.b", 0);
+        let _r = b.call_import(0, span.clone(), bound, &[]);
+        b.ret_i64(0, span.clone(), 0);
+        b.add_export("test.b", second, true);
+        let program = b.finish().expect("finish");
+        T5_HOST_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let runs = run_test_exports(&program, &T5HalfHost);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].halt.as_deref(), Some(BOOL_LOAD_HALT));
         assert_eq!(T5_HOST_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
