@@ -576,21 +576,30 @@ impl<'a> Machine<'a> {
     fn cmp_holds(&self, inst: &Inst) -> Result<bool, ExecFault> {
         let a = self.read_reg(inst.args[0])?;
         let b = self.read_reg(inst.args[1])?;
-        let ne = inst.op == Op::Ne;
-        let ord = match (&a, &b) {
-            // SPEC "Float compare": `ne` is bitwise (NaN payload, +0 vs -0).
-            (Value::F64(x), Value::F64(y)) if ne => return Ok(x.to_bits() != y.to_bits()),
-            (Value::F64(x), Value::F64(y)) => x.partial_cmp(y),
-            (Value::Bool(x), Value::Bool(y)) if ne => return Ok(x != y),
-            (Value::Handle(x), Value::Handle(y)) if ne => {
-                return Ok(!self.heap.bytes_eq(*x, *y)?);
+        if inst.op == Op::Ne {
+            if let Some(ne) = self.ne_by_identity(&a, &b)? {
+                return Ok(ne);
             }
+        }
+        let ord = match (&a, &b) {
+            (Value::F64(x), Value::F64(y)) => x.partial_cmp(y),
             (Value::Bool(_), _) | (_, Value::Bool(_)) => {
                 return Err(ExecFault::Codeless("ordered compare on bool".into()));
             }
             _ => Some(value_as_i64(&a)?.cmp(&value_as_i64(&b)?)),
         };
         Ok(ord_holds(inst.op, ord))
+    }
+
+    /// `ne` cases that are not "not ordered-equal": SPEC "Float compare" makes
+    /// f64 `ne` bitwise (NaN payload, +0 vs -0); bools and bytes compare by value.
+    fn ne_by_identity(&self, a: &Value, b: &Value) -> Result<Option<bool>, ExecFault> {
+        Ok(match (a, b) {
+            (Value::F64(x), Value::F64(y)) => Some(x.to_bits() != y.to_bits()),
+            (Value::Bool(x), Value::Bool(y)) => Some(x != y),
+            (Value::Handle(x), Value::Handle(y)) => Some(!self.heap.bytes_eq(*x, *y)?),
+            _ => None,
+        })
     }
 
     fn jump(&mut self, block: usize, ip: usize) -> Result<(), ExecFault> {
