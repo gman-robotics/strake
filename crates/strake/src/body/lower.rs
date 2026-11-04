@@ -221,23 +221,8 @@ fn apply_region_pages(b: &mut Builder, module: &Module) {
 
 pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
     let mut b = Builder::new();
-    b.set_entry_charge_span(sketch.module.span.clone());
-    for item in &sketch.module.items {
-        if let Item::Fuel(n, span) = item {
-            b.set_fuel(*n as i64);
-            b.set_entry_charge_span(span.clone());
-        }
-    }
-    apply_region_pages(&mut b, &sketch.module);
-    let mut import_indices = std::collections::HashMap::new();
-    for item in &sketch.module.items {
-        if let Item::Import(im) = item {
-            if matches!(im.sig, ImportSig::Fn { .. }) {
-                let idx = b.add_import(&im.path, im.span.clone());
-                import_indices.insert(im.path.clone(), idx);
-            }
-        }
-    }
+    lower_module_header(&mut b, &sketch.module);
+    let import_indices = lower_imports(&mut b, &sketch.module);
     let mut fn_indices = std::collections::HashMap::new();
     for item in &sketch.module.items {
         if let Item::Fn(f) = item {
@@ -263,46 +248,77 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
         }
     }
     for item in &sketch.module.items {
-        match item {
-            Item::Test(t) => {
-                let export = format!("test.{}", t.name);
-                let idx = lower_test(&mut b, t, &mut plan, &maps)?;
-                b.add_export(&export, idx, true);
-            }
-            Item::Property(p) => {
-                let export = format!("property.{}", p.name);
-                let idx = lower_property(&mut b, p, &mut plan, &maps)?;
-                b.add_export(&export, idx, true);
-            }
-            Item::Fn(f) => {
-                if f.private {
-                    continue;
-                }
-                let idx = fn_indices[&f.name];
-                b.add_export(&f.name, idx, false);
-            }
-            _ => {}
+        lower_export(&mut b, item, &mut plan, &maps)?;
+    }
+    verify_plan_visited(&plan, sketch)?;
+    b.finish().map_err(LowerError::Finish)
+}
+
+/// Module directives: `fuel` (and its entry-charge span) and the region pages.
+fn lower_module_header(b: &mut Builder, module: &Module) {
+    b.set_entry_charge_span(module.span.clone());
+    for item in &module.items {
+        if let Item::Fuel(n, span) = item {
+            b.set_fuel(*n as i64);
+            b.set_entry_charge_span(span.clone());
         }
     }
-    let total_loops = sketch.carry.loops.len();
-    let total_joins = sketch.carry.joins.len();
-    if plan.visited_loops.len() != total_loops {
+    apply_region_pages(b, module);
+}
+
+fn lower_imports(b: &mut Builder, module: &Module) -> std::collections::HashMap<String, usize> {
+    let mut import_indices = std::collections::HashMap::new();
+    for item in &module.items {
+        if let Item::Import(im) = item {
+            if matches!(im.sig, ImportSig::Fn { .. }) {
+                let idx = b.add_import(&im.path, im.span.clone());
+                import_indices.insert(im.path.clone(), idx);
+            }
+        }
+    }
+    import_indices
+}
+
+fn lower_export(
+    b: &mut Builder,
+    item: &Item,
+    plan: &mut LowerPlan<'_>,
+    maps: &CalleeMaps,
+) -> Result<(), LowerError> {
+    match item {
+        Item::Test(t) => {
+            let idx = lower_test(b, t, plan, maps)?;
+            b.add_export(&format!("test.{}", t.name), idx, true);
+        }
+        Item::Property(p) => {
+            let idx = lower_property(b, p, plan, maps)?;
+            b.add_export(&format!("property.{}", p.name), idx, true);
+        }
+        Item::Fn(f) if !f.private => b.add_export(&f.name, maps.fn_indices[&f.name], false),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Lower must visit every carry-plan site check produced.
+fn verify_plan_visited(plan: &LowerPlan<'_>, sketch: &Sketch) -> Result<(), LowerError> {
+    let carry = &sketch.carry;
+    if plan.visited_loops.len() != carry.loops.len() {
         return Err(LowerError::unsupported(
             "carry plan loop site count mismatch",
         ));
     }
-    if plan.visited_joins.len() != total_joins {
+    if plan.visited_joins.len() != carry.joins.len() {
         return Err(LowerError::unsupported(
             "carry plan join site count mismatch",
         ));
     }
-    let total_matches = sketch.carry.matches.len();
-    if plan.visited_matches.len() != total_matches {
+    if plan.visited_matches.len() != carry.matches.len() {
         return Err(LowerError::unsupported(
             "carry plan match site count mismatch",
         ));
     }
-    b.finish().map_err(LowerError::Finish)
+    Ok(())
 }
 
 fn lower_fn_body(
@@ -1057,8 +1073,7 @@ fn lower_rhs(
         } => lower_rhs_binop(b, block, span, op, ty, lhs, rhs, env),
         Rhs::Not { operand, span } => lower_rhs_not(b, block, span, operand, env),
         Rhs::Operand(op) => Ok(lower_operand(b, block, op, env)?),
-        Rhs::Hole { .. } => Err(LowerError::unsupported("hole must be lowered via assign")),
-        Rhs::Call { .. } => Err(LowerError::unsupported("call in rhs without indices")),
+        Rhs::Hole { .. } | Rhs::Call { .. } => Err(lower_rhs_elsewhere(rhs)),
         rhs @ (Rhs::Ok { .. } | Rhs::Err { .. }) => lower_rhs_sum(b, block, rhs, env),
         rhs @ (Rhs::ListEmpty { .. }
         | Rhs::ListCons { .. }
@@ -1067,10 +1082,7 @@ fn lower_rhs(
         rhs @ (Rhs::BytesNew { .. } | Rhs::BytesLen { .. } | Rhs::BytesGet { .. }) => {
             lower_rhs_bytes(b, block, rhs, env)
         }
-        Rhs::Record { span, fields } => lower_rhs_record(b, block, span, fields, env, plan),
-        Rhs::Project { span, base, field } => {
-            lower_rhs_project(b, block, span, base, field, env, plan)
-        }
+        Rhs::Record { .. } | Rhs::Project { .. } => lower_rhs_named(b, block, rhs, env, plan),
         rhs @ (Rhs::Load { .. } | Rhs::Store { .. }) => lower_rhs_region(b, block, rhs, env),
     }
 }
@@ -1261,6 +1273,31 @@ fn ty_span() -> Span {
     }
 }
 
+/// Holes and calls lower through `Assign`, which knows the callee indices.
+fn lower_rhs_elsewhere(rhs: &Rhs) -> LowerError {
+    if matches!(rhs, Rhs::Hole { .. }) {
+        LowerError::unsupported("hole must be lowered via assign")
+    } else {
+        LowerError::unsupported("call in rhs without indices")
+    }
+}
+
+fn lower_rhs_named(
+    b: &mut Builder,
+    block: usize,
+    rhs: &Rhs,
+    env: &std::collections::HashMap<String, u32>,
+    plan: &LowerPlan<'_>,
+) -> Result<u32, LowerError> {
+    match rhs {
+        Rhs::Record { span, fields } => lower_rhs_record(b, block, span, fields, env, plan),
+        Rhs::Project { span, base, field } => {
+            lower_rhs_project(b, block, span, base, field, env, plan)
+        }
+        _ => Err(LowerError::unsupported("record rhs form")),
+    }
+}
+
 fn region_scalar(ty: &Type) -> Result<ScalarTy, LowerError> {
     match ty {
         Type::Named(n, _) => ScalarTy::from_name(n),
@@ -1299,64 +1336,85 @@ fn infer_rhs_type(
     known: &std::collections::HashMap<String, Type>,
 ) -> Option<Type> {
     match rhs {
+        Rhs::Record { .. } | Rhs::Project { .. } => infer_record_rhs_type(module, rhs, known),
+        Rhs::ListEmpty { .. } | Rhs::ListCons { .. } | Rhs::ListGet { .. } => {
+            infer_list_rhs_type(rhs, known)
+        }
+        Rhs::Operand(op) => infer_operand_type(op, known),
+        Rhs::Call { callee, .. } => callee_return_type(module, callee),
+        Rhs::Ok { ty, span, .. } => Some(result_ty(ty.clone(), unit_ty(span), span)),
+        Rhs::Err { ty, span, .. } => Some(result_ty(unit_ty(span), ty.clone(), span)),
+        Rhs::BinOp { op, ty, span, .. } => Some(binop_type(op, ty, span)),
+        Rhs::Hole { ty, .. } | Rhs::Load { ty, .. } => Some(ty.clone()),
+        Rhs::Not { span, .. } => Some(Type::Named("bool".into(), span.clone())),
+        Rhs::ListLen { span, .. } | Rhs::BytesLen { span, .. } => {
+            Some(Type::Named("i64".into(), span.clone()))
+        }
+        Rhs::BytesNew { span, .. } => Some(Type::Named("bytes".into(), span.clone())),
+        Rhs::Store { span, .. } => Some(unit_ty(span)),
+        Rhs::BytesGet { span, .. } => Some(result_ty(
+            Type::Named("i64".into(), span.clone()),
+            unit_ty(span),
+            span,
+        )),
+    }
+}
+
+fn unit_ty(span: &Span) -> Type {
+    Type::Named("unit".into(), span.clone())
+}
+
+fn result_ty(ok: Type, err: Type, span: &Span) -> Type {
+    Type::Result(Box::new(ok), Box::new(err), span.clone())
+}
+
+/// Compares are `bool`; arithmetic is the operand type.
+fn binop_type(op: &BinOp, ty: &Type, span: &Span) -> Type {
+    if matches!(
+        op,
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+    ) {
+        Type::Named("bool".into(), span.clone())
+    } else {
+        ty.clone()
+    }
+}
+
+fn infer_record_rhs_type(
+    module: &Module,
+    rhs: &Rhs,
+    known: &std::collections::HashMap<String, Type>,
+) -> Option<Type> {
+    match rhs {
         Rhs::Record { fields, .. } => {
             let name = match_record_name(module, fields, known).ok()?;
             Some(Type::Named(name, ty_span()))
         }
         Rhs::Project { base, field, .. } => {
-            let base_ty = known.get(base)?;
-            let Type::Named(tn, _) = base_ty else {
+            let Type::Named(tn, _) = known.get(base)? else {
                 return None;
             };
             let decls = record_decls(module, tn)?;
             Some(decls.iter().find(|f| f.name == *field)?.ty.clone())
         }
-        Rhs::Operand(op) => infer_operand_type(op, known),
-        Rhs::Call { callee, .. } => callee_return_type(module, callee),
-        Rhs::Ok { ty, span, .. } => Some(Type::Result(
-            Box::new(ty.clone()),
-            Box::new(Type::Named("unit".into(), span.clone())),
-            span.clone(),
-        )),
-        Rhs::Err { ty, span, .. } => Some(Type::Result(
-            Box::new(Type::Named("unit".into(), span.clone())),
-            Box::new(ty.clone()),
-            span.clone(),
-        )),
-        Rhs::BinOp {
-            op: BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
-            span,
-            ..
-        } => Some(Type::Named("bool".into(), span.clone())),
-        Rhs::BinOp { ty, .. } => Some(ty.clone()),
-        Rhs::Not { span, .. } => Some(Type::Named("bool".into(), span.clone())),
-        Rhs::Hole { ty, .. } => Some(ty.clone()),
+        _ => None,
+    }
+}
+
+fn infer_list_rhs_type(rhs: &Rhs, known: &std::collections::HashMap<String, Type>) -> Option<Type> {
+    match rhs {
         Rhs::ListEmpty { span, elem } => Some(Type::List(Box::new(elem.clone()), span.clone())),
         Rhs::ListCons { tail, .. } => match infer_operand_type(tail, known) {
             Some(Type::List(inner, span)) => Some(Type::List(inner, span)),
             _ => None,
         },
-        Rhs::ListLen { span, .. } | Rhs::BytesLen { span, .. } => {
-            Some(Type::Named("i64".into(), span.clone()))
-        }
         Rhs::ListGet { span, list, .. } => {
             let Type::List(elem, _) = infer_operand_type(list, known)? else {
                 return None;
             };
-            Some(Type::Result(
-                elem,
-                Box::new(Type::Named("unit".into(), span.clone())),
-                span.clone(),
-            ))
+            Some(result_ty(*elem, unit_ty(span), span))
         }
-        Rhs::BytesNew { span, .. } => Some(Type::Named("bytes".into(), span.clone())),
-        Rhs::Load { ty, .. } => Some(ty.clone()),
-        Rhs::Store { span, .. } => Some(Type::Named("unit".into(), span.clone())),
-        Rhs::BytesGet { span, .. } => Some(Type::Result(
-            Box::new(Type::Named("i64".into(), span.clone())),
-            Box::new(Type::Named("unit".into(), span.clone())),
-            span.clone(),
-        )),
+        _ => None,
     }
 }
 

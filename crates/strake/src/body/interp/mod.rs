@@ -606,12 +606,21 @@ impl<'a> Machine<'a> {
         let out = if inst.op == Op::Load {
             decode_scalar(ty, &self.region_bytes()?[range])?
         } else {
-            let bytes = encode_scalar(ty, &self.read_reg(inst.args[1])?)?;
-            self.region_bytes_mut()?[range].copy_from_slice(&bytes);
-            Value::Unit
+            self.region_store(ty, range, inst.args[1])?
         };
         self.write_reg(inst.dst, out)?;
         Ok(true)
+    }
+
+    fn region_store(
+        &mut self,
+        ty: ScalarTy,
+        range: std::ops::Range<usize>,
+        value: VReg,
+    ) -> Result<Value, ExecFault> {
+        let bytes = encode_scalar(ty, &self.read_reg(value)?)?;
+        self.region_bytes_mut()?[range].copy_from_slice(&bytes);
+        Ok(Value::Unit)
     }
 
     fn region_range(
@@ -813,11 +822,12 @@ fn encode_scalar(ty: ScalarTy, v: &Value) -> Result<Vec<u8>, ExecFault> {
         ScalarTy::I64 => value_as_i64(v)?.to_le_bytes().to_vec(),
         ScalarTy::F32 => (value_as_f64(v)? as f32).to_le_bytes().to_vec(),
         ScalarTy::F64 => value_as_f64(v)?.to_le_bytes().to_vec(),
-        ScalarTy::Bool => match v {
-            Value::Bool(b) => vec![u8::from(*b)],
-            _ => return Err(ExecFault::Codeless("store bool needs bool".into())),
-        },
+        ScalarTy::Bool => vec![u8::from(value_as_bool(v)?)],
     })
+}
+
+fn value_as_bool(v: &Value) -> Result<bool, ExecFault> {
+    value_or_err!(v, "store bool needs bool", Value::Bool(b) => *b)
 }
 
 /// Value for `load`. A bool byte other than 0 or 1 is the §2.17 stop.

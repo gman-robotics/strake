@@ -52,6 +52,7 @@ impl CheckState {
         sum_types: HashMap<String, SumTypeInfo>,
         record_types: HashMap<String, Vec<(String, Type)>>,
         module_int_binds: HashMap<String, i128>,
+        has_region: bool,
     ) -> Self {
         Self {
             carry: CarryPlan::default(),
@@ -61,7 +62,7 @@ impl CheckState {
             sum_types,
             record_types,
             module_int_binds,
-            has_region: false,
+            has_region,
         }
     }
 
@@ -77,8 +78,8 @@ pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure
     let sum_types = build_sum_type_index(module);
     let record_types = build_record_type_index(module);
     let module_int_binds = module_int_bindings(module);
-    let mut state = CheckState::new(sum_types, record_types, module_int_binds);
-    state.has_region = super::syntax::region_pages(module).is_some();
+    let has_region = super::syntax::region_pages(module).is_some();
+    let mut state = CheckState::new(sum_types, record_types, module_int_binds, has_region);
     let fn_table: Vec<&FnItem> = module
         .items
         .iter()
@@ -1491,56 +1492,19 @@ fn check_rhs(
     diags: &mut Vec<Diag>,
 ) -> Type {
     match rhs {
-        Rhs::BinOp {
-            ty,
-            lhs,
-            rhs,
-            span,
-            op,
-        } => {
-            if cmp_forbidden(op, ty, lhs, rhs, ctx, state) {
-                diags.push(type_diag(span.clone()));
-                return ty.clone();
-            }
-            let lt = operand_ty(lhs, ctx, state, fns, Some(ty), diags);
-            let rt = operand_ty(rhs, ctx, state, fns, Some(ty), diags);
-            if !types_compatible(&lt, ty) || !types_compatible(&rt, ty) {
-                diags.push(type_diag(span.clone()));
-            }
-            binop_result_ty(op, ty, span)
+        Rhs::BinOp { .. } | Rhs::Call { .. } | Rhs::Not { .. } => {
+            check_rhs_op(rhs, ctx, state, fns, diags)
         }
-        Rhs::Call { span, callee, args } => {
-            let sig = resolve_fn(callee, fns);
-            if sig.is_none() {
-                diags.push(import_diag(span.clone()));
-                return scalar("i64", span.clone());
-            }
-            let (params, ret) = sig.unwrap();
-            if params.len() != args.len() {
-                diags.push(type_diag(span.clone()));
-            }
-            for (arg, param_ty) in args.iter().zip(params.iter()) {
-                let at = operand_ty(arg, ctx, state, fns, Some(param_ty), diags);
-                if !types_compatible(&at, param_ty) {
-                    diags.push(type_diag(span.clone()));
-                }
-            }
-            ret
-        }
-        Rhs::Not { operand, span } => {
-            let t = operand_ty(
-                operand,
-                ctx,
-                state,
-                fns,
-                Some(&scalar("bool", span.clone())),
-                diags,
-            );
-            if !types_compatible(&t, &scalar("bool", span.clone())) {
-                diags.push(type_diag(span.clone()));
-            }
-            scalar("bool", span.clone())
-        }
+        Rhs::ListEmpty { .. }
+        | Rhs::ListCons { .. }
+        | Rhs::ListLen { .. }
+        | Rhs::ListGet { .. } => check_rhs_list(rhs, ctx, state, fns, diags),
+        Rhs::BytesNew { .. }
+        | Rhs::BytesLen { .. }
+        | Rhs::BytesGet { .. }
+        | Rhs::Record { .. }
+        | Rhs::Project { .. } => check_rhs_data(rhs, ctx, state, fns, diags),
+        Rhs::Load { .. } | Rhs::Store { .. } => check_rhs_region(rhs, ctx, state, fns, diags),
         Rhs::Ok { ty, value, span } => {
             check_ok_err_rhs(true, ty, value, span, ctx, state, fns, diags)
         }
@@ -1549,6 +1513,103 @@ fn check_rhs(
         }
         Rhs::Operand(op) => operand_ty(op, ctx, state, fns, None, diags),
         Rhs::Hole { ty, .. } => ty.clone(),
+    }
+}
+
+fn check_rhs_op(
+    rhs: &Rhs,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    match rhs {
+        Rhs::BinOp {
+            ty,
+            lhs,
+            rhs,
+            span,
+            op,
+        } => check_binop(op, ty, lhs, rhs, span, ctx, state, fns, diags),
+        Rhs::Call { span, callee, args } => check_call(span, callee, args, ctx, state, fns, diags),
+        Rhs::Not { operand, span } => check_not(operand, span, ctx, state, fns, diags),
+        _ => unreachable!("check_rhs_op: op forms only"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_binop(
+    op: &BinOp,
+    ty: &Type,
+    lhs: &Operand,
+    rhs: &Operand,
+    span: &Span,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    if cmp_forbidden(op, ty, lhs, rhs, ctx, state) {
+        diags.push(type_diag(span.clone()));
+        return ty.clone();
+    }
+    let lt = operand_ty(lhs, ctx, state, fns, Some(ty), diags);
+    let rt = operand_ty(rhs, ctx, state, fns, Some(ty), diags);
+    if !types_compatible(&lt, ty) || !types_compatible(&rt, ty) {
+        diags.push(type_diag(span.clone()));
+    }
+    binop_result_ty(op, ty, span)
+}
+
+fn check_call(
+    span: &Span,
+    callee: &str,
+    args: &[Operand],
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    let Some((params, ret)) = resolve_fn(callee, fns) else {
+        diags.push(import_diag(span.clone()));
+        return scalar("i64", span.clone());
+    };
+    if params.len() != args.len() {
+        diags.push(type_diag(span.clone()));
+    }
+    for (arg, param_ty) in args.iter().zip(params.iter()) {
+        let at = operand_ty(arg, ctx, state, fns, Some(param_ty), diags);
+        if !types_compatible(&at, param_ty) {
+            diags.push(type_diag(span.clone()));
+        }
+    }
+    ret
+}
+
+fn check_not(
+    operand: &Operand,
+    span: &Span,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    let bool_ty = scalar("bool", span.clone());
+    let t = operand_ty(operand, ctx, state, fns, Some(&bool_ty), diags);
+    if !types_compatible(&t, &bool_ty) {
+        diags.push(type_diag(span.clone()));
+    }
+    bool_ty
+}
+
+fn check_rhs_list(
+    rhs: &Rhs,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    match rhs {
         Rhs::ListEmpty { span, elem } => Type::List(Box::new(elem.clone()), span.clone()),
         Rhs::ListCons { span, head, tail } => {
             check_list_cons(span, head, tail, ctx, state, fns, diags)
@@ -1557,6 +1618,18 @@ fn check_rhs(
         Rhs::ListGet { span, list, index } => {
             check_list_get(span, list, index, ctx, state, fns, diags)
         }
+        _ => unreachable!("check_rhs_list: list forms only"),
+    }
+}
+
+fn check_rhs_data(
+    rhs: &Rhs,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    match rhs {
         Rhs::BytesNew { span, .. } => scalar("bytes", span.clone()),
         Rhs::BytesLen { span, bytes } => check_bytes_len(span, bytes, ctx, state, fns, diags),
         Rhs::BytesGet { span, bytes, index } => {
@@ -1564,6 +1637,19 @@ fn check_rhs(
         }
         Rhs::Record { span, fields } => check_record(span, fields, ctx, state, fns, diags),
         Rhs::Project { span, base, field } => check_project(span, base, field, ctx, state, diags),
+        _ => unreachable!("check_rhs_data: bytes/record forms only"),
+    }
+}
+
+/// `load T addr` is `T`; `store T addr v` is `unit` and `v` must be `T`.
+fn check_rhs_region(
+    rhs: &Rhs,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) -> Type {
+    match rhs {
         Rhs::Load { span, ty, addr } => {
             check_region_access(span, ty, addr, ctx, state, fns, diags);
             ty.clone()
@@ -1581,6 +1667,7 @@ fn check_rhs(
             }
             scalar("unit", span.clone())
         }
+        _ => unreachable!("check_rhs_region: load/store only"),
     }
 }
 

@@ -271,6 +271,38 @@ fn verify_function_ssa(func: &Function) -> Result<(), FinishError> {
     Ok(())
 }
 
+/// Every branch target and phi predecessor names a block of its function.
+fn verify_targets(functions: &[Function]) -> Result<(), FinishError> {
+    for func in functions {
+        let n = func.blocks.len();
+        for (bi, block) in func.blocks.iter().enumerate() {
+            for inst in &block.insts {
+                verify_inst_targets(inst, n, bi)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_inst_targets(inst: &Inst, n: usize, bi: usize) -> Result<(), FinishError> {
+    let targets: &[usize] = match (inst.op, &inst.imm) {
+        (Op::Br, Imm::Block(t)) => std::slice::from_ref(t),
+        (Op::BrIf, Imm::Blocks(ts)) => ts,
+        (Op::Phi, Imm::Blocks(preds)) if preds.len() != inst.args.len() => {
+            return Err(FinishError::InvalidPhi {
+                block: bi,
+                dst: inst.dst.unwrap_or(0),
+            });
+        }
+        (Op::Phi, Imm::Blocks(preds)) => preds,
+        _ => &[],
+    };
+    match targets.iter().find(|&&t| t >= n) {
+        Some(&target) => Err(FinishError::InvalidBranchTarget { block: bi, target }),
+        None => Ok(()),
+    }
+}
+
 pub(crate) struct Builder {
     functions: Vec<Function>,
     exports: Vec<Export>,
@@ -1237,56 +1269,7 @@ impl Builder {
     }
 
     pub(crate) fn finish(self) -> Result<Program, FinishError> {
-        for func in &self.functions {
-            let n = func.blocks.len();
-            for (bi, block) in func.blocks.iter().enumerate() {
-                for inst in &block.insts {
-                    match inst.op {
-                        Op::Br => {
-                            if let Imm::Block(t) = inst.imm {
-                                if t >= n {
-                                    return Err(FinishError::InvalidBranchTarget {
-                                        block: bi,
-                                        target: t,
-                                    });
-                                }
-                            }
-                        }
-                        Op::BrIf => {
-                            if let Imm::Blocks(ts) = &inst.imm {
-                                for t in ts {
-                                    if *t >= n {
-                                        return Err(FinishError::InvalidBranchTarget {
-                                            block: bi,
-                                            target: *t,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                        Op::Phi => {
-                            if let Imm::Blocks(preds) = &inst.imm {
-                                if preds.len() != inst.args.len() {
-                                    return Err(FinishError::InvalidPhi {
-                                        block: bi,
-                                        dst: inst.dst.unwrap_or(0),
-                                    });
-                                }
-                                for p in preds {
-                                    if *p >= n {
-                                        return Err(FinishError::InvalidBranchTarget {
-                                            block: bi,
-                                            target: *p,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+        verify_targets(&self.functions)?;
         for func in &self.functions {
             verify_function_ssa(func)?;
         }
