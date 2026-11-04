@@ -1,0 +1,7 @@
+strake 1
+
+import host.answer : () -> i64
+
+test import_miss
+  ret 0
+end

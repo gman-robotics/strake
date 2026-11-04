@@ -1,0 +1,5 @@
+args: test golden/import_miss.strake
+exit: 2
+--- stdout
+--- stderr
+{"code":"E_IMPORT","kind":"trap","msg":"unknown callee (check); missing host binding or negative fuel_cost at instantiate (trap)","span":{"file":"golden/import_miss.strake","start":10,"end":46}}

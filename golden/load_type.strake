@@ -1,0 +1,8 @@
+strake 1
+
+import region mem : region
+
+test load_type
+  v = load list i64 0
+  ret 0
+end

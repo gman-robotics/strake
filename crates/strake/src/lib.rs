@@ -230,6 +230,9 @@ pub fn test(path: &str, opts: Opts) -> Exit {
     };
     let host = EmptyHost;
     let runs = body::interp::run_test_exports(&program, &host);
+    if let Some(msg) = runs.iter().find_map(|r| r.halt.as_deref()) {
+        return codeless_exit(msg);
+    }
     let outcomes: Vec<ExportOutcome> = runs.iter().map(|r| r.outcome).collect();
     let code = diag::status(&outcomes);
     let stderr = runs

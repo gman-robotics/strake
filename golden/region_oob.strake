@@ -1,0 +1,9 @@
+strake 1
+
+import region mem : region
+
+test region_oob
+  a = sub i64 0 1
+  v = load i64 a
+  ret 0
+end

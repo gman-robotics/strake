@@ -1,6 +1,6 @@
 //! SSA program builder and finished `Program` (opcodes stay in `interp`).
 
-use super::op::{Op, TrapImm};
+use super::op::{Op, ScalarTy, TrapImm};
 use crate::body::diag::Span;
 
 pub type VReg = u32;
@@ -9,6 +9,8 @@ pub type VReg = u32;
 pub struct ImportStub {
     pub path: String,
     pub fuel_cost: i64,
+    /// The `import` item; instantiate reports `E_IMPORT` here.
+    pub span: Span,
 }
 
 #[derive(Debug)]
@@ -17,6 +19,8 @@ pub struct Program {
     pub exports: Vec<Export>,
     pub fuel: i64,
     pub imports: Vec<ImportStub>,
+    /// Region page count; `Some` only with `import region mem : region`.
+    pub region_pages: Option<i64>,
     /// Span charged on host entry (module `fuel` directive or module header).
     pub entry_charge_span: Span,
 }
@@ -70,6 +74,7 @@ pub enum Imm {
     I32Width,
     Trap(TrapImm),
     Ret(RetImm),
+    Scalar(ScalarTy),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -270,6 +275,7 @@ pub(crate) struct Builder {
     functions: Vec<Function>,
     exports: Vec<Export>,
     imports: Vec<ImportStub>,
+    region_pages: Option<i64>,
     fuel: i64,
     entry_charge_span: Span,
     cur_fn: Option<usize>,
@@ -284,6 +290,7 @@ impl Builder {
             functions: Vec::new(),
             exports: Vec::new(),
             imports: Vec::new(),
+            region_pages: None,
             fuel: 100_000,
             entry_charge_span: Span {
                 file: String::new(),
@@ -304,11 +311,17 @@ impl Builder {
         self.entry_charge_span = span;
     }
 
-    pub(crate) fn add_import(&mut self, path: &str) -> usize {
+    /// Gives the program a zero-filled region of `pages` pages.
+    pub(crate) fn set_region_pages(&mut self, pages: i64) {
+        self.region_pages = Some(pages);
+    }
+
+    pub(crate) fn add_import(&mut self, path: &str, span: Span) -> usize {
         let idx = self.imports.len();
         self.imports.push(ImportStub {
             path: path.to_string(),
             fuel_cost: 0,
+            span,
         });
         idx
     }
@@ -955,6 +968,45 @@ impl Builder {
         dst
     }
 
+    /// `load T addr`: region read of `T.width()` bytes at `addr` (i64).
+    pub(crate) fn load(&mut self, block: usize, span: Span, ty: ScalarTy, addr: VReg) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Load,
+                dst: Some(dst),
+                args: vec![addr],
+                imm: Imm::Scalar(ty),
+                span,
+            },
+        );
+        dst
+    }
+
+    /// `store T addr v`: region write; the result register holds `unit`.
+    pub(crate) fn store(
+        &mut self,
+        block: usize,
+        span: Span,
+        ty: ScalarTy,
+        addr: VReg,
+        value: VReg,
+    ) -> VReg {
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op: Op::Store,
+                dst: Some(dst),
+                args: vec![addr, value],
+                imm: Imm::Scalar(ty),
+                span,
+            },
+        );
+        dst
+    }
+
     pub(crate) fn bytes_len(&mut self, block: usize, span: Span, bytes: VReg) -> VReg {
         let dst = self.alloc_vreg();
         self.emit(
@@ -1243,6 +1295,7 @@ impl Builder {
             exports: self.exports,
             fuel: self.fuel,
             imports: self.imports,
+            region_pages: self.region_pages,
             entry_charge_span: self.entry_charge_span.clone(),
         })
     }

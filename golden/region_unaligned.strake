@@ -1,0 +1,16 @@
+strake 1
+
+import region mem : region
+
+test region_unaligned
+  z = load i64 3
+  assert.eq z 0
+  s = store i64 3 -2
+  v = load i64 3
+  assert.eq v -2
+  lo = load i32 3
+  assert.eq lo -2
+  b = load bool 11
+  assert.eq b false
+  ret 0
+end

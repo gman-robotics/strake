@@ -13,7 +13,7 @@ use crate::body::diag::{
     render_scalar_bool, render_scalar_i64, trap_diag, Code, Diag, ExportOutcome, Kind, Span,
 };
 use crate::body::host::Host;
-pub(crate) use op::{Op, TrapImm};
+pub(crate) use op::{Op, ScalarTy, TrapImm};
 
 use ir::{Imm, RetImm, VReg};
 
@@ -52,6 +52,8 @@ pub(crate) struct Machine<'a> {
     /// Neither store is rewritten, so no cycle can exist. `E_CYCLE` has no constructor.
     heap: Heap,
     sums: Vec<SumCell>,
+    /// Zero-filled region bytes; `Some` only with `import region mem : region`.
+    region: Option<Vec<u8>>,
 }
 
 struct Frame {
@@ -65,9 +67,21 @@ struct Frame {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ExecFault {
-    Trap { code: Code, span: Span },
+    Trap {
+        code: Code,
+        span: Span,
+    },
     Codeless(String),
+    /// Phase 1 §2.17 stop (bool `load` of a byte other than 0 or 1): exit 3,
+    /// plain text, no catalog code, `status` not called.
+    Halt(String),
 }
+
+/// Plain-text message for the §2.17 bool-load stop.
+pub(crate) const BOOL_LOAD_HALT: &str = "bool load of a byte other than 0 or 1";
+
+/// Region page size in bytes (SPEC "Traps and region").
+pub(crate) const PAGE_BYTES: i128 = 65536;
 
 impl<'a> Machine<'a> {
     pub(crate) fn new(program: &'a Program, fuel: i64, host: &'a dyn Host) -> Self {
@@ -95,6 +109,9 @@ impl<'a> Machine<'a> {
             call_entries: 0,
             heap: Heap::new(),
             sums: Vec::new(),
+            region: program
+                .region_pages
+                .map(|pages| vec![0u8; (i128::from(pages) * PAGE_BYTES) as usize]),
         }
     }
 
@@ -203,7 +220,7 @@ impl<'a> Machine<'a> {
             }
             let inst = func.blocks[block].insts[ip].clone();
             self.frames[frame_top].ip += 1;
-            if !self.exec_card_ext(&inst)? && self.exec_inst(&inst)? {
+            if !self.exec_card_ext(&inst)? && !self.exec_region(&inst)? && self.exec_inst(&inst)? {
                 break;
             }
         }
@@ -224,7 +241,7 @@ impl<'a> Machine<'a> {
     /// One step as `run_loop` dispatches it, without the root-return check.
     #[cfg(test)]
     pub(crate) fn test_step(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
-        Ok(!self.exec_card_ext(inst)? && self.exec_inst(inst)?)
+        Ok(!self.exec_card_ext(inst)? && !self.exec_region(inst)? && self.exec_inst(inst)?)
     }
 
     fn exec_inst(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
@@ -573,6 +590,60 @@ impl<'a> Machine<'a> {
         Ok(true)
     }
 
+    /// `load` / `store` (T5). Fuel first, then the i128 range check:
+    /// `addr < 0` or `addr + width > pages * 65536` is `E_OOB`. Little-endian,
+    /// unaligned is legal. Returns `false` when `inst` is not a region op.
+    fn exec_region(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
+        if !matches!(inst.op, Op::Load | Op::Store) {
+            return Ok(false);
+        }
+        self.charge(1, inst.span.clone())?;
+        let Imm::Scalar(ty) = inst.imm else {
+            return Err(ExecFault::Codeless("bad region imm".into()));
+        };
+        let addr = value_as_i64(&self.read_reg(inst.args[0])?)?;
+        let range = self.region_range(addr, ty, &inst.span)?;
+        let out = if inst.op == Op::Load {
+            decode_scalar(ty, &self.region_bytes()?[range])?
+        } else {
+            let bytes = encode_scalar(ty, &self.read_reg(inst.args[1])?)?;
+            self.region_bytes_mut()?[range].copy_from_slice(&bytes);
+            Value::Unit
+        };
+        self.write_reg(inst.dst, out)?;
+        Ok(true)
+    }
+
+    fn region_range(
+        &self,
+        addr: i64,
+        ty: ScalarTy,
+        span: &Span,
+    ) -> Result<std::ops::Range<usize>, ExecFault> {
+        let len = self.region_bytes()?.len() as i128;
+        let start = i128::from(addr);
+        let end = start + ty.width();
+        if start < 0 || end > len {
+            return Err(ExecFault::Trap {
+                code: Code::EOob,
+                span: span.clone(),
+            });
+        }
+        Ok(start as usize..end as usize)
+    }
+
+    fn region_bytes(&self) -> Result<&[u8], ExecFault> {
+        self.region
+            .as_deref()
+            .ok_or_else(|| ExecFault::Codeless("no region".into()))
+    }
+
+    fn region_bytes_mut(&mut self) -> Result<&mut [u8], ExecFault> {
+        self.region
+            .as_deref_mut()
+            .ok_or_else(|| ExecFault::Codeless("no region".into()))
+    }
+
     fn cmp_holds(&self, inst: &Inst) -> Result<bool, ExecFault> {
         let a = self.read_reg(inst.args[0])?;
         let b = self.read_reg(inst.args[1])?;
@@ -735,6 +806,37 @@ fn value_as_i32(v: &Value) -> Result<i32, ExecFault> {
     )
 }
 
+/// Little-endian bytes for `store`. `f32` narrows the F64 value cell.
+fn encode_scalar(ty: ScalarTy, v: &Value) -> Result<Vec<u8>, ExecFault> {
+    Ok(match ty {
+        ScalarTy::I32 => value_as_i32(v)?.to_le_bytes().to_vec(),
+        ScalarTy::I64 => value_as_i64(v)?.to_le_bytes().to_vec(),
+        ScalarTy::F32 => (value_as_f64(v)? as f32).to_le_bytes().to_vec(),
+        ScalarTy::F64 => value_as_f64(v)?.to_le_bytes().to_vec(),
+        ScalarTy::Bool => match v {
+            Value::Bool(b) => vec![u8::from(*b)],
+            _ => return Err(ExecFault::Codeless("store bool needs bool".into())),
+        },
+    })
+}
+
+/// Value for `load`. A bool byte other than 0 or 1 is the §2.17 stop.
+fn decode_scalar(ty: ScalarTy, b: &[u8]) -> Result<Value, ExecFault> {
+    let four = |b: &[u8]| [b[0], b[1], b[2], b[3]];
+    let eight = |b: &[u8]| [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
+    Ok(match ty {
+        ScalarTy::I32 => Value::I32(i32::from_le_bytes(four(b))),
+        ScalarTy::I64 => Value::I64(i64::from_le_bytes(eight(b))),
+        ScalarTy::F32 => Value::F64(f64::from(f32::from_le_bytes(four(b)))),
+        ScalarTy::F64 => Value::F64(f64::from_le_bytes(eight(b))),
+        ScalarTy::Bool => match b[0] {
+            0 => Value::Bool(false),
+            1 => Value::Bool(true),
+            _ => return Err(ExecFault::Halt(BOOL_LOAD_HALT.into())),
+        },
+    })
+}
+
 fn value_as_f64(v: &Value) -> Result<f64, ExecFault> {
     value_or_err!(v, "expected f64", Value::F64(n) => *n)
 }
@@ -752,6 +854,8 @@ fn blocks_imm(imm: &Imm) -> Result<Vec<usize>, ExecFault> {
 pub(crate) struct TestExportRun {
     pub outcome: ExportOutcome,
     pub diags: Vec<Diag>,
+    /// §2.17 stop message; the CLI exits 3 with it before calling `status`.
+    pub halt: Option<String>,
 }
 
 /// Order for `lt le gt ge` (and non-identity `ne`): IEEE for f64, signed for
@@ -794,6 +898,9 @@ pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<TestEx
     {
         crate::body::EXEC_ENTERED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
+    if let Some(fault) = instantiate_fault(program, host) {
+        return vec![fault];
+    }
     program
         .exports
         .iter()
@@ -822,14 +929,46 @@ pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<TestEx
                     },
                     None,
                 ),
+                Err(ExecFault::Halt(msg)) => {
+                    return TestExportRun {
+                        outcome: ExportOutcome {
+                            trapped: true,
+                            ret: 0,
+                        },
+                        diags: Vec::new(),
+                        halt: Some(msg),
+                    };
+                }
             };
             let mut diags = m.take_result_diags();
             if let Some(td) = trap_diag {
                 diags.push(td);
             }
-            TestExportRun { outcome, diags }
+            TestExportRun {
+                outcome,
+                diags,
+                halt: None,
+            }
         })
         .collect()
+}
+
+/// Instantiate (SPEC "Traps and region"): every `import` fn must have a host
+/// binding. A missing one is an `E_IMPORT` trap before any export runs, so
+/// the host records zero calls and no fuel is charged.
+fn instantiate_fault(program: &Program, host: &dyn Host) -> Option<TestExportRun> {
+    let miss = program
+        .imports
+        .iter()
+        .find(|stub| host.resolve_import(&stub.path).is_none())?;
+    Some(TestExportRun {
+        outcome: ExportOutcome {
+            trapped: true,
+            ret: 0,
+        },
+        diags: vec![trap_diag(Code::EImport, miss.span.clone())],
+        halt: None,
+    })
 }
 
 #[allow(dead_code)]
@@ -968,7 +1107,7 @@ end
             end: 1,
         };
         let mut b = Builder::new();
-        let imp = b.add_import("host.missing");
+        let imp = b.add_import("host.missing", span.clone());
         let fidx = b.begin_function("f", 0);
         let entry = 0;
         let _v = b.call_import(entry, span.clone(), imp, &[]);
@@ -1430,6 +1569,67 @@ end
         let max = i64::MAX;
         assert!(t4_trapped(t4_forall_traps_on(max - 2, max, max)));
         assert!(t4_forall_traps_on(max - 2, max, max - 3).is_ok());
+    }
+
+    #[test]
+    fn t5_scalar_codec_round_trips() {
+        let cases = [
+            (ScalarTy::I32, Value::I32(-5)),
+            (ScalarTy::I64, Value::I64(i64::MIN)),
+            (ScalarTy::F32, Value::F64(0.25)),
+            (ScalarTy::F64, Value::F64(-1.5)),
+            (ScalarTy::Bool, Value::Bool(true)),
+            (ScalarTy::Bool, Value::Bool(false)),
+        ];
+        for (ty, v) in cases {
+            let bytes = encode_scalar(ty, &v).expect("encode");
+            assert_eq!(bytes.len() as i128, ty.width(), "{ty:?}");
+            assert_eq!(decode_scalar(ty, &bytes).expect("decode"), v, "{ty:?}");
+        }
+        assert_eq!(
+            encode_scalar(ScalarTy::I32, &Value::I32(258)).unwrap(),
+            vec![2, 1, 0, 0]
+        );
+        assert!(matches!(
+            decode_scalar(ScalarTy::Bool, &[2]),
+            Err(ExecFault::Halt(m)) if m == BOOL_LOAD_HALT
+        ));
+        assert!(encode_scalar(ScalarTy::Bool, &Value::I64(1)).is_err());
+    }
+
+    static T5_HOST_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn t5_counting_import(_: &mut Machine, _: &[Value]) -> Result<Value, ()> {
+        T5_HOST_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Value::I64(7))
+    }
+
+    struct T5HalfHost;
+
+    impl Host for T5HalfHost {
+        fn resolve_import(&self, path: &str) -> Option<crate::body::host::ImportFn> {
+            (path == "host.bound").then_some(t5_counting_import as crate::body::host::ImportFn)
+        }
+    }
+
+    #[test]
+    fn t5_instantiate_missing_import_traps_before_any_call() {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let bound = b.add_import("host.bound", span.clone());
+        let _miss = b.add_import("host.missing", span.clone());
+        let fidx = b.begin_function("test.t", 0);
+        let _r = b.call_import(0, span.clone(), bound, &[]);
+        b.ret_i64(0, span.clone(), 0);
+        b.add_export("test.t", fidx, true);
+        let program = b.finish().expect("finish");
+        T5_HOST_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let runs = run_test_exports(&program, &T5HalfHost);
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].outcome.trapped);
+        assert_eq!(runs[0].diags.len(), 1);
+        assert_eq!(runs[0].diags[0].code, Code::EImport);
+        assert_eq!(T5_HOST_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 
     #[test]

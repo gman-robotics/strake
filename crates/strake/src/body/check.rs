@@ -9,6 +9,7 @@ use super::carry::{
     BackEdge, BreakEdge, CarryPlan, JoinSite, LoopSite, MatchArmSupply, MatchSite, SiteId,
 };
 use super::diag::{Code, Diag, Kind, Span};
+use super::interp::ScalarTy;
 use super::syntax::{
     BinOp, ContinueEdge, FnItem, ForallBound, Item, LoopParam, Module, Operand, PropertyItem, Rhs,
     StaticI64, Stmt, TestItem, Type, TypeDefKind,
@@ -42,6 +43,8 @@ struct CheckState {
     sum_types: HashMap<String, SumTypeInfo>,
     record_types: HashMap<String, Vec<(String, Type)>>,
     module_int_binds: HashMap<String, i128>,
+    /// `import region mem : region` is present (`load`/`store` allowed).
+    has_region: bool,
 }
 
 impl CheckState {
@@ -58,6 +61,7 @@ impl CheckState {
             sum_types,
             record_types,
             module_int_binds,
+            has_region: false,
         }
     }
 
@@ -74,6 +78,7 @@ pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure
     let record_types = build_record_type_index(module);
     let module_int_binds = module_int_bindings(module);
     let mut state = CheckState::new(sum_types, record_types, module_int_binds);
+    state.has_region = super::syntax::region_pages(module).is_some();
     let fn_table: Vec<&FnItem> = module
         .items
         .iter()
@@ -1559,7 +1564,23 @@ fn check_rhs(
         }
         Rhs::Record { span, fields } => check_record(span, fields, ctx, state, fns, diags),
         Rhs::Project { span, base, field } => check_project(span, base, field, ctx, state, diags),
-        _ => scalar("i64", empty_span()),
+        Rhs::Load { span, ty, addr } => {
+            check_region_access(span, ty, addr, ctx, state, fns, diags);
+            ty.clone()
+        }
+        Rhs::Store {
+            span,
+            ty,
+            addr,
+            value,
+        } => {
+            check_region_access(span, ty, addr, ctx, state, fns, diags);
+            let vt = operand_ty(value, ctx, state, fns, Some(ty), diags);
+            if !types_compatible(&vt, ty) {
+                diags.push(type_diag(span.clone()));
+            }
+            scalar("unit", span.clone())
+        }
     }
 }
 
@@ -1689,6 +1710,29 @@ fn check_list_get(
         Box::new(scalar("unit", span.clone())),
         span.clone(),
     )
+}
+
+/// `load`/`store`: `E_REGION` without `import region mem : region`; `E_TYPE`
+/// unless `T` is `i32 i64 f32 f64 bool` and the address is `i64`
+/// (SPEC "Traps and region").
+fn check_region_access(
+    span: &Span,
+    ty: &Type,
+    addr: &Operand,
+    ctx: &Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) {
+    if !state.has_region {
+        diags.push(catalog_check_diag(Code::ERegion, span.clone()));
+    }
+    let scalar_ok = matches!(ty, Type::Named(n, _) if ScalarTy::from_name(n).is_some());
+    let i64_ty = scalar("i64", span.clone());
+    let at = operand_ty(addr, ctx, state, fns, Some(&i64_ty), diags);
+    if !scalar_ok || !types_compatible(&at, &i64_ty) {
+        diags.push(type_diag(span.clone()));
+    }
 }
 
 fn is_bytes_ty(ty: &Type) -> bool {

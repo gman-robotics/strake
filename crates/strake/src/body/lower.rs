@@ -9,7 +9,7 @@ use super::carry::{
 use super::check::Sketch;
 use super::diag::Span;
 use super::interp::Program;
-use super::interp::{Builder, FinishError};
+use super::interp::{Builder, FinishError, ScalarTy};
 use super::syntax::{
     BinOp, ContinueEdge, FieldDecl, FnItem, ForallBound, ImportSig, Item, LoopParam, MatchArm,
     Module, Operand, PropertyItem, Rhs, StaticI64, Stmt, TestItem, Type, TypeDefKind,
@@ -213,6 +213,12 @@ impl LowerError {
     }
 }
 
+fn apply_region_pages(b: &mut Builder, module: &Module) {
+    if let Some(pages) = super::syntax::region_pages(module) {
+        b.set_region_pages(pages);
+    }
+}
+
 pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
     let mut b = Builder::new();
     b.set_entry_charge_span(sketch.module.span.clone());
@@ -222,11 +228,12 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
             b.set_entry_charge_span(span.clone());
         }
     }
+    apply_region_pages(&mut b, &sketch.module);
     let mut import_indices = std::collections::HashMap::new();
     for item in &sketch.module.items {
         if let Item::Import(im) = item {
             if matches!(im.sig, ImportSig::Fn { .. }) {
-                let idx = b.add_import(&im.path);
+                let idx = b.add_import(&im.path, im.span.clone());
                 import_indices.insert(im.path.clone(), idx);
             }
         }
@@ -1064,7 +1071,7 @@ fn lower_rhs(
         Rhs::Project { span, base, field } => {
             lower_rhs_project(b, block, span, base, field, env, plan)
         }
-        _ => Err(LowerError::unsupported("rhs form")),
+        rhs @ (Rhs::Load { .. } | Rhs::Store { .. }) => lower_rhs_region(b, block, rhs, env),
     }
 }
 
@@ -1254,6 +1261,38 @@ fn ty_span() -> Span {
     }
 }
 
+fn region_scalar(ty: &Type) -> Result<ScalarTy, LowerError> {
+    match ty {
+        Type::Named(n, _) => ScalarTy::from_name(n),
+        _ => None,
+    }
+    .ok_or_else(|| LowerError::unsupported("region access type"))
+}
+
+fn lower_rhs_region(
+    b: &mut Builder,
+    block: usize,
+    rhs: &Rhs,
+    env: &std::collections::HashMap<String, u32>,
+) -> Result<u32, LowerError> {
+    match rhs {
+        Rhs::Load { span, ty, addr } => {
+            let at = lower_operand(b, block, addr, env)?;
+            Ok(b.load(block, span.clone(), region_scalar(ty)?, at))
+        }
+        Rhs::Store {
+            span,
+            ty,
+            addr,
+            value,
+        } => {
+            let (at, v) = lower_operand_pair(b, block, addr, value, env)?;
+            Ok(b.store(block, span.clone(), region_scalar(ty)?, at, v))
+        }
+        _ => Err(LowerError::unsupported("region rhs form")),
+    }
+}
+
 fn infer_rhs_type(
     module: &Module,
     rhs: &Rhs,
@@ -1311,12 +1350,13 @@ fn infer_rhs_type(
             ))
         }
         Rhs::BytesNew { span, .. } => Some(Type::Named("bytes".into(), span.clone())),
+        Rhs::Load { ty, .. } => Some(ty.clone()),
+        Rhs::Store { span, .. } => Some(Type::Named("unit".into(), span.clone())),
         Rhs::BytesGet { span, .. } => Some(Type::Result(
             Box::new(Type::Named("i64".into(), span.clone())),
             Box::new(Type::Named("unit".into(), span.clone())),
             span.clone(),
         )),
-        _ => None,
     }
 }
 
