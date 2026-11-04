@@ -1605,54 +1605,23 @@ fn lower_for(
     maps: &CalleeMaps,
     in_test: bool,
 ) -> Result<usize, LowerError> {
-    let entry = block;
     let list_v = env
         .get(list)
         .copied()
         .ok_or_else(|| LowerError::unsupported("unbound list in for"))?;
-    let n = b.list_len(entry, span.clone(), list_v);
-    let i_init = b.const_i64(entry, span.clone(), 0);
-    let header = b.new_block();
-    let body_block = b.new_block();
-    let ok_arm = b.new_block();
-    let err_arm = b.new_block();
-    let after_ok = b.new_block();
-    let after_match = b.new_block();
-    let exit = b.new_block();
-    let i_phi = b.alloc_vreg();
-    let i_back = b.alloc_vreg();
-    b.merge_regs(
-        header,
-        span.clone(),
-        i_phi,
-        &[(entry, i_init), (after_match, i_back)],
-    );
-    let done = b.ge_i64(header, span.clone(), i_phi, n);
-    b.jump(entry, span.clone(), header);
-    b.cond_branch(header, span.clone(), done, exit, body_block);
-    let slot = b.list_get(body_block, span.clone(), list_v, i_phi);
-    let tag = b.sum_tag(body_block, span.clone(), slot);
-    b.br_table(body_block, span.clone(), tag, &[ok_arm, err_arm]);
-    let payload = b.sum_payload(ok_arm, span.clone(), slot);
-    env.insert(binder.to_string(), payload);
-    let mut cur = ok_arm;
-    for stmt in body {
-        cur = if in_test {
-            lower_stmt_test(b, cur, stmt, env, loops, plan, maps, "for body")?
-        } else {
-            lower_stmt(b, cur, stmt, env, loops, plan, maps, false)?
-        };
-    }
-    if !b.block_terminates(cur) {
-        b.jump(cur, span.clone(), after_ok);
-    }
-    b.jump(after_ok, span.clone(), after_match);
-    b.trap_lower(err_arm, span.clone());
-    let one = b.const_i64(after_match, span.clone(), 1);
-    let next_i = b.add_i64(after_match, span.clone(), i_phi, one);
-    b.copy_i64(after_match, span.clone(), i_back, next_i);
-    b.jump(after_match, span.clone(), header);
-    Ok(exit)
+    let ctx = if in_test { "for body" } else { "" };
+    b.for_(block, span.clone(), list_v, |b, ok_arm, elt| {
+        env.insert(binder.to_string(), elt);
+        let mut cur = ok_arm;
+        for stmt in body {
+            cur = if in_test {
+                lower_stmt_test(b, cur, stmt, env, loops, plan, maps, ctx)?
+            } else {
+                lower_stmt(b, cur, stmt, env, loops, plan, maps, false)?
+            };
+        }
+        Ok(cur)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2038,13 +2007,13 @@ end
     fn for_list_lowering_compiles() {
         let src = include_str!("../../../../golden/for_list.strake");
         let prog = compile_golden("for_list.strake", src);
-        let probe = fn_named(&prog, "probe");
-        assert!(probe.blocks.iter().flat_map(|b| &b.insts).any(|i| {
-            matches!(
-                i.op,
-                Op::ListGet | Op::ListLen | Op::ListCons | Op::ListEmpty
-            )
-        }));
+        let f = fn_named(&prog, "test.for_list");
+        let insts: Vec<_> = f.blocks.iter().flat_map(|b| &b.insts).collect();
+        assert!(insts.iter().any(|i| i.op == Op::ListGet));
+        assert!(insts.iter().any(|i| matches!(
+            i.imm,
+            crate::body::interp::ir::Imm::Trap(crate::body::interp::TrapImm::Lower)
+        )));
     }
 
     #[test]
