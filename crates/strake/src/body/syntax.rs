@@ -3494,6 +3494,39 @@ end
     }
 
     #[test]
+    fn import_fn_params_and_span_end_at_return_type() {
+        let src = "strake 1\n\nimport host.f : (i64, bool) -> i64\nimport host.g : () -> unit\n\ntest t\n  ret 0\nend\n";
+        let m = parse(src, "t.strake").unwrap();
+        let imports: Vec<_> = m
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Import(im) => Some(im),
+                _ => None,
+            })
+            .collect();
+        match &imports[0].sig {
+            ImportSig::Fn { params, .. } => assert_eq!(params.len(), 2),
+            other => panic!("{other:?}"),
+        }
+        match &imports[1].sig {
+            ImportSig::Fn { params, .. } => assert!(params.is_empty()),
+            other => panic!("{other:?}"),
+        }
+        let f_end = src.find("-> i64").unwrap() as u32 + "-> i64".len() as u32;
+        assert_eq!(imports[0].span.end, f_end);
+        for bad in [
+            "import host.f : i64) -> i64",
+            "import host.f : (i64 -> i64",
+            "import host.f : (i64,) -> i64",
+            "import host.f : (i64) i64",
+        ] {
+            let src = format!("strake 1\n\n{bad}\n\ntest t\n  ret 0\nend\n");
+            assert!(parse(&src, "t.strake").is_err(), "{bad}");
+        }
+    }
+
+    #[test]
     fn t5_region_pages_directive_else_16() {
         let none = parse("strake 1\npages 2\n\ntest t\n  ret 0\nend\n", "t.strake").unwrap();
         assert_eq!(region_pages(&none), None, "no region import, no region");

@@ -1735,6 +1735,63 @@ end
         (b.finish().expect("finish"), fidx)
     }
 
+    /// Binds `host.ok` at fuel cost 4, or fails the call for `host.fail`.
+    struct CostHost;
+
+    fn ok_import(_m: &mut Machine, _a: &[Value]) -> Result<Value, ()> {
+        Ok(Value::I64(9))
+    }
+
+    fn fail_import(_m: &mut Machine, _a: &[Value]) -> Result<Value, ()> {
+        Err(())
+    }
+
+    impl Host for CostHost {
+        fn resolve_import(&self, path: &str) -> Option<crate::body::host::ImportFn> {
+            match path {
+                "host.ok" => Some(ok_import as crate::body::host::ImportFn),
+                "host.fail" => Some(fail_import as crate::body::host::ImportFn),
+                _ => None,
+            }
+        }
+
+        fn fuel_cost(&self, _path: &str) -> i64 {
+            4
+        }
+    }
+
+    fn one_import_program(path: &str) -> (Program, usize) {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let imp = b.add_import(path, span.clone());
+        let fidx = b.begin_function("test.t", 0);
+        let r = b.call_import(0, span.clone(), imp, &[]);
+        b.ret(0, span.clone(), r);
+        b.add_export("test.t", fidx, true);
+        (b.finish().expect("finish"), fidx)
+    }
+
+    #[test]
+    fn import_call_charges_one_plus_fuel_cost() {
+        let (program, fidx) = one_import_program("host.ok");
+        let mut m = Machine::new(&program, 1000, &CostHost);
+        assert_eq!(m.run_root_function(fidx).unwrap(), 9);
+        let mut low = Machine::new(&program, 4, &CostHost);
+        assert!(matches!(
+            low.run_root_function(fidx),
+            Err(ExecFault::Trap {
+                code: Code::EFuel,
+                ..
+            })
+        ));
+        let (failing, fidx) = one_import_program("host.fail");
+        let mut m = Machine::new(&failing, 1000, &CostHost);
+        assert!(matches!(
+            m.run_root_function(fidx),
+            Err(ExecFault::Codeless(_))
+        ));
+    }
+
     #[test]
     fn negative_fuel_cost_traps_e_import_at_instantiate_and_call() {
         NEG_COST_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
