@@ -1,0 +1,5 @@
+args: test golden/region_oob.strake
+exit: 2
+--- stdout
+--- stderr
+{"code":"E_OOB","kind":"trap","msg":"region byte range outside pages * 65536","span":{"file":"golden/region_oob.strake","start":78,"end":94}}

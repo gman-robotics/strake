@@ -39,6 +39,40 @@ pub(crate) enum Op {
     BytesGet,
     RecNew,
     RecGet,
+    Load,
+    Store,
+}
+
+/// Region access width and value kind (SPEC "Traps and region").
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScalarTy {
+    I32,
+    I64,
+    F32,
+    F64,
+    Bool,
+}
+
+impl ScalarTy {
+    /// Byte width: `i32`/`f32` 4, `i64`/`f64` 8, `bool` 1.
+    pub(crate) fn width(self) -> i128 {
+        match self {
+            ScalarTy::I32 | ScalarTy::F32 => 4,
+            ScalarTy::I64 | ScalarTy::F64 => 8,
+            ScalarTy::Bool => 1,
+        }
+    }
+
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "i32" => Some(ScalarTy::I32),
+            "i64" => Some(ScalarTy::I64),
+            "f32" => Some(ScalarTy::F32),
+            "f64" => Some(ScalarTy::F64),
+            "bool" => Some(ScalarTy::Bool),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

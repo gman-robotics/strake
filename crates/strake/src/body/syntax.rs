@@ -2593,6 +2593,26 @@ pub fn parse(source: &str, file: &str) -> Result<Module, Diag> {
 
 // --- Tests ---------------------------------------------------------------------
 
+/// Default region size when no `pages` directive is given (SPEC "Fuel").
+pub(crate) const DEFAULT_PAGES: i64 = 16;
+
+/// Region pages (Tom 2:57 PM MT, GMA-481): the `pages` directive, else 16.
+/// The region exists only with `import region mem : region`.
+pub(crate) fn region_pages(module: &Module) -> Option<i64> {
+    let has_region = module
+        .items
+        .iter()
+        .any(|i| matches!(i, Item::Import(im) if matches!(im.sig, ImportSig::Region)));
+    if !has_region {
+        return None;
+    }
+    let directive = module.items.iter().find_map(|i| match i {
+        Item::Pages(n, _) => Some(i64::try_from(*n).unwrap_or(i64::MAX)),
+        _ => None,
+    });
+    Some(directive.unwrap_or(DEFAULT_PAGES))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3444,6 +3464,24 @@ end
         let round = format(&m);
         let m2 = parse(&round, "t.strake").expect("reparse");
         assert_eq!(format(&m2), round);
+    }
+
+    #[test]
+    fn t5_region_pages_directive_else_16() {
+        let none = parse("strake 1\npages 2\n\ntest t\n  ret 0\nend\n", "t.strake").unwrap();
+        assert_eq!(region_pages(&none), None, "no region import, no region");
+        let dflt = parse(
+            "strake 1\n\nimport region mem : region\n\ntest t\n  ret 0\nend\n",
+            "t.strake",
+        )
+        .unwrap();
+        assert_eq!(region_pages(&dflt), Some(DEFAULT_PAGES));
+        let two = parse(
+            "strake 1\npages 2\n\nimport region mem : region\n\ntest t\n  ret 0\nend\n",
+            "t.strake",
+        )
+        .unwrap();
+        assert_eq!(region_pages(&two), Some(2));
     }
 
     #[test]

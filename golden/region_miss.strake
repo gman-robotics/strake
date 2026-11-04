@@ -1,0 +1,6 @@
+strake 1
+
+test region_miss
+  v = load i64 0
+  ret 0
+end

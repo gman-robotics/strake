@@ -202,34 +202,35 @@ pub fn fmt(path: &str) -> Exit {
 }
 
 /// `strake test [--draft] <file>`
-pub fn test(path: &str, opts: Opts) -> Exit {
-    let source = match read_source(path) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let module = match syntax::parse(&source, path) {
-        Ok(m) => m,
-        Err(diag) => return parse_fail(diag),
-    };
+/// Parse, codeless gate, check, and lower for `strake test`; `Err` is the exit.
+fn compile_for_test(path: &str, opts: &Opts) -> Result<body::interp::Program, Exit> {
+    let source = read_source(path)?;
+    let module = syntax::parse(&source, path).map_err(parse_fail)?;
     if let Some(msg) = syntax::codeless_rejection(&module) {
-        return codeless_exit(msg);
+        return Err(codeless_exit(msg));
     }
-    let program = match compile_module(&module, opts.draft) {
+    match compile_module(&module, opts.draft) {
+        Ok(p) => Ok(p),
+        Err(CompileError::Check(check::CheckFailure::Diags(diags))) => Err(check_fail(diags)),
+        Err(CompileError::Check(check::CheckFailure::Codeless(msg))) => Err(codeless_exit(msg)),
+        Err(CompileError::Lower(err)) => Err(Exit {
+            code: LOWER_ABORT_EXIT,
+            stdout: String::new(),
+            stderr: lower_abort_message(&err),
+        }),
+    }
+}
+
+pub fn test(path: &str, opts: Opts) -> Exit {
+    let program = match compile_for_test(path, &opts) {
         Ok(p) => p,
-        Err(CompileError::Check(check::CheckFailure::Diags(diags))) => return check_fail(diags),
-        Err(CompileError::Check(check::CheckFailure::Codeless(msg))) => {
-            return codeless_exit(msg);
-        }
-        Err(CompileError::Lower(err)) => {
-            return Exit {
-                code: LOWER_ABORT_EXIT,
-                stdout: String::new(),
-                stderr: lower_abort_message(&err),
-            };
-        }
+        Err(exit) => return exit,
     };
     let host = EmptyHost;
     let runs = body::interp::run_test_exports(&program, &host);
+    if let Some(msg) = runs.iter().find_map(|r| r.halt.as_deref()) {
+        return codeless_exit(msg);
+    }
     let outcomes: Vec<ExportOutcome> = runs.iter().map(|r| r.outcome).collect();
     let code = diag::status(&outcomes);
     let stderr = runs
