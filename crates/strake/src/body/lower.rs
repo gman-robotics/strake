@@ -2108,6 +2108,40 @@ end
         );
     }
 
+    /// Phase 1 §2.7: user `trap` lowers to opcode `trap` with an immediate
+    /// outside the cannot-carry list; `golden/trap_user.strake` has no CLI oracle.
+    #[test]
+    fn trap_user_lowers_to_trap_outside_reserved_codes() {
+        use crate::body::interp::{ir::Imm, TrapImm};
+        let src = include_str!("../../../../golden/trap_user.strake");
+        let prog = compile_golden("golden/trap_user.strake", src);
+        let traps: Vec<_> = fn_named(&prog, "stop")
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .filter(|i| i.op == Op::Trap)
+            .collect();
+        assert_eq!(traps.len(), 1);
+        assert!(matches!(traps[0].imm, Imm::Trap(TrapImm::User)));
+        for reserved in [TrapImm::Hole, TrapImm::Lower, TrapImm::Fallthrough] {
+            assert!(!matches!(&traps[0].imm, Imm::Trap(k) if *k == reserved));
+        }
+    }
+
+    /// `--draft` keeps the hole and lowers it to a `trap` with the `Hole` immediate.
+    #[test]
+    fn hole_draft_lowers_to_hole_trap() {
+        use crate::body::interp::{ir::Imm, TrapImm};
+        let src = include_str!("../../../../golden/hole_draft.strake");
+        let module = syntax::parse(src, "golden/hole_draft.strake").expect("parse");
+        let prog = compile_module(&module, true).expect("draft compile");
+        assert!(fn_named(&prog, "f")
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .any(|i| i.op == Op::Trap && matches!(i.imm, Imm::Trap(TrapImm::Hole))));
+    }
+
     #[test]
     fn for_list_lowering_compiles() {
         let src = include_str!("../../../../golden/for_list.strake");

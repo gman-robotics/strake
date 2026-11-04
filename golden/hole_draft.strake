@@ -1,0 +1,11 @@
+strake 1
+
+fn f() -> i64
+  x = hole i64
+  ret x
+end
+
+test hole.draft
+  y = call f()
+  ret 0
+end
