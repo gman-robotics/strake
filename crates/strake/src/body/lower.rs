@@ -1064,14 +1064,7 @@ fn lower_rhs(
     plan: &LowerPlan<'_>,
 ) -> Result<u32, LowerError> {
     match rhs {
-        Rhs::BinOp {
-            span,
-            op,
-            ty,
-            lhs,
-            rhs,
-        } => lower_rhs_binop(b, block, span, op, ty, lhs, rhs, env),
-        Rhs::Not { operand, span } => lower_rhs_not(b, block, span, operand, env),
+        Rhs::BinOp { .. } | Rhs::Not { .. } => lower_rhs_op(b, block, rhs, env),
         Rhs::Operand(op) => Ok(lower_operand(b, block, op, env)?),
         Rhs::Hole { .. } | Rhs::Call { .. } => Err(lower_rhs_elsewhere(rhs)),
         rhs @ (Rhs::Ok { .. } | Rhs::Err { .. }) => lower_rhs_sum(b, block, rhs, env),
@@ -1273,6 +1266,25 @@ fn ty_span() -> Span {
     }
 }
 
+fn lower_rhs_op(
+    b: &mut Builder,
+    block: usize,
+    rhs: &Rhs,
+    env: &std::collections::HashMap<String, u32>,
+) -> Result<u32, LowerError> {
+    match rhs {
+        Rhs::BinOp {
+            span,
+            op,
+            ty,
+            lhs,
+            rhs,
+        } => lower_rhs_binop(b, block, span, op, ty, lhs, rhs, env),
+        Rhs::Not { operand, span } => lower_rhs_not(b, block, span, operand, env),
+        _ => Err(LowerError::unsupported("op rhs form")),
+    }
+}
+
 /// Holes and calls lower through `Assign`, which knows the callee indices.
 fn lower_rhs_elsewhere(rhs: &Rhs) -> LowerError {
     if matches!(rhs, Rhs::Hole { .. }) {
@@ -1342,11 +1354,10 @@ fn infer_rhs_type(
         }
         Rhs::Operand(op) => infer_operand_type(op, known),
         Rhs::Call { callee, .. } => callee_return_type(module, callee),
-        Rhs::Ok { ty, span, .. } => Some(result_ty(ty.clone(), unit_ty(span), span)),
-        Rhs::Err { ty, span, .. } => Some(result_ty(unit_ty(span), ty.clone(), span)),
-        Rhs::BinOp { op, ty, span, .. } => Some(binop_type(op, ty, span)),
+        Rhs::Ok { .. } | Rhs::Err { .. } | Rhs::BinOp { .. } | Rhs::Not { .. } => {
+            infer_op_rhs_type(rhs)
+        }
         Rhs::Hole { ty, .. } | Rhs::Load { ty, .. } => Some(ty.clone()),
-        Rhs::Not { span, .. } => Some(Type::Named("bool".into(), span.clone())),
         Rhs::ListLen { span, .. } | Rhs::BytesLen { span, .. } => {
             Some(Type::Named("i64".into(), span.clone()))
         }
@@ -1357,6 +1368,16 @@ fn infer_rhs_type(
             unit_ty(span),
             span,
         )),
+    }
+}
+
+fn infer_op_rhs_type(rhs: &Rhs) -> Option<Type> {
+    match rhs {
+        Rhs::Ok { ty, span, .. } => Some(result_ty(ty.clone(), unit_ty(span), span)),
+        Rhs::Err { ty, span, .. } => Some(result_ty(unit_ty(span), ty.clone(), span)),
+        Rhs::BinOp { op, ty, span, .. } => Some(binop_type(op, ty, span)),
+        Rhs::Not { span, .. } => Some(Type::Named("bool".into(), span.clone())),
+        _ => None,
     }
 }
 

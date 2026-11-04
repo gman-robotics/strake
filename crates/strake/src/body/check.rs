@@ -2607,6 +2607,14 @@ mod tests {
     }
 
     #[test]
+    fn t5_binop_one_bad_operand_is_e_type() {
+        for body in ["x = add i64 1 true", "x = add i64 true 1"] {
+            let src = format!("strake 1\n\ntest t\n  {body}\n  ret 0\nend\n");
+            assert_eq!(t4_check_codes(&src), vec![Code::EType], "{body}");
+        }
+    }
+
+    #[test]
     fn forall_range_module_binds_check_ok() {
         let src =
             "strake 1\n\nlo = 0\nhi = 1\n\nproperty p\n  forall n: i64 in lo..hi\n  end\nend\n";

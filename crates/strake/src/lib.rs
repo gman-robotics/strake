@@ -204,14 +204,8 @@ pub fn fmt(path: &str) -> Exit {
 /// `strake test [--draft] <file>`
 /// Parse, codeless gate, check, and lower for `strake test`; `Err` is the exit.
 fn compile_for_test(path: &str, opts: &Opts) -> Result<body::interp::Program, Exit> {
-    let source = match read_source(path) {
-        Ok(s) => s,
-        Err(e) => return Err(e),
-    };
-    let module = match syntax::parse(&source, path) {
-        Ok(m) => m,
-        Err(diag) => return Err(parse_fail(diag)),
-    };
+    let source = read_source(path)?;
+    let module = syntax::parse(&source, path).map_err(parse_fail)?;
     if let Some(msg) = syntax::codeless_rejection(&module) {
         return Err(codeless_exit(msg));
     }

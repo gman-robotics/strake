@@ -598,9 +598,7 @@ impl<'a> Machine<'a> {
             return Ok(false);
         }
         self.charge(1, inst.span.clone())?;
-        let Imm::Scalar(ty) = inst.imm else {
-            return Err(ExecFault::Codeless("bad region imm".into()));
-        };
+        let ty = scalar_imm(&inst.imm)?;
         let addr = value_as_i64(&self.read_reg(inst.args[0])?)?;
         let range = self.region_range(addr, ty, &inst.span)?;
         let out = if inst.op == Op::Load {
@@ -824,6 +822,10 @@ fn encode_scalar(ty: ScalarTy, v: &Value) -> Result<Vec<u8>, ExecFault> {
         ScalarTy::F64 => value_as_f64(v)?.to_le_bytes().to_vec(),
         ScalarTy::Bool => vec![u8::from(value_as_bool(v)?)],
     })
+}
+
+fn scalar_imm(imm: &Imm) -> Result<ScalarTy, ExecFault> {
+    imm_or_err!(imm, "bad region imm", Imm::Scalar(ty) => *ty)
 }
 
 fn value_as_bool(v: &Value) -> Result<bool, ExecFault> {
