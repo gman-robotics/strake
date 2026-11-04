@@ -576,12 +576,18 @@ impl<'a> Machine<'a> {
     fn cmp_holds(&self, inst: &Inst) -> Result<bool, ExecFault> {
         let a = self.read_reg(inst.args[0])?;
         let b = self.read_reg(inst.args[1])?;
+        let ne = inst.op == Op::Ne;
         let ord = match (&a, &b) {
-            (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
-            (Value::Handle(x), Value::Handle(y)) if inst.op == Op::Ne => {
+            // SPEC "Float compare": `ne` is bitwise (NaN payload, +0 vs -0).
+            (Value::F64(x), Value::F64(y)) if ne => return Ok(x.to_bits() != y.to_bits()),
+            (Value::F64(x), Value::F64(y)) => x.partial_cmp(y),
+            (Value::Bool(x), Value::Bool(y)) if ne => return Ok(x != y),
+            (Value::Handle(x), Value::Handle(y)) if ne => {
                 return Ok(!self.heap.bytes_eq(*x, *y)?);
             }
-            (Value::F64(x), Value::F64(y)) => x.partial_cmp(y),
+            (Value::Bool(_), _) | (_, Value::Bool(_)) => {
+                return Err(ExecFault::Codeless("ordered compare on bool".into()));
+            }
             _ => Some(value_as_i64(&a)?.cmp(&value_as_i64(&b)?)),
         };
         Ok(ord_holds(inst.op, ord))
@@ -746,7 +752,7 @@ pub(crate) struct TestExportRun {
     pub diags: Vec<Diag>,
 }
 
-/// `None` is an unordered float pair (NaN): only `ne` holds.
+/// `None` is an unordered float pair (NaN): every ordered compare is false.
 fn ord_holds(op: Op, ord: Option<std::cmp::Ordering>) -> bool {
     use std::cmp::Ordering::{Equal, Greater, Less};
     match op {
@@ -754,7 +760,8 @@ fn ord_holds(op: Op, ord: Option<std::cmp::Ordering>) -> bool {
         Op::Lt => ord == Some(Less),
         Op::Le => matches!(ord, Some(Less | Equal)),
         Op::Gt => ord == Some(Greater),
-        _ => matches!(ord, Some(Greater | Equal)),
+        Op::Ge => matches!(ord, Some(Greater | Equal)),
+        _ => false,
     }
 }
 
@@ -1201,7 +1208,9 @@ end
         for (op, a, b, want) in cases {
             let regs = vec![Some(Value::I64(a)), Some(Value::I64(b)), None];
             let mut m = t3_machine_with_regs(&program, regs);
+            let before = m.fuel;
             assert!(!m.test_step(&t3_inst(op, Imm::None)).expect("cmp"));
+            assert_eq!(m.fuel, before - 1, "{op:?} charges 1 fuel");
             let got = m.frames.last().unwrap().regs[2].clone();
             assert_eq!(got, Some(Value::Bool(want)), "{op:?} {a} {b}");
         }
@@ -1224,12 +1233,28 @@ end
             Value::Bool(true)
         );
         let nan = Value::F64(f64::NAN);
-        assert_eq!(run(Op::Ne, nan.clone(), nan.clone()), Value::Bool(true));
+        assert_eq!(run(Op::Ne, nan.clone(), nan.clone()), Value::Bool(false));
+        let other_nan = Value::F64(f64::from_bits(f64::NAN.to_bits() ^ 1));
+        assert_eq!(run(Op::Ne, nan.clone(), other_nan), Value::Bool(true));
+        assert_eq!(
+            run(Op::Ne, Value::F64(0.0), Value::F64(-0.0)),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run(Op::Le, Value::F64(0.0), Value::F64(-0.0)),
+            Value::Bool(true)
+        );
         assert_eq!(
             run(Op::Le, nan.clone(), Value::F64(1.0)),
             Value::Bool(false)
         );
         assert_eq!(run(Op::Ge, nan, Value::F64(1.0)), Value::Bool(false));
+        let bools = vec![Some(Value::Bool(false)), Some(Value::Bool(true)), None];
+        let mut m = t3_machine_with_regs(&program, bools);
+        assert!(matches!(
+            m.test_step(&t3_inst(Op::Lt, Imm::None)),
+            Err(ExecFault::Codeless(_))
+        ));
         let mut m = t3_machine_with_regs(&program, vec![None, None, None]);
         let x = m.heap.bytes_new(vec![1, 2]).expect("alloc");
         let y = m.heap.bytes_new(vec![1, 3]).expect("alloc");
@@ -1296,9 +1321,8 @@ end
         ));
     }
 
-    #[test]
-    fn t3_builder_for_visits_index_zero_first() {
-        // xs = [4, 3]; the body traps on 4, so the loop must start at index 0.
+    /// xs = [4, 3]; the body traps when it sees `target`.
+    fn t3_for_traps_on(target: i64) -> Result<i64, ExecFault> {
         let span = t3_span();
         let mut b = Builder::new();
         let fidx = b.begin_function("f", 0);
@@ -1311,7 +1335,7 @@ end
             .for_(0, span.clone(), xs, |b, ok_arm, elt| {
                 let hit = b.new_block();
                 let next = b.new_block();
-                let want = b.const_i64(ok_arm, span.clone(), 4);
+                let want = b.const_i64(ok_arm, span.clone(), target);
                 let is_four = b.eq_i64(ok_arm, span.clone(), elt, want);
                 b.cond_branch(ok_arm, span.clone(), is_four, hit, next);
                 b.trap_user(hit, span.clone());
@@ -1321,13 +1345,23 @@ end
         b.ret_i64(exit, span.clone(), 0);
         let program = b.finish().expect("finish");
         let mut m = Machine::new(&program, 1000, &EmptyHost);
-        assert!(matches!(
-            m.run_root_function(fidx),
-            Err(ExecFault::Trap {
-                code: Code::EType,
-                ..
-            })
-        ));
+        m.run_root_function(fidx)
+    }
+
+    #[test]
+    fn t3_builder_for_visits_every_index_from_zero() {
+        for target in [4, 3] {
+            let res = t3_for_traps_on(target);
+            let trapped = matches!(
+                res,
+                Err(ExecFault::Trap {
+                    code: Code::EType,
+                    ..
+                })
+            );
+            assert!(trapped, "element {target} not visited");
+        }
+        assert!(t3_for_traps_on(5).is_ok());
     }
 
     #[test]
