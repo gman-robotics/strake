@@ -711,6 +711,50 @@ impl Builder {
         self.emit_i64_binop(block, span, Op::Ge, lhs, rhs, Imm::None)
     }
 
+    /// Normative `for x in xs` index loop (Phase 2 §3, T3). Owns the index phi,
+    /// the `list.get` sum split, and the `trap Lower` err arm: `list.get` cannot
+    /// give err while `i < len`, so reaching that arm is `E_LOWER`.
+    /// `body` gets the ok-arm block and the element vreg, and returns its last block.
+    /// Returns the loop exit block.
+    pub(crate) fn for_<E>(
+        &mut self,
+        entry: usize,
+        span: Span,
+        xs: VReg,
+        body: impl FnOnce(&mut Self, usize, VReg) -> Result<usize, E>,
+    ) -> Result<usize, E> {
+        let n = self.list_len(entry, span.clone(), xs);
+        let i_init = self.const_i64(entry, span.clone(), 0);
+        let [header, body_block, ok_arm, err_arm, after_ok, after_match, exit] =
+            std::array::from_fn(|_| self.new_block());
+        let i_phi = self.alloc_vreg();
+        let i_back = self.alloc_vreg();
+        self.merge_regs(
+            header,
+            span.clone(),
+            i_phi,
+            &[(entry, i_init), (after_match, i_back)],
+        );
+        let done = self.ge_i64(header, span.clone(), i_phi, n);
+        self.jump(entry, span.clone(), header);
+        self.cond_branch(header, span.clone(), done, exit, body_block);
+        let slot = self.list_get(body_block, span.clone(), xs, i_phi);
+        let tag = self.sum_tag(body_block, span.clone(), slot);
+        self.br_table(body_block, span.clone(), tag, &[ok_arm, err_arm]);
+        let elt = self.sum_payload(ok_arm, span.clone(), slot);
+        let last = body(self, ok_arm, elt)?;
+        if !self.block_terminates(last) {
+            self.jump(last, span.clone(), after_ok);
+        }
+        self.jump(after_ok, span.clone(), after_match);
+        self.trap_lower(err_arm, span.clone());
+        let one = self.const_i64(after_match, span.clone(), 1);
+        let next_i = self.add_i64(after_match, span.clone(), i_phi, one);
+        self.copy_i64(after_match, span.clone(), i_back, next_i);
+        self.jump(after_match, span, header);
+        Ok(exit)
+    }
+
     pub(crate) fn trap_lower(&mut self, block: usize, span: Span) {
         self.emit(
             block,

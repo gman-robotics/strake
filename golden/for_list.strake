@@ -1,18 +1,11 @@
 strake 1
 
-fn probe() -> unit
-  t0 = list.empty i64
-  t1 = list.cons 1 t0
-  r = list.get t1 9
-  match r
-    ok v ->
-      trap
-    err _ ->
-      ret unit
-  end
-end
-
 test for_list
-  x = call probe()
+  e = list.empty i64
+  t1 = list.cons 3 e
+  xs = list.cons 4 t1
+  for x in xs
+    assert.eq x x
+  end
   ret 0
 end

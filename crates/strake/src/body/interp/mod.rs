@@ -23,7 +23,6 @@ pub enum Value {
     I32(i32),
     Bool(bool),
     F64(f64),
-    #[allow(dead_code)]
     Unit,
     Sum(u32),
     /// Index into the append-only value heap.
@@ -204,9 +203,7 @@ impl<'a> Machine<'a> {
             }
             let inst = func.blocks[block].insts[ip].clone();
             self.frames[frame_top].ip += 1;
-            if inst.op == Op::Ge {
-                self.exec_ge(&inst)?;
-            } else if self.exec_inst(&inst)? {
+            if !self.exec_card_ext(&inst)? && self.exec_inst(&inst)? {
                 break;
             }
         }
@@ -221,7 +218,13 @@ impl<'a> Machine<'a> {
 
     #[cfg(test)]
     pub(crate) fn test_exec_ge(&mut self, inst: &Inst) -> Result<(), ExecFault> {
-        self.exec_ge(inst)
+        self.exec_card_ext(inst).map(|_| ())
+    }
+
+    /// One step as `run_loop` dispatches it, without the root-return check.
+    #[cfg(test)]
+    pub(crate) fn test_step(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
+        Ok(!self.exec_card_ext(inst)? && self.exec_inst(inst)?)
     }
 
     fn exec_inst(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
@@ -551,12 +554,45 @@ impl<'a> Machine<'a> {
         Ok(false)
     }
 
-    fn exec_ge(&mut self, inst: &Inst) -> Result<(), ExecFault> {
-        let span = inst.span.clone();
-        self.charge(1, span.clone())?;
-        let (a, b) = self.two_i64(inst)?;
-        self.write_reg(inst.dst, Value::Bool(a >= b))?;
-        Ok(())
+    /// Card ops kept out of `exec_inst` (T3, GMA-479): `ne lt le gt ge` and
+    /// `const.i32`/`const.f32`/`const.unit`. Fuel is charged before the op.
+    /// Returns `false` when `inst` is not one of them.
+    fn exec_card_ext(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
+        let is_const = matches!(inst.op, Op::ConstI32 | Op::ConstF32 | Op::ConstUnit);
+        let is_cmp = matches!(inst.op, Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge);
+        if !is_const && !is_cmp {
+            return Ok(false);
+        }
+        self.charge(1, inst.span.clone())?;
+        let v = if is_const {
+            const_narrow(inst)?
+        } else {
+            Value::Bool(self.cmp_holds(inst)?)
+        };
+        self.write_reg(inst.dst, v)?;
+        Ok(true)
+    }
+
+    fn cmp_holds(&self, inst: &Inst) -> Result<bool, ExecFault> {
+        let a = self.read_reg(inst.args[0])?;
+        let b = self.read_reg(inst.args[1])?;
+        if inst.op == Op::Ne {
+            if let Some(ne) = self.ne_by_identity(&a, &b)? {
+                return Ok(ne);
+            }
+        }
+        Ok(ord_holds(inst.op, value_order(&a, &b)?))
+    }
+
+    /// `ne` cases that are not "not ordered-equal": SPEC "Float compare" makes
+    /// f64 `ne` bitwise (NaN payload, +0 vs -0); bools and bytes compare by value.
+    fn ne_by_identity(&self, a: &Value, b: &Value) -> Result<Option<bool>, ExecFault> {
+        Ok(match (a, b) {
+            (Value::F64(x), Value::F64(y)) => Some(x.to_bits() != y.to_bits()),
+            (Value::Bool(x), Value::Bool(y)) => Some(x != y),
+            (Value::Handle(x), Value::Handle(y)) => Some(!self.heap.bytes_eq(*x, *y)?),
+            _ => None,
+        })
     }
 
     fn jump(&mut self, block: usize, ip: usize) -> Result<(), ExecFault> {
@@ -716,6 +752,41 @@ fn blocks_imm(imm: &Imm) -> Result<Vec<usize>, ExecFault> {
 pub(crate) struct TestExportRun {
     pub outcome: ExportOutcome,
     pub diags: Vec<Diag>,
+}
+
+/// Order for `lt le gt ge` (and non-identity `ne`): IEEE for f64, signed for
+/// integers. Bools have no order in SPEC.
+fn value_order(a: &Value, b: &Value) -> Result<Option<std::cmp::Ordering>, ExecFault> {
+    match (a, b) {
+        (Value::F64(x), Value::F64(y)) => Ok(x.partial_cmp(y)),
+        (Value::Bool(_), _) | (_, Value::Bool(_)) => {
+            Err(ExecFault::Codeless("ordered compare on bool".into()))
+        }
+        _ => Ok(Some(value_as_i64(a)?.cmp(&value_as_i64(b)?))),
+    }
+}
+
+/// `None` is an unordered float pair (NaN): every ordered compare is false.
+fn ord_holds(op: Op, ord: Option<std::cmp::Ordering>) -> bool {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    match op {
+        Op::Ne => ord != Some(Equal),
+        Op::Lt => ord == Some(Less),
+        Op::Le => matches!(ord, Some(Less | Equal)),
+        Op::Gt => ord == Some(Greater),
+        Op::Ge => matches!(ord, Some(Greater | Equal)),
+        _ => false,
+    }
+}
+
+/// `const.f32` widens to the `F64` value cell; every f32 is exact in f64.
+fn const_narrow(inst: &Inst) -> Result<Value, ExecFault> {
+    match (inst.op, &inst.imm) {
+        (Op::ConstI32, Imm::I32(n)) => Ok(Value::I32(*n)),
+        (Op::ConstF32, Imm::F32(bits)) => Ok(Value::F64(f64::from(f32::from_bits(*bits)))),
+        (Op::ConstUnit, Imm::None) => Ok(Value::Unit),
+        _ => Err(ExecFault::Codeless("bad const".into())),
+    }
 }
 
 pub(crate) fn run_test_exports(program: &Program, host: &dyn Host) -> Vec<TestExportRun> {
@@ -1060,6 +1131,251 @@ end
         m.test_exec_ge(&inst).expect("ge");
         let out = m.frames.last().unwrap().regs[ge as usize].clone().unwrap();
         assert_eq!(out, Value::Bool(true));
+    }
+
+    fn t3_span() -> Span {
+        Span {
+            file: "t".into(),
+            start: 0,
+            end: 1,
+        }
+    }
+
+    fn t3_machine_with_regs(program: &Program, regs: Vec<Option<Value>>) -> Machine<'_> {
+        let mut m = Machine::new(program, 100, &EmptyHost);
+        m.frames.push(Frame {
+            fn_idx: 0,
+            block: 0,
+            ip: 0,
+            edge_pred: 0,
+            regs,
+            pending_call_dst: None,
+        });
+        m
+    }
+
+    fn t3_inst(op: Op, imm: Imm) -> Inst {
+        Inst {
+            op,
+            dst: Some(2),
+            args: vec![0, 1],
+            imm,
+            span: t3_span(),
+        }
+    }
+
+    fn t3_program() -> Program {
+        let mut b = Builder::new();
+        b.begin_function("f", 0);
+        b.ret_i64(0, t3_span(), 0);
+        b.finish().expect("finish")
+    }
+
+    fn t3_imm_for(op: Op) -> Imm {
+        match op {
+            Op::ConstI32 => Imm::I32(-4),
+            Op::ConstI64 => Imm::I64(4),
+            Op::ConstF32 => Imm::F32(1.5f32.to_bits()),
+            Op::ConstF64 => Imm::F64(1.5f64.to_bits()),
+            Op::ConstBool => Imm::Bool(true),
+            Op::Br => Imm::Block(0),
+            Op::Trap => Imm::Trap(TrapImm::User),
+            _ => Imm::None,
+        }
+    }
+
+    #[test]
+    fn each_card_op_has_an_exec_arm() {
+        use Op::*;
+        let program = t3_program();
+        let card = [
+            Br, BrIf, BrTable, Call, Ret, Phi, Trap, Add, Sub, Mul, Div, Eq, Ne, Lt, Le, Gt, Ge,
+            ConstI32, ConstI64, ConstF32, ConstF64, ConstBool, ConstUnit, SumNew, SumTag,
+            SumPayload, ListEmpty, ListCons, ListLen, ListGet, BytesNew, BytesLen, BytesGet,
+            RecNew, RecGet,
+        ];
+        for op in card {
+            let regs = vec![Some(Value::I64(2)), Some(Value::I64(3)), None];
+            let mut m = t3_machine_with_regs(&program, regs);
+            let res = m.test_step(&t3_inst(op, t3_imm_for(op)));
+            if let Err(ExecFault::Codeless(msg)) = &res {
+                assert!(!msg.starts_with("unimplemented op"), "{op:?}: {msg}");
+            }
+        }
+    }
+
+    #[test]
+    fn t3_compare_arms_follow_operand_order() {
+        let program = t3_program();
+        let cases = [
+            (Op::Ne, 2, 3, true),
+            (Op::Ne, 3, 3, false),
+            (Op::Lt, 2, 3, true),
+            (Op::Lt, 3, 3, false),
+            (Op::Le, 3, 3, true),
+            (Op::Le, 4, 3, false),
+            (Op::Gt, 4, 3, true),
+            (Op::Gt, 3, 3, false),
+            (Op::Ge, 3, 3, true),
+            (Op::Ge, 2, 3, false),
+        ];
+        for (op, a, b, want) in cases {
+            let regs = vec![Some(Value::I64(a)), Some(Value::I64(b)), None];
+            let mut m = t3_machine_with_regs(&program, regs);
+            let before = m.fuel;
+            assert!(!m.test_step(&t3_inst(op, Imm::None)).expect("cmp"));
+            assert_eq!(m.fuel, before - 1, "{op:?} charges 1 fuel");
+            let got = m.frames.last().unwrap().regs[2].clone();
+            assert_eq!(got, Some(Value::Bool(want)), "{op:?} {a} {b}");
+        }
+    }
+
+    #[test]
+    fn t3_compare_bool_float_and_handle_operands() {
+        let program = t3_program();
+        let run = |op: Op, a: Value, b: Value| {
+            let mut m = t3_machine_with_regs(&program, vec![Some(a), Some(b), None]);
+            m.test_step(&t3_inst(op, Imm::None)).expect("cmp");
+            m.frames.last().unwrap().regs[2].clone().unwrap()
+        };
+        assert_eq!(
+            run(Op::Ne, Value::Bool(true), Value::Bool(false)),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run(Op::Lt, Value::F64(1.0), Value::F64(2.0)),
+            Value::Bool(true)
+        );
+        let nan = Value::F64(f64::NAN);
+        assert_eq!(run(Op::Ne, nan.clone(), nan.clone()), Value::Bool(false));
+        let other_nan = Value::F64(f64::from_bits(f64::NAN.to_bits() ^ 1));
+        assert_eq!(run(Op::Ne, nan.clone(), other_nan), Value::Bool(true));
+        assert_eq!(
+            run(Op::Ne, Value::F64(0.0), Value::F64(-0.0)),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run(Op::Le, Value::F64(0.0), Value::F64(-0.0)),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            run(Op::Le, nan.clone(), Value::F64(1.0)),
+            Value::Bool(false)
+        );
+        assert_eq!(run(Op::Ge, nan, Value::F64(1.0)), Value::Bool(false));
+        let bools = vec![Some(Value::Bool(false)), Some(Value::Bool(true)), None];
+        let mut m = t3_machine_with_regs(&program, bools);
+        assert!(matches!(
+            m.test_step(&t3_inst(Op::Lt, Imm::None)),
+            Err(ExecFault::Codeless(_))
+        ));
+        let mut m = t3_machine_with_regs(&program, vec![None, None, None]);
+        let x = m.heap.bytes_new(vec![1, 2]).expect("alloc");
+        let y = m.heap.bytes_new(vec![1, 3]).expect("alloc");
+        m.frames.last_mut().unwrap().regs =
+            vec![Some(Value::Handle(x)), Some(Value::Handle(y)), None];
+        m.test_step(&t3_inst(Op::Ne, Imm::None)).expect("ne bytes");
+        assert_eq!(m.frames.last().unwrap().regs[2], Some(Value::Bool(true)));
+    }
+
+    #[test]
+    fn t3_narrow_consts_execute_and_charge_fuel() {
+        let program = t3_program();
+        let cases = [
+            (Op::ConstI32, Imm::I32(-7), Value::I32(-7)),
+            (Op::ConstF32, Imm::F32(0.5f32.to_bits()), Value::F64(0.5)),
+            (Op::ConstUnit, Imm::None, Value::Unit),
+        ];
+        for (op, imm, want) in cases {
+            let mut m = t3_machine_with_regs(&program, vec![None, None, None]);
+            let before = m.fuel;
+            assert!(!m.test_step(&t3_inst(op, imm)).expect("const"));
+            assert_eq!(m.fuel, before - 1);
+            assert_eq!(m.frames.last().unwrap().regs[2], Some(want));
+        }
+        let mut m = t3_machine_with_regs(&program, vec![None, None, None]);
+        let bad = m.test_step(&t3_inst(Op::ConstI32, Imm::I64(1)));
+        assert!(matches!(bad, Err(ExecFault::Codeless(_))));
+    }
+
+    #[test]
+    fn t3_builder_for_runs_and_its_err_arm_traps_lower() {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let empty = b.list_empty(0, span.clone());
+        let seven = b.const_i64(0, span.clone(), 7);
+        let xs = b.list_cons(0, span.clone(), seven, empty);
+        let mut seen = None;
+        let exit = b
+            .for_(0, span.clone(), xs, |_, ok_arm, elt| {
+                seen = Some(elt);
+                Ok::<usize, ()>(ok_arm)
+            })
+            .expect("for_");
+        assert!(seen.is_some());
+        b.ret_i64(exit, span.clone(), 0);
+        let program = b.finish().expect("finish");
+        let mut m = Machine::new(&program, 1000, &EmptyHost);
+        assert!(m.run_root_function(fidx).is_ok());
+        let lower = program.functions[fidx]
+            .blocks
+            .iter()
+            .flat_map(|blk| blk.insts.iter())
+            .find(|i| matches!(i.imm, Imm::Trap(TrapImm::Lower)))
+            .expect("trap Lower arm")
+            .clone();
+        let mut m = t3_machine_with_regs(&program, Vec::new());
+        assert!(matches!(
+            m.test_step(&lower),
+            Err(ExecFault::Trap {
+                code: Code::ELower,
+                ..
+            })
+        ));
+    }
+
+    /// xs = [4, 3]; the body traps when it sees `target`.
+    fn t3_for_traps_on(target: i64) -> Result<i64, ExecFault> {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let empty = b.list_empty(0, span.clone());
+        let three = b.const_i64(0, span.clone(), 3);
+        let four = b.const_i64(0, span.clone(), 4);
+        let t1 = b.list_cons(0, span.clone(), three, empty);
+        let xs = b.list_cons(0, span.clone(), four, t1);
+        let exit = b
+            .for_(0, span.clone(), xs, |b, ok_arm, elt| {
+                let hit = b.new_block();
+                let next = b.new_block();
+                let want = b.const_i64(ok_arm, span.clone(), target);
+                let is_four = b.eq_i64(ok_arm, span.clone(), elt, want);
+                b.cond_branch(ok_arm, span.clone(), is_four, hit, next);
+                b.trap_user(hit, span.clone());
+                Ok::<usize, ()>(next)
+            })
+            .expect("for_");
+        b.ret_i64(exit, span.clone(), 0);
+        let program = b.finish().expect("finish");
+        let mut m = Machine::new(&program, 1000, &EmptyHost);
+        m.run_root_function(fidx)
+    }
+
+    #[test]
+    fn t3_builder_for_visits_every_index_from_zero() {
+        for target in [4, 3] {
+            let res = t3_for_traps_on(target);
+            let trapped = matches!(
+                res,
+                Err(ExecFault::Trap {
+                    code: Code::EType,
+                    ..
+                })
+            );
+            assert!(trapped, "element {target} not visited");
+        }
+        assert!(t3_for_traps_on(5).is_ok());
     }
 
     #[test]
