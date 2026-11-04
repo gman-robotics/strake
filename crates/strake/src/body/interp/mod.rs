@@ -311,15 +311,10 @@ impl<'a> Machine<'a> {
                 } else {
                     let a = self.read_reg(inst.args[0])?;
                     let b = self.read_reg(inst.args[1])?;
-                    match (&a, &b) {
-                        (Value::Handle(x), Value::Handle(y)) => self.heap.bytes_eq(*x, *y)?,
-                        // Float `eq` is bitwise (SPEC "Prelude"), same as `ne`.
-                        (Value::F64(x), Value::F64(y)) => x.to_bits() == y.to_bits(),
-                        _ => {
-                            let ai = value_as_i64(&a)?;
-                            let bi = value_as_i64(&b)?;
-                            ai == bi
-                        }
+                    match self.ne_by_identity(&a, &b)? {
+                        // Handles, bools, and floats (bitwise, SPEC "Prelude") share `ne`'s rule.
+                        Some(ne) => !ne,
+                        None => value_as_i64(&a)? == value_as_i64(&b)?,
                     }
                 };
                 self.write_reg(inst.dst, Value::Bool(eq))?;

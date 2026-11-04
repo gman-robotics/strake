@@ -1182,48 +1182,81 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_import_region_sig(&mut self) -> Result<(ImportSig, u32), Diag> {
+        let (mem, _, _) = self.expect_ident()?;
+        if mem != "mem" {
+            return Err(self.err_here());
+        }
+        if !self.eat_tok(Tok::Colon)? {
+            return Err(self.err_here());
+        }
+        let ty = self.parse_type()?;
+        if !type_is_region(&ty) {
+            return Err(self.err_here());
+        }
+        Ok((ImportSig::Region, type_span_end(&ty)))
+    }
+
+    fn parse_import_fn_sig(&mut self) -> Result<(ImportSig, u32), Diag> {
+        if !self.eat_tok(Tok::Colon)? {
+            return Err(self.err_here());
+        }
+        if !self.eat_tok(Tok::LParen)? {
+            return Err(self.err_here());
+        }
+        let mut params = Vec::new();
+        if !matches!(&self.cur, Some((Tok::RParen, _, _))) {
+            loop {
+                params.push(self.parse_type()?);
+                if self.eat_tok(Tok::Comma)? {
+                    continue;
+                }
+                break;
+            }
+        }
+        if !self.eat_tok(Tok::RParen)? {
+            return Err(self.err_here());
+        }
+        if !self.eat_tok(Tok::Arrow)? {
+            return Err(self.err_here());
+        }
+        let ret = self.parse_type()?;
+        let end = type_span_end(&ret);
+        Ok((ImportSig::Fn { params, ret }, end))
+    }
+
+    /// `load T addr` / `store T addr value`; the span ends at the last operand.
+    fn parse_rhs_region(&mut self, st: u32) -> Result<Option<Rhs>, Diag> {
+        if self.eat_ident("load")? {
+            let ty = self.parse_type()?;
+            let addr = self.parse_operand()?;
+            return Ok(Some(Rhs::Load {
+                span: span(self.file, st, operand_span_end(&addr)),
+                ty,
+                addr,
+            }));
+        }
+        if self.eat_ident("store")? {
+            let ty = self.parse_type()?;
+            let addr = self.parse_operand()?;
+            let value = self.parse_operand()?;
+            return Ok(Some(Rhs::Store {
+                span: span(self.file, st, operand_span_end(&value)),
+                ty,
+                addr,
+                value,
+            }));
+        }
+        Ok(None)
+    }
+
     fn parse_import(&mut self, start: u32) -> Result<ImportDecl, Diag> {
         let (path, pst, pen) = self.expect_ident()?;
         Self::check_user_name(&path, (pst, pen), self.file)?;
         let (sig, end) = if path == "region" {
-            let (mem, _, _) = self.expect_ident()?;
-            if mem != "mem" {
-                return Err(self.err_here());
-            }
-            if !self.eat_tok(Tok::Colon)? {
-                return Err(self.err_here());
-            }
-            let ty = self.parse_type()?;
-            if !type_is_region(&ty) {
-                return Err(self.err_here());
-            }
-            (ImportSig::Region, type_span_end(&ty))
+            self.parse_import_region_sig()?
         } else {
-            if !self.eat_tok(Tok::Colon)? {
-                return Err(self.err_here());
-            }
-            if !self.eat_tok(Tok::LParen)? {
-                return Err(self.err_here());
-            }
-            let mut params = Vec::new();
-            if !matches!(&self.cur, Some((Tok::RParen, _, _))) {
-                loop {
-                    params.push(self.parse_type()?);
-                    if self.eat_tok(Tok::Comma)? {
-                        continue;
-                    }
-                    break;
-                }
-            }
-            if !self.eat_tok(Tok::RParen)? {
-                return Err(self.err_here());
-            }
-            if !self.eat_tok(Tok::Arrow)? {
-                return Err(self.err_here());
-            }
-            let ret = self.parse_type()?;
-            let end = type_span_end(&ret);
-            (ImportSig::Fn { params, ret }, end)
+            self.parse_import_fn_sig()?
         };
         Ok(ImportDecl {
             span: span(self.file, start, end),
@@ -1757,25 +1790,8 @@ impl<'a> Parser<'a> {
                 index,
             });
         }
-        if self.eat_ident("load")? {
-            let ty = self.parse_type()?;
-            let addr = self.parse_operand()?;
-            return Ok(Rhs::Load {
-                span: span(self.file, st, operand_span_end(&addr)),
-                ty,
-                addr,
-            });
-        }
-        if self.eat_ident("store")? {
-            let ty = self.parse_type()?;
-            let addr = self.parse_operand()?;
-            let value = self.parse_operand()?;
-            return Ok(Rhs::Store {
-                span: span(self.file, st, operand_span_end(&value)),
-                ty,
-                addr,
-                value,
-            });
+        if let Some(rhs) = self.parse_rhs_region(st)? {
+            return Ok(rhs);
         }
         if self.eat_tok(Tok::LBrace)? {
             let mut fields = Vec::new();
