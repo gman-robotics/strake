@@ -1,0 +1,9 @@
+strake 1
+
+fn stop() -> i64
+  trap
+end
+
+test trap.user
+  ret 0
+end
