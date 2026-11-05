@@ -330,33 +330,7 @@ impl<'a> Machine<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let dst = inst.dst;
                 match inst.imm {
-                    Imm::Import(import_idx) => {
-                        let stub = self
-                            .program
-                            .imports
-                            .get(import_idx)
-                            .ok_or_else(|| ExecFault::Codeless("bad import idx".into()))?;
-                        let host_fn = self.host.resolve_import(&stub.path);
-                        if host_fn.is_none() {
-                            return Err(ExecFault::Trap {
-                                code: Code::EImport,
-                                span,
-                            });
-                        }
-                        if self.frames.len() >= 1024 {
-                            return Err(ExecFault::Trap {
-                                code: Code::EStack,
-                                span,
-                            });
-                        }
-                        let cost = 1 + stub.fuel_cost;
-                        self.charge(cost, span.clone())?;
-                        self.call_entries += 1;
-                        let host_fn = host_fn.unwrap();
-                        let result = host_fn(self, &args)
-                            .map_err(|_| ExecFault::Codeless("host import failed".into()))?;
-                        self.write_reg(dst, result)?;
-                    }
+                    Imm::Import(import_idx) => self.call_import(import_idx, &args, dst, span)?,
                     Imm::Fn(callee) => {
                         if self.frames.len() >= 1024 {
                             return Err(ExecFault::Trap {
@@ -574,9 +548,49 @@ impl<'a> Machine<'a> {
     /// Card ops kept out of `exec_inst` (T3, GMA-479): `ne lt le gt ge` and
     /// `const.i32`/`const.f32`/`const.unit`. Fuel is charged before the op.
     /// Returns `false` when `inst` is not one of them.
+    /// Import call entry (SPEC "Fuel"): an unbound import or a negative host
+    /// `fuel_cost` is `E_IMPORT` with no push and no charge; then depth, then
+    /// `1 + fuel_cost`.
+    fn call_import(
+        &mut self,
+        import_idx: usize,
+        args: &[Value],
+        dst: Option<VReg>,
+        span: Span,
+    ) -> Result<(), ExecFault> {
+        let stub = self
+            .program
+            .imports
+            .get(import_idx)
+            .ok_or_else(|| ExecFault::Codeless("bad import idx".into()))?;
+        let host_fn = self.host.resolve_import(&stub.path);
+        let fuel_cost = self.host.fuel_cost(&stub.path);
+        if host_fn.is_none() || fuel_cost < 0 {
+            return Err(ExecFault::Trap {
+                code: Code::EImport,
+                span,
+            });
+        }
+        if self.frames.len() >= 1024 {
+            return Err(ExecFault::Trap {
+                code: Code::EStack,
+                span,
+            });
+        }
+        let cost = fuel_cost.saturating_add(1);
+        self.charge(cost, span.clone())?;
+        self.call_entries += 1;
+        let host_fn = host_fn.unwrap();
+        let result =
+            host_fn(self, args).map_err(|_| ExecFault::Codeless("host import failed".into()))?;
+        self.write_reg(dst, result)?;
+        Ok(())
+    }
+
     fn exec_card_ext(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
         let is_const = matches!(inst.op, Op::ConstI32 | Op::ConstF32 | Op::ConstUnit);
-        let is_cmp = matches!(inst.op, Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge);
+        let is_cmp = matches!(inst.op, Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge)
+            || self.is_float_eq(inst)?;
         if !is_const && !is_cmp {
             return Ok(false);
         }
@@ -658,9 +672,9 @@ impl<'a> Machine<'a> {
     fn cmp_holds(&self, inst: &Inst) -> Result<bool, ExecFault> {
         let a = self.read_reg(inst.args[0])?;
         let b = self.read_reg(inst.args[1])?;
-        if inst.op == Op::Ne {
+        if matches!(inst.op, Op::Ne | Op::Eq) {
             if let Some(ne) = self.ne_by_identity(&a, &b)? {
-                return Ok(ne);
+                return Ok(ne == (inst.op == Op::Ne));
             }
         }
         Ok(ord_holds(inst.op, value_order(&a, &b)?))
@@ -668,6 +682,19 @@ impl<'a> Machine<'a> {
 
     /// `ne` cases that are not "not ordered-equal": SPEC "Float compare" makes
     /// f64 `ne` bitwise (NaN payload, +0 vs -0); bools and bytes compare by value.
+    /// `eq` on two floats is bitwise (SPEC "Prelude"), the inverse of `ne`, so it
+    /// runs on the compare card path instead of `exec_inst`'s integer `eq`.
+    fn is_float_eq(&self, inst: &Inst) -> Result<bool, ExecFault> {
+        if inst.op != Op::Eq || inst.args.len() != 2 {
+            return Ok(false);
+        }
+        // An unreadable vreg is not a float eq here; `exec_inst` charges fuel
+        // before it reads, so `E_FUEL` still comes first (SPEC "Fuel").
+        let a = self.read_reg(inst.args[0]).ok();
+        let b = self.read_reg(inst.args[1]).ok();
+        Ok(matches!((a, b), (Some(Value::F64(_)), Some(Value::F64(_)))))
+    }
+
     fn ne_by_identity(&self, a: &Value, b: &Value) -> Result<Option<bool>, ExecFault> {
         Ok(match (a, b) {
             (Value::F64(x), Value::F64(y)) => Some(x.to_bits() != y.to_bits()),
@@ -775,6 +802,8 @@ fn render_scalar_for_test(v: &Value) -> Result<String, ExecFault> {
         Value::I64(n) => Ok(render_scalar_i64(*n)),
         Value::Bool(b) => Ok(render_scalar_bool(*b)),
         Value::I32(n) => Ok(render_scalar_i64(*n as i64)),
+        // Shortest round-trip text (`1.5`, `NaN`, `inf`); no SPEC rendering rule yet.
+        Value::F64(x) => Ok(format!("{x:?}")),
         _ => Err(ExecFault::Codeless("unsupported scalar in E_TEST".into())),
     }
 }
@@ -822,7 +851,7 @@ fn encode_scalar(ty: ScalarTy, v: &Value) -> Result<Vec<u8>, ExecFault> {
     Ok(match ty {
         ScalarTy::I32 => value_as_i32(v)?.to_le_bytes().to_vec(),
         ScalarTy::I64 => value_as_i64(v)?.to_le_bytes().to_vec(),
-        ScalarTy::F32 => (value_as_f64(v)? as f32).to_le_bytes().to_vec(),
+        ScalarTy::F32 => f64_to_f32_bits(value_as_f64(v)?).to_le_bytes().to_vec(),
         ScalarTy::F64 => value_as_f64(v)?.to_le_bytes().to_vec(),
         ScalarTy::Bool => vec![u8::from(value_as_bool(v)?)],
     })
@@ -837,13 +866,37 @@ fn value_as_bool(v: &Value) -> Result<bool, ExecFault> {
 }
 
 /// Value for `load`. A bool byte other than 0 or 1 is the §2.17 stop.
+/// Narrow to f32 bits. A NaN keeps its sign and the top 23 payload bits, so a
+/// NaN that came from an f32 survives the store bit for bit (float `eq` is bitwise).
+fn f64_to_f32_bits(x: f64) -> u32 {
+    if !x.is_nan() {
+        return (x as f32).to_bits();
+    }
+    let b = x.to_bits();
+    let sign = ((b >> 63) as u32) << 31;
+    let payload = ((b >> 29) as u32) & 0x007F_FFFF;
+    sign | 0x7F80_0000 | payload.max(1)
+}
+
+/// Widen f32 bits to f64. A NaN keeps its sign and payload bits, the inverse
+/// of `f64_to_f32_bits`.
+fn f32_bits_to_f64(bits: u32) -> f64 {
+    let x = f32::from_bits(bits);
+    if !x.is_nan() {
+        return f64::from(x);
+    }
+    let sign = u64::from(bits >> 31) << 63;
+    let payload = u64::from(bits & 0x007F_FFFF) << 29;
+    f64::from_bits(sign | 0x7FF0_0000_0000_0000 | payload)
+}
+
 fn decode_scalar(ty: ScalarTy, b: &[u8]) -> Result<Value, ExecFault> {
     let four = |b: &[u8]| [b[0], b[1], b[2], b[3]];
     let eight = |b: &[u8]| [b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]];
     Ok(match ty {
         ScalarTy::I32 => Value::I32(i32::from_le_bytes(four(b))),
         ScalarTy::I64 => Value::I64(i64::from_le_bytes(eight(b))),
-        ScalarTy::F32 => Value::F64(f64::from(f32::from_le_bytes(four(b)))),
+        ScalarTy::F32 => Value::F64(f32_bits_to_f64(u32::from_le_bytes(four(b)))),
         ScalarTy::F64 => Value::F64(f64::from_le_bytes(eight(b))),
         ScalarTy::Bool => match b[0] {
             0 => Value::Bool(false),
@@ -903,7 +956,7 @@ fn ord_holds(op: Op, ord: Option<std::cmp::Ordering>) -> bool {
 fn const_narrow(inst: &Inst) -> Result<Value, ExecFault> {
     match (inst.op, &inst.imm) {
         (Op::ConstI32, Imm::I32(n)) => Ok(Value::I32(*n)),
-        (Op::ConstF32, Imm::F32(bits)) => Ok(Value::F64(f64::from(f32::from_bits(*bits)))),
+        (Op::ConstF32, Imm::F32(bits)) => Ok(Value::F64(f32_bits_to_f64(*bits))),
         (Op::ConstUnit, Imm::None) => Ok(Value::Unit),
         _ => Err(ExecFault::Codeless("bad const".into())),
     }
@@ -991,7 +1044,7 @@ fn instantiate_fault(program: &Program, host: &dyn Host) -> Option<TestExportRun
     let miss = program
         .imports
         .iter()
-        .find(|stub| host.resolve_import(&stub.path).is_none())?;
+        .find(|stub| host.resolve_import(&stub.path).is_none() || host.fuel_cost(&stub.path) < 0)?;
     Some(TestExportRun {
         outcome: ExportOutcome {
             trapped: true,
@@ -1648,6 +1701,195 @@ end
     }
 
     struct T5HalfHost;
+
+    static NEG_COST_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn neg_cost_import(_m: &mut Machine, _a: &[Value]) -> Result<Value, ()> {
+        NEG_COST_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Value::I64(0))
+    }
+
+    /// Binds every import, but `host.neg` costs -1 fuel (SPEC "Fuel": must be >= 0).
+    struct NegCostHost;
+
+    impl Host for NegCostHost {
+        fn resolve_import(&self, _path: &str) -> Option<crate::body::host::ImportFn> {
+            Some(neg_cost_import as crate::body::host::ImportFn)
+        }
+
+        fn fuel_cost(&self, path: &str) -> i64 {
+            if path == "host.neg" {
+                -1
+            } else {
+                0
+            }
+        }
+    }
+
+    fn neg_cost_program() -> (Program, usize) {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let neg = b.add_import("host.neg", span.clone());
+        let fidx = b.begin_function("test.t", 0);
+        let _r = b.call_import(0, span.clone(), neg, &[]);
+        b.ret_i64(0, span.clone(), 0);
+        b.add_export("test.t", fidx, true);
+        (b.finish().expect("finish"), fidx)
+    }
+
+    /// Binds `host.ok` at fuel cost 4, or fails the call for `host.fail`.
+    struct CostHost;
+
+    fn ok_import(_m: &mut Machine, _a: &[Value]) -> Result<Value, ()> {
+        Ok(Value::I64(9))
+    }
+
+    fn fail_import(_m: &mut Machine, _a: &[Value]) -> Result<Value, ()> {
+        Err(())
+    }
+
+    impl Host for CostHost {
+        fn resolve_import(&self, path: &str) -> Option<crate::body::host::ImportFn> {
+            match path {
+                "host.ok" => Some(ok_import as crate::body::host::ImportFn),
+                "host.fail" => Some(fail_import as crate::body::host::ImportFn),
+                _ => None,
+            }
+        }
+
+        fn fuel_cost(&self, _path: &str) -> i64 {
+            4
+        }
+    }
+
+    fn one_import_program(path: &str) -> (Program, usize) {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let imp = b.add_import(path, span.clone());
+        let fidx = b.begin_function("test.t", 0);
+        let r = b.call_import(0, span.clone(), imp, &[]);
+        b.ret(0, span.clone(), r);
+        b.add_export("test.t", fidx, true);
+        (b.finish().expect("finish"), fidx)
+    }
+
+    #[test]
+    fn import_call_charges_one_plus_fuel_cost() {
+        let (program, fidx) = one_import_program("host.ok");
+        let mut m = Machine::new(&program, 1000, &CostHost);
+        assert_eq!(m.run_root_function(fidx).unwrap(), 9);
+        let mut low = Machine::new(&program, 4, &CostHost);
+        assert!(matches!(
+            low.run_root_function(fidx),
+            Err(ExecFault::Trap {
+                code: Code::EFuel,
+                ..
+            })
+        ));
+        let (failing, fidx) = one_import_program("host.fail");
+        let mut m = Machine::new(&failing, 1000, &CostHost);
+        assert!(matches!(
+            m.run_root_function(fidx),
+            Err(ExecFault::Codeless(_))
+        ));
+    }
+
+    #[test]
+    fn negative_fuel_cost_traps_e_import_at_instantiate_and_call() {
+        NEG_COST_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        let (program, fidx) = neg_cost_program();
+        let runs = run_test_exports(&program, &NegCostHost);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].diags[0].code, Code::EImport);
+        let mut m = Machine::new(&program, 1000, &NegCostHost);
+        assert!(matches!(
+            m.run_root_function(fidx),
+            Err(ExecFault::Trap {
+                code: Code::EImport,
+                ..
+            })
+        ));
+        assert_eq!(NEG_COST_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    fn float_eq(x: f64, y: f64) -> bool {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let fidx = b.begin_function("f", 0);
+        let a = b.const_f64(0, span.clone(), x.to_bits());
+        let c = b.const_f64(0, span.clone(), y.to_bits());
+        let e = b.eq_i64(0, span.clone(), a, c);
+        b.ret(0, span.clone(), e);
+        let program = b.finish().expect("finish");
+        let eq = program.functions[fidx].blocks[0]
+            .insts
+            .iter()
+            .find(|i| i.op == Op::Eq)
+            .unwrap()
+            .clone();
+        let regs = vec![Some(Value::F64(x)), Some(Value::F64(y)), None];
+        let mut m = t3_machine_with_regs(&program, regs);
+        let mut eq = eq;
+        eq.args = vec![0, 1];
+        eq.dst = Some(2);
+        m.test_step(&eq).unwrap();
+        matches!(m.read_reg(2).unwrap(), Value::Bool(true))
+    }
+
+    #[test]
+    fn float_eq_is_bitwise() {
+        assert!(float_eq(1.5, 1.5));
+        assert!(!float_eq(0.0, -0.0), "+0 and -0 differ");
+        let nan_a = f64::from_bits(0x7FF8_0000_0000_0001);
+        let nan_b = f64::from_bits(0x7FF8_0000_0000_0002);
+        assert!(float_eq(nan_a, nan_a), "same NaN bits are eq");
+        assert!(!float_eq(nan_a, nan_b), "different NaN payloads differ");
+    }
+
+    #[test]
+    fn float_eq_with_unset_vreg_and_no_fuel_is_e_fuel() {
+        let span = t3_span();
+        let mut b = Builder::new();
+        let _f = b.begin_function("f", 0);
+        let a = b.const_f64(0, span.clone(), 1.5f64.to_bits());
+        let e = b.eq_i64(0, span.clone(), a, a);
+        b.ret(0, span.clone(), e);
+        let program = b.finish().expect("finish");
+        let eq = program.functions[0].blocks[0]
+            .insts
+            .iter()
+            .find(|i| i.op == Op::Eq)
+            .unwrap()
+            .clone();
+        let mut m = t3_machine_with_regs(&program, vec![None, None, None]);
+        m.fuel = 0;
+        assert!(matches!(
+            m.test_step(&eq),
+            Err(ExecFault::Trap {
+                code: Code::EFuel,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn f32_nan_payload_and_sign_survive_store_and_load() {
+        for bits in [0x7F80_0001u32, 0xFFC0_1234, 0x7FC0_0000, 0x7FBF_FFFF] {
+            let wide = f32_bits_to_f64(bits);
+            assert!(wide.is_nan());
+            assert_eq!(f64_to_f32_bits(wide), bits, "{bits:#x}");
+            let bytes = encode_scalar(ScalarTy::F32, &Value::F64(wide)).unwrap();
+            assert_eq!(bytes, bits.to_le_bytes());
+            match decode_scalar(ScalarTy::F32, &bytes).unwrap() {
+                Value::F64(x) => assert_eq!(x.to_bits(), wide.to_bits()),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(f64_to_f32_bits(0.25), 0.25f32.to_bits());
+        assert_eq!(f32_bits_to_f64(0.25f32.to_bits()), 0.25);
+        // A NaN whose payload sits only below f32 precision stays a NaN, not inf.
+        assert!(f32::from_bits(f64_to_f32_bits(f64::from_bits(0x7FF0_0000_0000_0001))).is_nan());
+    }
 
     impl Host for T5HalfHost {
         fn resolve_import(&self, path: &str) -> Option<crate::body::host::ImportFn> {

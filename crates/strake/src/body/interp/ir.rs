@@ -8,7 +8,6 @@ pub type VReg = u32;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportStub {
     pub path: String,
-    pub fuel_cost: i64,
     /// The `import` item; instantiate reports `E_IMPORT` here.
     pub span: Span,
 }
@@ -352,7 +351,6 @@ impl Builder {
         let idx = self.imports.len();
         self.imports.push(ImportStub {
             path: path.to_string(),
-            fuel_cost: 0,
             span,
         });
         idx

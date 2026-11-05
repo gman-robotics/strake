@@ -2,4 +2,4 @@ args: test golden/region_miss.strake
 exit: 1
 --- stdout
 --- stderr
-{"code":"E_REGION","kind":"check","msg":"load/store used without an import region mem : region","span":{"file":"golden/region_miss.strake","start":33,"end":49}}
+{"code":"E_REGION","kind":"check","msg":"load/store used without an import region mem : region","span":{"file":"golden/region_miss.strake","start":33,"end":43}}

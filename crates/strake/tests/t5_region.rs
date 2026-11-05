@@ -77,3 +77,67 @@ fn region_check_errors_are_e_type() {
         assert!(stderr.contains("\"E_TYPE\""), "{name}: {stderr}");
     }
 }
+
+#[test]
+fn f32_and_f64_store_load_with_float_literals() {
+    let body = "  a = store f64 0 1.5\n  b = load f64 0\n  assert.eq b 1.5\n  c = store f32 8 0.25\n  d = load f32 8\n  assert.eq d 0.25\n";
+    let (code, stderr) = region_test("float_store_load", "", body);
+    assert_eq!(code, Some(0), "{stderr}");
+}
+
+#[test]
+fn float_assert_mismatch_renders_want_and_got() {
+    let body = "  a = store f64 0 1.5\n  b = load f64 0\n  assert.eq b 2.5\n";
+    let (code, stderr) = region_test("float_mismatch", "", body);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("\"want\":\"2.5\",\"got\":\"1.5\""),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn inexact_f32_literal_is_e_type() {
+    let (code, stderr) = region_test("f32_inexact", "", "  a = store f32 0 0.1\n");
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(stderr.contains("\"E_TYPE\""));
+}
+
+#[test]
+fn load_store_spans_end_at_last_operand() {
+    let src = "strake 1\n\ntest t\n  v = load i64 0\n  ret 0\nend\n";
+    let (code, stderr) = run_src("span_load", src);
+    assert_eq!(code, Some(1), "{stderr}");
+    let start = src.find("load").unwrap();
+    let want = format!("\"start\":{},\"end\":{}", start, start + "load i64 0".len());
+    assert!(stderr.contains(&want), "{stderr} want {want}");
+    let src = "strake 1\n\ntest t\n  s = store i64 0 7\n  ret 0\nend\n";
+    let (_, stderr) = run_src("span_store", src);
+    let start = src.find("store").unwrap();
+    let want = format!(
+        "\"start\":{},\"end\":{}",
+        start,
+        start + "store i64 0 7".len()
+    );
+    assert!(stderr.contains(&want), "{stderr} want {want}");
+}
+
+#[test]
+fn import_span_ends_after_list_and_result_return_types() {
+    for ret in ["list i64", "result i64 bool"] {
+        let line = format!("import host.f : () -> {ret}");
+        let src = format!("strake 1\n\n{line}\n\ntest t\n  ret 0\nend\n");
+        let (code, stderr) = run_src("span_import_ret", &src);
+        assert_eq!(code, Some(2), "{stderr}");
+        let start = src.find("import").unwrap();
+        let want = format!("\"start\":{},\"end\":{}", start, start + line.len());
+        assert!(stderr.contains(&want), "{stderr} want {want}");
+    }
+}
+
+#[test]
+fn f32_record_field_takes_exact_float_literal() {
+    let src = "strake 1\n\ntype p { v: f32 }\n\ntest t\n  r = { v: 0.25 }\n  ret 0\nend\n";
+    let (code, stderr) = run_src("f32_record", src);
+    assert_eq!(code, Some(0), "{stderr}");
+}

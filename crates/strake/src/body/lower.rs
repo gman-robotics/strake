@@ -1533,6 +1533,11 @@ fn record_fields_fit(
     })
 }
 
+/// Mirrors check's `float_literal_ty`: `f32` only when the literal is exact in f32.
+fn float_fits(x: f64, expected: &Type) -> bool {
+    type_name_is(expected, "f64") || (type_name_is(expected, "f32") && f64::from(x as f32) == x)
+}
+
 fn operand_fits(
     op: &Operand,
     expected: &Type,
@@ -1540,7 +1545,7 @@ fn operand_fits(
 ) -> bool {
     match op {
         Operand::Bool(_, _) => type_name_is(expected, "bool"),
-        Operand::Float(_, _) => type_name_is(expected, "f64"),
+        Operand::Float(x, _) => float_fits(*x, expected),
         Operand::Bytes(_, _) => type_name_is(expected, "bytes"),
         Operand::Unit(_) => type_name_is(expected, "unit"),
         Operand::Int(n, _) => match expected {
@@ -1673,7 +1678,7 @@ fn lower_operand(
         Operand::Unit(span) => Ok(b.const_i64(block, span.clone(), 0)),
         Operand::Bool(v, span) => Ok(b.const_bool(block, span.clone(), *v)),
         Operand::Bytes(bytes, span) => Ok(b.bytes_new(block, span.clone(), bytes)),
-        Operand::Float(_, _) => Err(LowerError::unsupported("operand type")),
+        Operand::Float(x, span) => Ok(b.const_f64(block, span.clone(), x.to_bits())),
     }
 }
 
@@ -2123,9 +2128,6 @@ end
             .collect();
         assert_eq!(traps.len(), 1);
         assert!(matches!(traps[0].imm, Imm::Trap(TrapImm::User)));
-        for reserved in [TrapImm::Hole, TrapImm::Lower, TrapImm::Fallthrough] {
-            assert!(!matches!(&traps[0].imm, Imm::Trap(k) if *k == reserved));
-        }
     }
 
     /// `--draft` keeps the hole and lowers it to a `trap` with the `Hole` immediate.
