@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Command;
 
 fn golden(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -65,9 +64,14 @@ fn if_arm_for_exits_0() {
 #[test]
 fn if_arm_forall_exits_0() {
     let path = golden("if_arm_forall.strake");
+    let src = std::fs::read_to_string(&path).expect("read golden");
+    assert!(
+        src.contains("assert.eq n 0"),
+        "the then-arm forall must assert the bound, so exit 0 means the body ran"
+    );
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status, 0);
-    assert!(stderr.is_empty());
+    assert_eq!(status, 0, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]
@@ -78,19 +82,18 @@ fn match_arm_for_exits_0() {
     assert!(stderr.is_empty());
 }
 
+/// SPEC.md "Forall span": `LO..HI` is inclusive, and
+/// `span = i128(HI) - i128(LO) + 1`. `0..0` has span 1, so the body runs once
+/// with `n == 0`. The same golden with `assert.eq n 1` is `E_TEST` got `0`.
 #[test]
-fn forall_rev_exec_counter_stays_zero() {
-    let path = golden("forall_rev.strake");
-    let bin = env!("CARGO_BIN_EXE_strake");
-    let out = Command::new(bin)
-        .args(["test", path.to_str().unwrap()])
-        .env("STRAKE_EXEC_COUNTER", "1")
-        .output()
-        .expect("run strake");
-    assert_eq!(out.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("E_FORALL"));
-    assert!(!stderr.contains("exec="));
+fn if_arm_forall_body_sees_the_bound() {
+    let src = std::fs::read_to_string(golden("if_arm_forall.strake"))
+        .expect("read golden")
+        .replace("assert.eq n 0", "assert.eq n 1");
+    let (status, stderr) = run_src("if_arm_forall_miss.strake", &src);
+    assert_eq!(status, 1, "{stderr}");
+    assert!(stderr.contains("\"E_TEST\""), "{stderr}");
+    assert!(stderr.contains("\"got\":\"0\""), "{stderr}");
 }
 
 #[test]

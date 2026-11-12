@@ -3,8 +3,8 @@ strake 1
 property if_arm_forall
   flag = true
   if flag
-    forall n: i64 in 0..1
-      x = add i64 n 0
+    forall n: i64 in 0..0
+      assert.eq n 0
     end
   else
     trap
