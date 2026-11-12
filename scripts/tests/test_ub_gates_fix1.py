@@ -982,7 +982,7 @@ class CrapperBaseJoinTests(unittest.TestCase):
 
     def test_new_function_over_threshold_fails(self) -> None:
         base_if, head_if = self._pair("check_if", 19.0, 19.0, 19, 19)
-        fresh = _crap_row("fresh", self._HEAD_NS, 11.0, 11)
+        fresh = _crap_row("fresh", self._HEAD_NS, 10.0, 10)
         spans = [
             {
                 "namespace": self._HEAD_NS,
@@ -1013,8 +1013,47 @@ class CrapperBaseJoinTests(unittest.TestCase):
             text = proc.stdout + proc.stderr
             self.assertEqual(proc.returncode, 1, text)
             self.assertIn("outcome=ran_with_findings", _outcome(Path(tmp)))
-            self.assertIn(f"crapper findings {self._HEAD_NS} fresh crap=11.0", text)
+            self.assertIn(f"crapper findings {self._HEAD_NS} fresh crap=10.0", text)
             self.assertIn(f"crapper debt {self._HEAD_NS} check_if crap=19.0", text)
+
+    def test_new_function_under_threshold_does_not_fail(self) -> None:
+        base_if, head_if = self._pair("check_if", 19.0, 19.0, 19, 19)
+        fresh = _crap_row("fresh", self._HEAD_NS, 9.0, 9)
+        spans = [
+            {
+                "namespace": self._HEAD_NS,
+                "name": "check_if",
+                "start_line": 1,
+                "end_line": 3,
+                "path": self._FILE,
+            },
+            {
+                "namespace": self._HEAD_NS,
+                "name": "fresh",
+                "start_line": 4,
+                "end_line": 6,
+                "path": self._FILE,
+            },
+        ]
+        before = "fn check_if() {\n    let y = 1;\n}\nfn fresh() {\n    let z = 1;\n}\n"
+        after = "fn check_if() {\n    let y = 1;\n}\nfn fresh() {\n    let z = 2;\n}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                [head_if, fresh],
+                [base_if],
+                spans=spans,
+                source_before=before,
+                source_after=after,
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            outcome = _outcome(Path(tmp))
+            self.assertIn("outcome=ran_clean", outcome)
+            self.assertIn("crapper_findings=0", outcome)
+            self.assertIn(f"crapper debt {self._HEAD_NS} check_if crap=19.0", text)
+            self.assertNotIn("crapper findings", text)
+            self.assertNotIn("fresh", text)
 
     def test_same_name_in_two_files_joins_on_the_file_path(self) -> None:
         repo_files = (

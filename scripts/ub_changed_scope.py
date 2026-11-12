@@ -8,8 +8,9 @@
 `UB_SCOPE_FUNCTIONS_JSON` is a test seam. When it is set, `crap` reads that
 JSON file instead of importing crapper. Each object is
 `{namespace, name, start_line, end_line, path}`.
-`--base-edn` is the merge-base snapshot. A changed function over the threshold
-fails when it is new or the score rose. An unchanged over-threshold row is debt.
+`--base-edn` is the merge-base snapshot. A changed function at or over the
+threshold fails when it is new or the score rose. Pass is CRAP under the
+threshold. An unchanged at-or-over-threshold row is debt.
 """
 
 from __future__ import annotations
@@ -427,7 +428,7 @@ def _crap_payload(row: CrapRow) -> dict[str, object]:
 
 
 def _append_if_over(row: CrapRow, threshold: float, findings: list[dict[str, object]]) -> None:
-    if row.crap > threshold:
+    if row.crap >= threshold:
         findings.append(_crap_payload(row))
 
 
@@ -462,7 +463,7 @@ def _crap_over(row: CrapRow, threshold: float) -> bool:
     score = row.crap
     if score is None:
         return False
-    return score > threshold
+    return score >= threshold
 
 
 def _unjoined_present(row: CrapRow, threshold: float) -> None:
