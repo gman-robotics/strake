@@ -18,8 +18,8 @@ thread_local! {
     static EXEC_ENTRIES_ON_THREAD: std::cell::Cell<usize> = std::cell::Cell::default();
 }
 
-/// Exec entries on this thread. Parallel `cargo test` workers do not share it.
 #[cfg(test)]
+/// Exec entries on this thread. Parallel `cargo test` workers do not share it.
 pub(crate) fn exec_entries_on_this_thread() -> usize {
     EXEC_ENTRIES_ON_THREAD.with(std::cell::Cell::get)
 }
