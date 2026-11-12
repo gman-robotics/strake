@@ -1722,6 +1722,24 @@ fn resolve_static_i64_lower(
     }
 }
 
+/// `break` inside `for` leaves that `for`. The frame's exit differs from an
+/// enclosing loop's exit, and there is no enclosing loop when `outer_exit` is
+/// absent.
+fn targets_this_for(exit: usize, outer_exit: Option<usize>) -> bool {
+    outer_exit.is_none_or(|outer| exit != outer)
+}
+
+fn push_for_frame(loops: &mut Vec<LoopFrame>, exit: usize) {
+    let outer_exit = loops.last().map(|frame| frame.exit);
+    if targets_this_for(exit, outer_exit) {
+        loops.push(LoopFrame {
+            header: exit,
+            exit,
+            params: Vec::new(),
+        });
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_for(
     b: &mut Builder,
@@ -1742,11 +1760,7 @@ fn lower_for(
         .ok_or_else(|| LowerError::unsupported("unbound list in for"))?;
     let ctx = if in_test { "for body" } else { "" };
     b.for_(block, span.clone(), list_v, |b, ok_arm, elt, exit| {
-        loops.push(LoopFrame {
-            header: exit,
-            exit,
-            params: Vec::new(),
-        });
+        push_for_frame(loops, exit);
         env.insert(binder.to_string(), elt);
         let mut cur = ok_arm;
         for stmt in body {

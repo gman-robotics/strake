@@ -16,10 +16,9 @@
 # Advisory mode reports that timeout and still exits 0. The step summary's
 # first line states which of those happened. Changed Python is measured with
 # coverage.py before the mutator. Blocking mode fails when a changed file has
-# mutation sites and none of them are covered. A snapshot whose every site is
-# uncovered is that miss. An uncovered site on a changed line is that miss when
-# no changed-line site was killed or survived. Sites outside the changed lines
-# that the mutator did not run are not that miss. .pyi and .d.ts are outside gate scope.
+# mutation sites and none were killed or survived. Kills in another file do not
+# cover it. An uncovered site on a changed line is that miss when no
+# changed-line site was killed or survived. .pyi and .d.ts are outside gate scope.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -533,28 +532,39 @@ def status_lines(path: Path) -> dict[str, dict[str, set[int]]]:
 def hits(bucket: dict[str, set[int]], source: str, lines: list[int]) -> bool:
     return bool(bucket.get(source, set()) & set(lines))
 
+def source_of(text: str) -> str:
+    match = re.search(r':source\s+"((?:\\.|[^"\\])*)"', text)
+    if match is None:
+        return ""
+    return match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+
 sites = killed = survived = uncovered = 0
 bare = False
 reason = ""
 root = Path(".metrics/mutate")
-snapshots = []
+by_source: dict[str, list[int]] = {}
 for path in sorted(root.rglob("*.edn")):
     text = path.read_text(encoding="utf-8", errors="replace")
     file_sites, file_killed, file_survived, file_uncovered = totals(text)
-    snapshots.append((path, file_sites, file_killed, file_survived, file_uncovered))
+    src = source_of(text) or path.as_posix()
+    bucket = by_source.setdefault(src, [0, 0, 0])
+    bucket[0] += file_sites
+    bucket[1] += file_killed
+    bucket[2] += file_survived
     sites += file_sites
     killed += file_killed
     survived += file_survived
     uncovered += file_uncovered
-    # Every site uncovered: the coverage report missed this namespace.
-    if file_sites > 0 and file_killed + file_survived == 0 and file_uncovered == file_sites:
-        bare = True
-        reason = f"{path.as_posix()} every site uncovered"
-if os.environ.get("UB_DIFF_OK") != "1":
-    for path, file_sites, file_killed, file_survived, _file_uncovered in snapshots:
+
+def mark_uncovered_files(suffix: str) -> None:
+    global bare, reason
+    for src, (file_sites, file_killed, file_survived) in by_source.items():
         if file_sites > 0 and file_killed + file_survived == 0:
             bare = True
-            reason = f"{path.as_posix()} no mutant ran and the diff was unavailable"
+            reason = f"{src} has mutation sites and killed + survived == 0{suffix}"
+
+if os.environ.get("UB_DIFF_OK") != "1":
+    mark_uncovered_files(" and the diff was unavailable")
 else:
     try:
         changed = json.loads(os.environ.get("UB_CHANGED_JSON") or "{}")
@@ -562,11 +572,9 @@ else:
         print(f"ub-gates: mutator changed-line json failed ({exc}); failing closed", file=sys.stderr)
         changed = None
     if not isinstance(changed, dict):
-        for path, file_sites, file_killed, file_survived, _file_uncovered in snapshots:
-            if file_sites > 0 and file_killed + file_survived == 0:
-                bare = True
-                reason = f"{path.as_posix()} no mutant ran and the diff was unreadable"
+        mark_uncovered_files(" and the diff was unreadable")
     else:
+        mark_uncovered_files("")
         reported = status_lines(Path(os.environ["UB_MUTATOR_STATUS"]))
         for source, lines in changed.items():
             if not isinstance(lines, list):

@@ -1081,6 +1081,43 @@ pub(crate) fn call_function_i64(
         .ok_or_else(|| ExecFault::Codeless("function returned no value".into()))
 }
 
+/// One-element `for` whose body jumps to the exit block `for_` passes in.
+/// The result is the value returned from that block.
+#[cfg(test)]
+fn for_body_leaves_through_exit(
+    entry: usize,
+    span_at: u32,
+    fuel: i64,
+    result: i64,
+) -> Result<i64, ExecFault> {
+    use crate::body::host::EmptyHost;
+
+    let span = Span {
+        file: String::new(),
+        start: span_at,
+        end: span_at,
+    };
+    let mut b = Builder::new();
+    let fidx = b.begin_function("f", entry);
+    let empty = b.list_empty(entry, span.clone());
+    let seven = b.const_i64(entry, span.clone(), 7);
+    let xs = b.list_cons(entry, span.clone(), seven, empty);
+    let exit = b
+        .for_(entry, span.clone(), xs, |b, ok_arm, _elt, exit| {
+            if exit != entry {
+                b.jump(ok_arm, span.clone(), exit);
+            } else {
+                b.trap_user(ok_arm, span.clone());
+            }
+            Ok::<usize, ()>(ok_arm)
+        })
+        .expect("for_");
+    b.ret_i64(exit, span, result);
+    let program = b.finish().expect("finish");
+    let mut machine = Machine::new(&program, fuel, &EmptyHost);
+    machine.run_root_function(fidx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1519,6 +1556,12 @@ end
         let mut m = t3_machine_with_regs(&program, vec![None, None, None]);
         let bad = m.test_step(&t3_inst(Op::ConstI32, Imm::I64(1)));
         assert!(matches!(bad, Err(ExecFault::Codeless(_))));
+    }
+
+    #[test]
+    fn for_body_jump_to_exit_returns_that_value() {
+        let got = super::for_body_leaves_through_exit(0, 0, 1000, 1).expect("run");
+        assert_eq!(got, 1);
     }
 
     #[test]

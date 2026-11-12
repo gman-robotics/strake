@@ -698,10 +698,10 @@ class MutatorCoverageTests(unittest.TestCase):
             self.assertIn("blocking mode — mutator covered no sites", text)
             self.assertIn("not_run=0", text)
 
-    def test_unrun_sites_outside_changed_lines_pass(self) -> None:
-        # a116686: namespace snapshots listed whole-file sites, killed none of
-        # them, and uncovered only lines outside the diff. That is not "no
-        # coverage". The old rule (sites > 0 and killed + survived == 0) failed it.
+    def test_file_with_sites_and_no_kills_fails(self) -> None:
+        # A changed file with sites and killed + survived == 0 is a coverage
+        # miss even when the uncovered line is outside the diff. Another file's
+        # kills cannot cover this one.
         with tempfile.TemporaryDirectory() as tmp:
             proc = self._run(
                 tmp,
@@ -709,10 +709,23 @@ class MutatorCoverageTests(unittest.TestCase):
                 status="UNCOVERED lib/a.py:99 0 -> 1",
             )
             text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=mutator_no_coverage", _outcome(Path(tmp)))
+            self.assertIn("mutator sites=47 covered=0 killed=0 survived=0 uncovered=1 not_run=46", text)
+            self.assertIn("blocking mode — mutator covered no sites", text)
+            self.assertIn("killed + survived == 0", text)
+
+    def test_killed_mutant_with_unrun_sites_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                _mutator_edn(1, 0, 1, 47),
+                status="KILLED    lib/a.py:2 0 -> 1\nUNCOVERED lib/a.py:99 true -> false",
+            )
+            text = proc.stdout + proc.stderr
             self.assertEqual(proc.returncode, 0, text)
             self.assertIn("outcome=ran_clean", _outcome(Path(tmp)))
-            self.assertIn("mutator sites=47 covered=0 killed=0 survived=0 uncovered=1 not_run=46", text)
-            self.assertNotIn("blocking mode — mutator covered no sites", text)
+            self.assertIn("mutator sites=47 covered=1 killed=1 survived=0 uncovered=1 not_run=45", text)
 
     def test_uncovered_changed_line_with_no_run_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

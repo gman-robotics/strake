@@ -754,6 +754,15 @@ impl Builder {
         self.emit_i64_binop(block, span, Op::Ge, lhs, rhs, Imm::None)
     }
 
+    /// `break` leaves the `for` at `exit`, not at the index header.
+    fn for_break_block(header: usize, exit: usize) -> usize {
+        if exit != header {
+            exit
+        } else {
+            header
+        }
+    }
+
     /// Normative `for x in xs` index loop (Phase 2 §3, T3). Owns the index phi,
     /// the `list.get` sum split, and the `trap Lower` err arm: `list.get` cannot
     /// give err while `i < len`, so reaching that arm is `E_LOWER`.
@@ -785,7 +794,7 @@ impl Builder {
         let tag = self.sum_tag(body_block, span.clone(), slot);
         self.br_table(body_block, span.clone(), tag, &[ok_arm, err_arm]);
         let elt = self.sum_payload(ok_arm, span.clone(), slot);
-        let last = body(self, ok_arm, elt, exit)?;
+        let last = body(self, ok_arm, elt, Self::for_break_block(header, exit))?;
         if !self.block_terminates(last) {
             self.jump(last, span.clone(), after_ok);
         }
