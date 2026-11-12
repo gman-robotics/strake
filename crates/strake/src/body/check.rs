@@ -85,6 +85,7 @@ impl CheckState {
 
 pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure> {
     let mut diags = Vec::new();
+    reject_wide_int_binds(module, &mut diags);
     let sum_types = build_sum_type_index(module);
     let record_types = build_record_type_index(module);
     let module_int_binds = module_int_bindings(module);
@@ -384,6 +385,16 @@ fn module_int_bindings(module: &Module) -> HashMap<String, i128> {
         }
     }
     out
+}
+
+fn reject_wide_int_binds(module: &Module, diags: &mut Vec<Diag>) {
+    for item in &module.items {
+        if let Item::Bind { value, span, .. } = item {
+            if !fits_i64(*value) {
+                diags.push(type_diag(span.clone()));
+            }
+        }
+    }
 }
 
 fn apply_module_binds(ctx: &mut Ctx, state: &CheckState, span: Span) {
