@@ -13,6 +13,22 @@ use body::host::EmptyHost;
 use body::syntax;
 use body::{compile_module, lower_abort_message, CompileError, LOWER_ABORT_EXIT};
 
+#[cfg(test)]
+thread_local! {
+    static EXEC_ENTRIES_ON_THREAD: std::cell::Cell<usize> = std::cell::Cell::default();
+}
+
+/// Exec entries on this thread. Parallel `cargo test` workers do not share it.
+#[cfg(test)]
+pub(crate) fn exec_entries_on_this_thread() -> usize {
+    EXEC_ENTRIES_ON_THREAD.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn note_exec_on_this_thread() {
+    EXEC_ENTRIES_ON_THREAD.with(|entries| entries.set(entries.get() + 1));
+}
+
 /// CLI options shared across commands.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Opts {

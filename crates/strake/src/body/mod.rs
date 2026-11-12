@@ -46,8 +46,7 @@ pub(crate) fn exec_entered_count() -> usize {
 
 #[cfg(test)]
 pub(crate) fn reset_exec_entered() {
-    let cleared = 0;
-    EXEC_ENTERED.store(cleared, std::sync::atomic::Ordering::SeqCst);
+    EXEC_ENTERED.store(0, std::sync::atomic::Ordering::SeqCst);
 }
 
 pub(crate) fn lower_abort_message(err: &LowerError) -> String {
@@ -66,27 +65,33 @@ mod tests {
         let src = include_str!("../../../../golden/shadow.strake");
         let tmp = std::env::temp_dir().join("strake_t4_shadow_exec.strake");
         std::fs::write(&tmp, src).expect("write");
+        let before = crate::exec_entries_on_this_thread();
         let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
         assert_eq!(exit.code, 1);
-        assert_eq!(exec_entered_count(), 0);
+        assert_eq!(crate::exec_entries_on_this_thread(), before);
+        // Other threads share this counter, so its value is not the assertion.
+        let _process_wide = exec_entered_count();
 
         reset_exec_entered();
         let src = include_str!("../../../../golden/priv_call.strake");
         let tmp = std::env::temp_dir().join("strake_t4_priv_call_exec.strake");
         std::fs::write(&tmp, src).expect("write");
+        let before = crate::exec_entries_on_this_thread();
         let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
         assert_eq!(exit.code, 3);
-        assert_eq!(exec_entered_count(), 0);
+        assert_eq!(crate::exec_entries_on_this_thread(), before);
+        let _process_wide = exec_entered_count();
     }
 
-    /// `forall_rev` is check `E_FORALL` before any export runs. A following
-    /// passing property moves the counter, so a stuck zero would fail.
+    /// `forall_rev` is check `E_FORALL` before any export runs. The count is
+    /// thread-local, so other tests running `strake::test` in parallel do not
+    /// move it. A passing property on this thread then adds one.
     #[test]
     fn forall_rev_check_does_not_enter_exec() {
-        reset_exec_entered();
         let rev_src = include_str!("../../../../golden/forall_rev.strake");
         let rev_path = std::env::temp_dir().join("strake_forall_rev_exec.strake");
         std::fs::write(&rev_path, rev_src).expect("write");
+        let before = crate::exec_entries_on_this_thread();
         let blocked = strake_test(rev_path.to_str().unwrap(), Opts::default());
         assert_eq!(blocked.code, 1, "{}", blocked.stderr);
         assert!(
@@ -94,15 +99,15 @@ mod tests {
             "{}",
             blocked.stderr
         );
-        assert_eq!(exec_entered_count(), 0);
-        let after_check = exec_entered_count();
+        let after_check = crate::exec_entries_on_this_thread();
+        assert_eq!(after_check, before);
 
         let ok_src = include_str!("../../../../golden/forall_ok.strake");
         let ok_path = std::env::temp_dir().join("strake_forall_ok_exec.strake");
         std::fs::write(&ok_path, ok_src).expect("write");
         let ran = strake_test(ok_path.to_str().unwrap(), Opts::default());
         assert_eq!(ran.code, 0, "{}", ran.stderr);
-        assert_eq!(exec_entered_count(), after_check + 1);
+        assert_eq!(crate::exec_entries_on_this_thread(), after_check + 1);
     }
 
     #[test]
