@@ -1,0 +1,6 @@
+args: check golden/match_arm_project.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/match_arm_project.strake","start":149,"end":241}}
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/match_arm_project.strake","start":244,"end":247}}

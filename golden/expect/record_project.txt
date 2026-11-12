@@ -1,0 +1,4 @@
+args: test golden/record_project.strake
+exit: 0
+--- stdout
+--- stderr

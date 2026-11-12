@@ -87,7 +87,7 @@ pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure
     let mut diags = Vec::new();
     reject_wide_int_binds(module, &mut diags);
     let sum_types = build_sum_type_index(module);
-    let record_types = build_record_type_index(module);
+    let record_types = build_record_type_index(module, &mut diags);
     let module_int_binds = module_int_bindings(module);
     let has_region = super::syntax::region_pages(module).is_some();
     let mut state = CheckState::new(sum_types, record_types, module_int_binds, has_region);
@@ -147,11 +147,15 @@ fn build_sum_type_index(module: &Module) -> HashMap<String, SumTypeInfo> {
     out
 }
 
-fn build_record_type_index(module: &Module) -> HashMap<String, Vec<(String, Type)>> {
+fn build_record_type_index(
+    module: &Module,
+    diags: &mut Vec<Diag>,
+) -> HashMap<String, Vec<(String, Type)>> {
     let mut out = HashMap::new();
     for item in &module.items {
         if let Item::TypeDef(td) = item {
             if let TypeDefKind::Record(fields) = &td.kind {
+                note_repeated_record(&out, td, diags);
                 let decls = fields
                     .iter()
                     .map(|f| (f.name.clone(), f.ty.clone()))
@@ -161,6 +165,16 @@ fn build_record_type_index(module: &Module) -> HashMap<String, Vec<(String, Type
         }
     }
     out
+}
+
+fn note_repeated_record(
+    seen: &HashMap<String, Vec<(String, Type)>>,
+    def: &super::syntax::TypeDef,
+    diags: &mut Vec<Diag>,
+) {
+    if seen.contains_key(&def.name) {
+        diags.push(type_diag(def.span.clone()));
+    }
 }
 
 /// Whether a test's direct `call` sites are only to `only_fn` (§2.15).
@@ -1145,7 +1159,6 @@ fn check_if(
                     then_body,
                     &supply.then_arm,
                     name,
-                    &then_tops,
                     &then_ctx,
                     state,
                     fns,
@@ -1155,14 +1168,13 @@ fn check_if(
                     else_body,
                     &supply.else_arm,
                     name,
-                    &else_tops,
                     &else_ctx,
                     state,
                     fns,
                     diags,
                 );
                 match (t_ty, e_ty) {
-                    (Some(a), Some(b)) if types_compatible(&a, &b) => {
+                    (Some(a), Some(b)) if types_equal(&a, &b) => {
                         if let Some(existing) = ctx.types.get(name) {
                             if !types_compatible(existing, &a) {
                                 diags.push(type_diag(span.clone()));
@@ -1213,7 +1225,7 @@ fn bind_both_assign_join(
     diags: &mut Vec<Diag>,
 ) {
     match (then_ty, else_ty) {
-        (Some(a), Some(b)) if types_compatible(a, b) => {
+        (Some(a), Some(b)) if types_equal(a, b) => {
             insert_join_type(ctx, name, a.clone(), span, diags);
         }
         (Some(_), Some(_)) => diags.push(type_diag(span.clone())),
@@ -1242,7 +1254,6 @@ fn join_arm_type(
     arm: &[Stmt],
     src: &ArmSrc,
     name: &str,
-    tops: &HashMap<String, (Type, Span)>,
     ctx: &Ctx,
     state: &mut CheckState,
     fns: &[&FnItem],
@@ -1250,9 +1261,13 @@ fn join_arm_type(
 ) -> Option<Type> {
     match src {
         ArmSrc::LoopExit => loop_param_init_ty(arm, name, ctx, state, fns, diags),
-        ArmSrc::Assign => tops.get(name).map(|(ty, _)| ty.clone()),
+        ArmSrc::Assign => assign_arm_type(ctx, name),
         ArmSrc::Absent => None,
     }
+}
+
+fn assign_arm_type(ctx: &Ctx, name: &str) -> Option<Type> {
+    ctx.types.get(name).cloned()
 }
 
 fn loop_param_init_ty(
@@ -2233,18 +2248,26 @@ fn int_literal_ty(n: i128, span: Span, expected: Option<&Type>, diags: &mut Vec<
 
 fn types_compatible(found: &Type, expected: &Type) -> bool {
     // i32 and i64 are distinct types: no implicit coercion (GMA-372).
-    types_equal(found, expected)
+    // A constructed `ok`/`err` leaves the other side as `unit`. That found
+    // `unit` still fits the expected side. Joins do not use this fit.
+    match (found, expected) {
+        (Type::Result(ok_found, err_found, _), Type::Result(ok_expected, err_expected, _)) => {
+            side_fits(ok_found, ok_expected) && side_fits(err_found, err_expected)
+        }
+        _ => types_equal(found, expected),
+    }
+}
+
+fn side_fits(found: &Type, expected: &Type) -> bool {
+    types_equal(found, expected) || found_unit(found)
+}
+
+fn found_unit(ty: &Type) -> bool {
+    matches!(ty, Type::Named(name, _) if name == "unit")
 }
 
 fn result_side_compatible(a: &Type, b: &Type) -> bool {
-    if types_equal(a, b) {
-        return true;
-    }
-    is_unit_type(a) || is_unit_type(b)
-}
-
-fn is_unit_type(ty: &Type) -> bool {
-    matches!(ty, Type::Named(n, _) if n == "unit")
+    types_equal(a, b)
 }
 
 fn types_equal(a: &Type, b: &Type) -> bool {
@@ -2442,18 +2465,7 @@ fn check_match(
             .iter()
             .any(|a| a.delivered.iter().any(|d| d == &name));
         if in_all {
-            let ty = site
-                .arms
-                .iter()
-                .zip(arm_local_types.iter())
-                .filter(|(s, _)| s.reaches && s.delivered.iter().any(|d| d == &name))
-                .find_map(|(_, locals)| locals.get(&name).cloned())
-                .unwrap_or_else(|| scalar("i64", span.clone()));
-            ctx.match_partial.remove(&name);
-            if !ctx.types.contains_key(&name) {
-                ctx.types.insert(name.clone(), ty);
-            }
-            ctx.phi_gaps.remove(&name);
+            publish_match_arm_type(ctx, &name, &span, &site.arms, &arm_local_types, diags);
         } else if in_some {
             ctx.match_partial.insert(name.clone());
         }
@@ -2462,6 +2474,68 @@ fn check_match(
     for name in &phi_names {
         ctx.match_partial.remove(name);
     }
+}
+
+fn delivered_arm_type<'a>(
+    name: &str,
+    supply: &MatchArmSupply,
+    locals: &'a HashMap<String, Type>,
+) -> Option<&'a Type> {
+    if !supply.reaches {
+        return None;
+    }
+    locals.get(name)
+}
+
+enum ArmAgreement {
+    Same(Type),
+    Conflict,
+}
+
+fn match_arm_agreement(
+    name: &str,
+    span: &Span,
+    arms: &[MatchArmSupply],
+    locals: &[HashMap<String, Type>],
+) -> ArmAgreement {
+    let mut agreed: Option<Type> = None;
+    for (supply, local) in arms.iter().zip(locals) {
+        let Some(ty) = delivered_arm_type(name, supply, local) else {
+            continue;
+        };
+        match &agreed {
+            None => agreed = Some(ty.clone()),
+            Some(prev) => {
+                if !types_equal(prev, ty) {
+                    return ArmAgreement::Conflict;
+                }
+            }
+        }
+    }
+    let ty = agreed.unwrap_or_else(|| scalar("i64", span.clone()));
+    ArmAgreement::Same(ty)
+}
+
+fn publish_match_arm_type(
+    ctx: &mut Ctx,
+    name: &str,
+    span: &Span,
+    arms: &[MatchArmSupply],
+    locals: &[HashMap<String, Type>],
+    diags: &mut Vec<Diag>,
+) {
+    match match_arm_agreement(name, span, arms, locals) {
+        ArmAgreement::Conflict => diags.push(type_diag(span.clone())),
+        ArmAgreement::Same(ty) => bind_agreed_match_type(ctx, name, ty),
+    }
+}
+
+fn bind_agreed_match_type(ctx: &mut Ctx, name: &str, ty: Type) {
+    ctx.match_partial.remove(name);
+    if !ctx.types.contains_key(name) {
+        ctx.types.insert(name.to_string(), ty);
+    }
+    ctx.phi_gaps.remove(name);
 }
 
 fn match_diag(span: Span) -> Diag {
@@ -2909,5 +2983,142 @@ mod tests {
     fn check_rhs_list_and_binop_paths() {
         let src = "strake 1\n\nfn f() -> i64\n  e = list.empty i64\n  xs = list.cons 1 e\n  n = list.len xs\n  s = add i64 n 0\n  ret s\nend\n\ntest t\n  ret 0\nend\n";
         assert!(check_ok(src));
+    }
+
+    fn golden_path(name: &str) -> String {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../golden")
+            .join(name)
+            .to_str()
+            .expect("utf8")
+            .to_string()
+    }
+
+    fn cli_check(name: &str) -> crate::Exit {
+        crate::check(&golden_path(name), crate::Opts::default())
+    }
+
+    fn cli_test(name: &str) -> crate::Exit {
+        crate::test(&golden_path(name), crate::Opts::default())
+    }
+
+    fn write_src(name: &str, src: &str) -> String {
+        let path = std::env::temp_dir().join(format!("strake-gma497-{name}.strake"));
+        std::fs::write(&path, src).expect("write");
+        path.to_str().expect("utf8").to_string()
+    }
+
+    /// A repeated record name is `E_TYPE` at check. One record still runs.
+    #[test]
+    fn duplicate_record_name_is_etype() {
+        let dup = cli_check("dup_record.strake");
+        assert_eq!(dup.code, 1, "{}", dup.stderr);
+        assert!(dup.stderr.contains("\"code\":\"E_TYPE\""), "{}", dup.stderr);
+        assert!(!dup.stderr.contains("lower:"), "{}", dup.stderr);
+        let projected = cli_test("record_project.strake");
+        assert_eq!(projected.code, 0, "{}", projected.stderr);
+        let last_fits = "strake 1\n\ntype A { n: bool }\n\ntype A { n: i64 }\n\nfn f() -> i64\n  p = { n: 1 }\n  v = p.n\n  ret v\nend\n\ntest t\n  n = call f()\n  assert.eq n 1\n  ret 0\nend\n";
+        let path = write_src("dup-last-fits", last_fits);
+        let exit = crate::check(&path, crate::Opts::default());
+        assert_eq!(exit.code, 1, "{}", exit.stderr);
+        assert!(
+            exit.stderr.contains("\"code\":\"E_TYPE\""),
+            "{}",
+            exit.stderr
+        );
+    }
+
+    /// `unit` matches `unit` on a result side, and no other type.
+    #[test]
+    fn result_unit_matches_only_unit() {
+        let mixed = cli_check("result_unit_join.strake");
+        assert_eq!(mixed.code, 1, "{}", mixed.stderr);
+        assert!(
+            mixed.stderr.contains("\"code\":\"E_TYPE\""),
+            "{}",
+            mixed.stderr
+        );
+        let same = cli_test("result_i64_join.strake");
+        assert_eq!(same.code, 0, "{}", same.stderr);
+        let unit_unit = "strake 1\n\nfn f(c: bool) -> unit\n  if c\n    r = ok unit unit\n  else\n    r = ok unit unit\n  end\n  match r\n    ok v ->\n      ret v\n    err _ ->\n      ret unit\n  end\nend\n\ntest t\n  n = call f(true)\n  ret 0\nend\n";
+        let ok_path = write_src("result-unit-unit", unit_unit);
+        let ok = crate::test(&ok_path, crate::Opts::default());
+        assert_eq!(ok.code, 0, "{}", ok.stderr);
+        let err_sides = "strake 1\n\nfn f(c: bool) -> i64\n  if c\n    r = err i64 1\n  else\n    r = err unit unit\n  end\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let err_path = write_src("result-err-unit", err_sides);
+        let err = crate::check(&err_path, crate::Opts::default());
+        assert_eq!(err.code, 1, "{}", err.stderr);
+        assert!(err.stderr.contains("\"code\":\"E_TYPE\""), "{}", err.stderr);
+        let swapped = "strake 1\n\nfn f(c: bool) -> i64\n  if c\n    r = ok unit unit\n  else\n    r = ok i64 4\n  end\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let swapped_path = write_src("result-unit-swapped", swapped);
+        let swapped_exit = crate::check(&swapped_path, crate::Opts::default());
+        assert_eq!(swapped_exit.code, 1, "{}", swapped_exit.stderr);
+        let ctor = cli_test("match_result.strake");
+        assert_eq!(ctor.code, 0, "{}", ctor.stderr);
+        let wrong_ok = "strake 1\n\nfn f(r: result bool unit) -> i64\n  ret 0\nend\n\ntest t\n  v = ok i64 1\n  n = call f(v)\n  ret 0\nend\n";
+        let wrong_path = write_src("result-ok-bool", wrong_ok);
+        let wrong = crate::check(&wrong_path, crate::Opts::default());
+        assert_eq!(wrong.code, 1, "{}", wrong.stderr);
+        assert!(
+            wrong.stderr.contains("\"code\":\"E_TYPE\""),
+            "{}",
+            wrong.stderr
+        );
+    }
+
+    /// An assign joined with a loop exit uses the assign's type, not an i64 hint.
+    #[test]
+    fn loop_exit_join_rejects_record_and_bytes() {
+        let record = cli_check("loop_exit_record.strake");
+        assert_eq!(record.code, 1, "{}", record.stderr);
+        assert!(
+            record.stderr.contains("\"code\":\"E_TYPE\""),
+            "{}",
+            record.stderr
+        );
+        let bytes = cli_check("loop_exit_bytes.strake");
+        assert_eq!(bytes.code, 1, "{}", bytes.stderr);
+        assert!(
+            bytes.stderr.contains("\"code\":\"E_TYPE\""),
+            "{}",
+            bytes.stderr
+        );
+        let joined = cli_test("loop_arm_join_true.strake");
+        assert_eq!(joined.code, 0, "{}", joined.stderr);
+        let list = "strake 1\n\nfn f(c: bool) -> i64\n  if c\n    e = list.empty i64\n    r = list.cons 1 e\n  else\n    loop r = 0\n      break\n    end\n  end\n  ret 0\nend\n\ntest t\n  ret 0\nend\n";
+        let path = write_src("loop-exit-list", list);
+        let exit = crate::check(&path, crate::Opts::default());
+        assert_eq!(exit.code, 1, "{}", exit.stderr);
+        assert!(
+            exit.stderr.contains("\"code\":\"E_TYPE\""),
+            "{}",
+            exit.stderr
+        );
+    }
+
+    /// Match arms that deliver one name must agree on its type.
+    #[test]
+    fn match_arm_types_must_agree() {
+        let records = cli_check("match_arm_records.strake");
+        assert_eq!(records.code, 1, "{}", records.stderr);
+        assert!(
+            records.stderr.contains("\"code\":\"E_TYPE\""),
+            "{}",
+            records.stderr
+        );
+        let project = cli_check("match_arm_project.strake");
+        assert_eq!(project.code, 1, "{}", project.stderr);
+        assert!(
+            project.stderr.contains("\"code\":\"E_TYPE\""),
+            "{}",
+            project.stderr
+        );
+        assert!(!project.stderr.contains("lower:"), "{}", project.stderr);
+        let agreed = cli_test("match_arm_agree.strake");
+        assert_eq!(agreed.code, 0, "{}", agreed.stderr);
+        let trap = "strake 1\n\ntype A { x: i64, y: i64 }\n\ntype B { y: i64, z: i64 }\n\ntype S { A unit | B unit | C unit }\n\nfn f(s: S) -> i64\n  match s\n    A _ ->\n      p = { x: 1, y: 2 }\n    B _ ->\n      p = { x: 3, y: 4 }\n    C _ ->\n      p = { y: 9, z: 8 }\n      trap\n  end\n  v = p.x\n  ret v\nend\n\ntest t\n  ret 0\nend\n";
+        let path = write_src("match-arm-trap", trap);
+        let exit = crate::check(&path, crate::Opts::default());
+        assert_eq!(exit.code, 0, "{}", exit.stderr);
     }
 }

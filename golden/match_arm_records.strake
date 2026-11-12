@@ -1,0 +1,32 @@
+strake 1
+
+type A { y: i64, z: i64 }
+type B { x: i64, y: i64 }
+
+fn take(p: A) -> i64
+  n = p.y
+  ret n
+end
+
+fn f(c: bool) -> i64
+  if c
+    r = ok unit unit
+  else
+    r = err unit unit
+  end
+  match r
+    ok _ ->
+      p = { x: 1, y: 2 }
+      n = 0
+    err _ ->
+      p = { y: 9, z: 8 }
+      n = call take(p)
+  end
+  ret n
+end
+
+test t
+  n = call f(false)
+  assert.eq n 9
+  ret 0
+end

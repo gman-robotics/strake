@@ -1,0 +1,17 @@
+strake 1
+
+type A { n: i64 }
+
+type A { n: i64 }
+
+fn f() -> i64
+  p = { n: 1 }
+  v = p.n
+  ret v
+end
+
+test t
+  n = call f()
+  assert.eq n 1
+  ret 0
+end

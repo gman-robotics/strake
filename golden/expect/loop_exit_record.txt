@@ -1,0 +1,6 @@
+args: check golden/loop_exit_record.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/loop_exit_record.strake","start":54,"end":129}}
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/loop_exit_record.strake","start":126,"end":131}}
