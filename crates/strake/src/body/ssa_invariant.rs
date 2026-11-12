@@ -197,33 +197,41 @@ fn ordered_compare_cli_is_not_exit_70() {
 }
 
 #[test]
-fn ordered_compare_out_of_range_is_check_not_lower() {
-    assert_etype(
-        "i32-hi",
-        "strake 1\n\ntest t\n  c = lt i32 2147483648 0\n  ret 0\nend\n",
-    );
-    assert_etype(
-        "i32-lo",
-        "strake 1\n\ntest t\n  c = lt i32 -2147483649 0\n  ret 0\nend\n",
-    );
-    assert_etype(
-        "f32-inexact",
-        "strake 1\n\ntest t\n  c = lt f32 0.1 1.0\n  ret 0\nend\n",
-    );
-}
-
-#[test]
-fn ordered_compare_forbidden_types_are_etype() {
-    assert_etype(
-        "bool",
-        "strake 1\n\ntest t\n  c = lt bool true false\n  ret 0\nend\n",
-    );
-    assert_etype(
-        "unit",
-        "strake 1\n\ntest t\n  c = lt unit unit unit\n  ret 0\nend\n",
-    );
-    assert_etype(
-        "bytes",
-        "strake 1\n\nfn f(a: bytes, b: bytes) -> i64\n  c = ge bytes a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n",
-    );
+fn ordered_compare_range_and_forbidden_are_check_etype() {
+    let cases = [
+        (
+            "i32-hi",
+            "strake 1\n\ntest t\n  c = lt i32 2147483648 0\n  ret 0\nend\n",
+            Code::EType,
+        ),
+        (
+            "i32-lo",
+            "strake 1\n\ntest t\n  c = lt i32 -2147483649 0\n  ret 0\nend\n",
+            Code::EType,
+        ),
+        (
+            "f32-inexact",
+            "strake 1\n\ntest t\n  c = lt f32 0.1 1.0\n  ret 0\nend\n",
+            Code::EType,
+        ),
+        (
+            "bool",
+            "strake 1\n\ntest t\n  c = lt bool true false\n  ret 0\nend\n",
+            Code::EType,
+        ),
+        (
+            "unit",
+            "strake 1\n\ntest t\n  c = lt unit unit unit\n  ret 0\nend\n",
+            Code::EType,
+        ),
+        (
+            "bytes",
+            "strake 1\n\nfn f(a: bytes, b: bytes) -> i64\n  c = ge bytes a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n",
+            Code::EType,
+        ),
+    ];
+    for (name, src, expect) in cases {
+        assert_eq!(expect, Code::EType, "{name}");
+        assert_etype(name, src);
+    }
 }
