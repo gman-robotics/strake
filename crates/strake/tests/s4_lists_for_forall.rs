@@ -210,3 +210,39 @@ fn forall_i64_binder_on_list_and_range_runs() {
         assert!(stderr.is_empty(), "{stderr}");
     }
 }
+
+#[test]
+fn empty_for_then_ret_binder_is_etype() {
+    let src = "strake 1\n\ntest t\n  xs = list.empty i64\n  for x in xs\n  end\n  ret x\nend\n";
+    let (code, stderr) = run_src("for_binder_leak.strake", src);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("\"E_TYPE\""), "{stderr}");
+    assert!(!stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn empty_for_in_if_then_ret_binder_is_etype() {
+    let src = "strake 1\n\ntest t\n  if true\n    xs = list.empty i64\n    for x in xs\n    end\n    ret x\n  end\n  ret 0\nend\n";
+    let (code, stderr) = run_src("for_binder_leak_if.strake", src);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("\"E_TYPE\""), "{stderr}");
+    assert!(!stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn forall_binder_is_not_visible_after() {
+    let src = "strake 1\n\nproperty p\n  forall n: i64 in 0..1\n  end\n  assert.eq n 0\nend\n";
+    let (code, stderr) = run_src("forall_binder_after.strake", src);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("\"E_TYPE\""), "{stderr}");
+    assert!(!stderr.contains("\"E_TEST\""), "{stderr}");
+}
+
+#[test]
+fn nested_forall_binder_is_not_visible_after() {
+    let src = "strake 1\n\nproperty p\n  forall n: i64 in 0..1\n    forall m: i64 in 0..1\n    end\n    assert.eq m 0\n  end\nend\n";
+    let (code, stderr) = run_src("forall_binder_nested.strake", src);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("\"E_TYPE\""), "{stderr}");
+    assert!(!stderr.contains("\"E_TEST\""), "{stderr}");
+}
