@@ -293,3 +293,42 @@ fn continue_in_for_is_etype() {
         assert!(!stderr.contains("E_FUEL"), "{name} {stderr}");
     }
 }
+
+fn int_bind_src(lit: &str, expect: &str) -> String {
+    format!(
+        "strake 1\n\nlo = {lit}\n\nfn f() -> i64\n  ret lo\nend\n\ntest t\n  x = call f()\n  assert.eq x {expect}\n  ret 0\nend\n"
+    )
+}
+
+#[test]
+fn module_i64_bind_rejects_value_past_max() {
+    let (code, stderr) = run_src(
+        "wide_i64_bind.strake",
+        &int_bind_src("9223372036854775808", "0"),
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("\"E_TYPE\""), "{stderr}");
+    assert!(!stderr.contains("-9223372036854775808"), "{stderr}");
+}
+
+#[test]
+fn module_i64_bind_accepts_min_and_max() {
+    for lit in ["9223372036854775807", "-9223372036854775808"] {
+        let (code, stderr) = run_src(
+            &format!("i64_edge_{}.strake", lit.trim_start_matches('-')),
+            &int_bind_src(lit, lit),
+        );
+        assert_eq!(code, 0, "{lit} {stderr}");
+        assert!(stderr.is_empty(), "{lit} {stderr}");
+    }
+}
+
+#[test]
+fn wide_module_bind_as_forall_bound_stays_check_error() {
+    let src = "strake 1\n\nlo = 9223372036854775808\n\nproperty p\n  forall n: i64 in lo..lo\n  end\nend\n";
+    let (code, stderr) = run_src("wide_forall_bind.strake", src);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("\"E_FORALL\""), "{stderr}");
+    assert!(!stderr.contains("\"E_TEST\""), "{stderr}");
+    assert!(!stderr.contains("-9223372036854775808"), "{stderr}");
+}
