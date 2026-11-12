@@ -1291,7 +1291,7 @@ fn check_stmt_in_arm(
         Stmt::Assign { span, name, rhs } => {
             check_arm_assign(ctx, pre, state, fns, span, name, rhs, diags);
         }
-        Stmt::Ret { value, span } => check_arm_ret(ctx, state, fns, fn_ret, value, span, diags),
+        Stmt::Ret { value, span } => check_stmt_ret(ctx, state, fns, fn_ret, value, span, diags),
         Stmt::AssertEq { span, got, want } => {
             check_stmt_assert_eq(ctx, state, fns, in_fn, span, got, want, diags);
         }
@@ -1329,23 +1329,6 @@ fn check_arm_assign(
         diags.push(shadow_diag(span.clone()));
     } else {
         ctx.types.insert(name.to_string(), ty);
-    }
-}
-
-fn check_arm_ret(
-    ctx: &mut Ctx,
-    state: &mut CheckState,
-    fns: &[&FnItem],
-    fn_ret: Option<&Type>,
-    value: &Operand,
-    span: &Span,
-    diags: &mut Vec<Diag>,
-) {
-    let got = operand_ty(value, ctx, state, fns, fn_ret, diags);
-    if let Some(expected) = fn_ret {
-        if !types_compatible(&got, expected) {
-            diags.push(type_diag(span.clone()));
-        }
     }
 }
 
