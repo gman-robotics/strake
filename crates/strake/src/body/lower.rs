@@ -1669,6 +1669,9 @@ fn lower_div(
         Type::Named(name, _) if name == "i32" => Ok(b.div_i32(block, span, l, r)),
         Type::Named(name, _) if name == "i64" => Ok(b.div_i64(block, span, l, r)),
         Type::Named(name, _) if name == "f64" => Ok(b.div_f64(block, span, l, r)),
+        Type::Named(name, _) if name == "f32" => {
+            Ok(b.emit_i64_binop(block, span, Op::Div, l, r, Imm::F32(0)))
+        }
         _ => Err(LowerError::unsupported("div type")),
     }
 }
@@ -1955,6 +1958,14 @@ fn lower_typed_scalar(
     }
 }
 
+fn f32_arith_imm(ty: &Type) -> Imm {
+    if type_name_is(ty, "f32") {
+        Imm::F32(0)
+    } else {
+        Imm::None
+    }
+}
+
 fn lower_binop_values(
     b: &mut Builder,
     block: usize,
@@ -1965,9 +1976,9 @@ fn lower_binop_values(
     r: u32,
 ) -> Result<u32, LowerError> {
     match op {
-        BinOp::Add => Ok(b.add_i64(block, span.clone(), l, r)),
-        BinOp::Sub => Ok(b.sub_i64(block, span.clone(), l, r)),
-        BinOp::Mul => Ok(b.mul_i64(block, span.clone(), l, r)),
+        BinOp::Add => Ok(b.emit_i64_binop(block, span.clone(), Op::Add, l, r, f32_arith_imm(ty))),
+        BinOp::Sub => Ok(b.emit_i64_binop(block, span.clone(), Op::Sub, l, r, f32_arith_imm(ty))),
+        BinOp::Mul => Ok(b.emit_i64_binop(block, span.clone(), Op::Mul, l, r, f32_arith_imm(ty))),
         BinOp::Div => lower_div(block, span.clone(), ty, l, r, b),
         BinOp::Eq if type_is_bool(ty) => Ok(b.eq_bool(block, span.clone(), l, r)),
         BinOp::Eq => Ok(b.eq_i64(block, span.clone(), l, r)),
@@ -2414,5 +2425,31 @@ end
             .collect();
         assert!(ops.contains(&Op::ConstUnit));
         assert!(!ops.contains(&Op::ConstI64));
+    }
+
+    #[test]
+    fn f32_arith_goldens_return_zero() {
+        let cases = [
+            (
+                "golden/f32_arith.strake",
+                include_str!("../../../../golden/f32_arith.strake"),
+            ),
+            (
+                "golden/f32_div.strake",
+                include_str!("../../../../golden/f32_div.strake"),
+            ),
+        ];
+        for (file, src) in cases {
+            let module = syntax::parse(src, file).expect("parse");
+            let program = compile_module(&module, false).expect("compile");
+            let got = crate::body::interp::call_function_i64(
+                &program,
+                "test.t",
+                &[],
+                &crate::body::host::EmptyHost,
+            )
+            .unwrap_or_else(|err| panic!("{file}: {err:?}"));
+            assert_eq!(got, 0, "{file}");
+        }
     }
 }

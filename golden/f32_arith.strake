@@ -1,0 +1,34 @@
+strake 1
+
+fn f(a: f32, b: f32) -> f32
+  x = add f32 a b
+  ret x
+end
+
+fn f_sub(a: f32, b: f32) -> f32
+  x = sub f32 a b
+  ret x
+end
+
+fn f_mul(a: f32, b: f32) -> f32
+  x = mul f32 a b
+  ret x
+end
+
+test t
+  add_l = add f32 0.25 0.25
+  sub_l = sub f32 0.25 0.25
+  mul_l = mul f32 0.25 0.25
+  add_n = call f(0.25, 0.25)
+  sub_n = call f_sub(0.25, 0.25)
+  mul_n = call f_mul(0.25, 0.25)
+  big = add f32 16777216.0 1.0
+  assert.eq add_l 0.5
+  assert.eq sub_l 0.0
+  assert.eq mul_l 0.0625
+  assert.eq add_n 0.5
+  assert.eq sub_n 0.0
+  assert.eq mul_n 0.0625
+  assert.eq big 16777216.0
+  ret 0
+end
