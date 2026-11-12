@@ -78,6 +78,49 @@ _STRING_BLANK_AFTER = (
     "}\n"
 )
 
+# The changed line sits inside the string, after an escaped quote and #[cfg(test)]
+# text. The // " comment pairs the quote the unfixed scan leaves open.
+_ESCAPED_QUOTE_BEFORE = (
+    "fn prod() -> i32 {\n"
+    '    let s = "say \\" #[cfg(test)]\n'
+    "fn checks() -> i32 {\n"
+    "    1\n"
+    "}\n"
+    '"; // "\n'
+    "    0\n"
+    "}\n"
+)
+_ESCAPED_QUOTE_AFTER = _ESCAPED_QUOTE_BEFORE.replace("    1\n", "    2\n", 1)
+
+# "\\" is an escaped backslash. The next quote closes the string.
+_ESCAPED_SLASH_BEFORE = (
+    "fn prod() -> i32 {\n"
+    '    let s = "\\\\";\n'
+    "    0\n"
+    "}\n"
+    "\n"
+    "#[cfg(test)]\n"
+    "fn checks() -> i32 {\n"
+    "    1\n"
+    "}\n"
+)
+_ESCAPED_SLASH_AFTER = _ESCAPED_SLASH_BEFORE.replace("    1\n", "    2\n", 1)
+
+# The changed line is inside the string after the char literal '"'.
+# The // " comment pairs the quote the unfixed scan leaves open.
+_QUOTE_CHAR_BEFORE = (
+    "fn prod() -> i32 {\n"
+    "    let c = '\"';\n"
+    '    let s = " #[cfg(test)]\n'
+    "fn checks() -> i32 {\n"
+    "    1\n"
+    "}\n"
+    '"; // "\n'
+    "    0\n"
+    "}\n"
+)
+_QUOTE_CHAR_AFTER = _QUOTE_CHAR_BEFORE.replace("    1\n", "    2\n", 1)
+
 _DIFF_FAIL_GIT = """#!/usr/bin/env bash
 if [[ "$1" == "diff" ]]; then
   echo "diff failed" >&2
@@ -360,6 +403,60 @@ class MutatorNaTests(unittest.TestCase):
             outcome = _outcome(repo)
             self.assertIn("outcome=mutator_no_coverage", outcome)
             self.assertIn("killed + survived == 0", text)
+            self.assertIn("blocking mode — mutator covered no sites", text)
+            self.assertNotIn("mutator N/A", text)
+            self.assertNotIn("mutator_na=1", outcome)
+
+    def test_escaped_quote_in_string_is_not_na(self) -> None:
+        # The changed line is production text inside a normal string. The
+        # string holds an escaped quote and then #[cfg(test)] text.
+        edn = _edn([_form("prod", 1, 7, 3)])
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, bin_dir = self._repo(tmp, _ESCAPED_QUOTE_BEFORE, _ESCAPED_QUOTE_AFTER)
+            env = self._tools(repo, bin_dir, edn, "")
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            outcome = _outcome(repo)
+            self.assertIn("outcome=mutator_no_coverage", outcome)
+            self.assertIn("blocking mode — mutator covered no sites", text)
+            self.assertNotIn("mutator N/A", text)
+            self.assertNotIn("mutator_na=1", outcome)
+
+    def test_escaped_backslash_before_closer_is_na(self) -> None:
+        # "\\" ends the string. The changed line is the #[cfg(test)] item
+        # after it. A scan that runs past the closer does not get N/A.
+        edn = _edn(
+            [
+                _form("prod", 1, 4, 2),
+                _form("checks", 6, 9, 2, uncovered=2),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, bin_dir = self._repo(tmp, _ESCAPED_SLASH_BEFORE, _ESCAPED_SLASH_AFTER)
+            env = self._tools(repo, bin_dir, edn, "UNCOVERED src/lib.rs:8 1 -> 2")
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            outcome = _outcome(repo)
+            self.assertIn("outcome=ran_clean", outcome)
+            self.assertIn("mutator_na=1", outcome)
+            self.assertIn("ub-gates: mutator N/A (0 production mutation sites)", text)
+            self.assertNotIn("outcome=mutator_no_coverage", outcome)
+            self.assertNotIn("covered no sites", text)
+
+    def test_quote_char_literal_does_not_make_string_text_na(self) -> None:
+        # The changed line is inside a string that follows the char literal '"'.
+        # That quote is not a string opener, so the cfg text stays in the string.
+        edn = _edn([_form("prod", 1, 8, 3)])
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, bin_dir = self._repo(tmp, _QUOTE_CHAR_BEFORE, _QUOTE_CHAR_AFTER)
+            env = self._tools(repo, bin_dir, edn, "")
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            outcome = _outcome(repo)
+            self.assertIn("outcome=mutator_no_coverage", outcome)
             self.assertIn("blocking mode — mutator covered no sites", text)
             self.assertNotIn("mutator N/A", text)
             self.assertNotIn("mutator_na=1", outcome)
