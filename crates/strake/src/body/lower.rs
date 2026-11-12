@@ -62,7 +62,6 @@ struct LoopParamLowering {
     exit_phi: u32,
     header_edges: Vec<(usize, u32)>,
     exit_edges: Vec<(usize, u32)>,
-    is_bool: bool,
 }
 
 struct LoopFrame {
@@ -170,7 +169,13 @@ fn record_continue(
             .enumerate()
             .any(|(j, h)| j != pi && *h == *v)
         {
-            copy_backedge_arg(b, block, span.clone(), *v, frame.params[pi].is_bool)
+            copy_backedge_arg(
+                b,
+                block,
+                span.clone(),
+                *v,
+                bound_name_is_bool(&frame.params[pi].name),
+            )
         } else {
             *v
         };
@@ -178,11 +183,6 @@ fn record_continue(
     }
     b.jump(block, span, frame.header);
     Ok(())
-}
-
-/// Loop-parameter init is bool when check stored that type. Unknown inits are not.
-fn loop_init_is_bool(plan: &LowerPlan<'_>, init: &Operand) -> bool {
-    infer_operand_type(init, &plan.known_ty).is_some_and(|ty| type_is_bool(&ty))
 }
 
 /// A cross-parameter back edge cannot name the other header phi directly.
@@ -348,8 +348,7 @@ fn lower_fn_body(
     b.select_function(fn_idx);
     let entry = 0;
     let mut env = std::collections::HashMap::new();
-    plan.rec_ty.clear();
-    plan.known_ty.clear();
+    reset_type_env(plan);
     for (i, p) in f.params.iter().enumerate() {
         env.insert(p.name.clone(), i as u32);
         bind_type(plan, &p.name, p.ty.clone());
@@ -401,8 +400,7 @@ fn lower_test_or_property_body(
     maps: &CalleeMaps,
     body_label: &str,
 ) -> Result<(), LowerError> {
-    plan.rec_ty.clear();
-    plan.known_ty.clear();
+    reset_type_env(plan);
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     let mut cur = entry;
@@ -693,7 +691,6 @@ fn lower_loop(
             exit_phi,
             header_edges: vec![(entry, init)],
             exit_edges: Vec::new(),
-            is_bool: loop_init_is_bool(plan, &p.init),
         });
         preheader_env.insert(p.name.clone(), init);
         env.insert(p.name.clone(), header_phi);
@@ -1208,7 +1205,40 @@ fn bind_type(plan: &mut LowerPlan<'_>, name: &str, ty: Type) {
             plan.rec_ty.remove(name);
         }
     }
+    // `lower_loop` is already over the CRAP gate. Bool-ness is recorded here,
+    // where the type is stored, so that function stays unchanged.
+    record_bool_binding(name, type_is_bool(&ty));
     plan.known_ty.insert(name.to_string(), ty);
+}
+
+thread_local! {
+    static BOOL_BOUND: std::cell::RefCell<std::collections::HashSet<String>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+fn reset_type_env(plan: &mut LowerPlan<'_>) {
+    plan.rec_ty.clear();
+    plan.known_ty.clear();
+    clear_bool_names();
+}
+
+fn clear_bool_names() {
+    BOOL_BOUND.with(|names| names.borrow_mut().clear());
+}
+
+fn record_bool_binding(name: &str, is_bool: bool) {
+    BOOL_BOUND.with(|bound| {
+        let mut bound = bound.borrow_mut();
+        if is_bool {
+            bound.insert(name.to_string());
+        } else {
+            bound.remove(name);
+        }
+    });
+}
+
+fn bound_name_is_bool(name: &str) -> bool {
+    BOOL_BOUND.with(|names| names.borrow().contains(name))
 }
 
 fn bind_agreed_type(
