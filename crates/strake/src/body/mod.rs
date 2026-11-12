@@ -78,6 +78,32 @@ mod tests {
         assert_eq!(exec_entered_count(), 0);
     }
 
+    /// `forall_rev` is check `E_FORALL` before any export runs. A following
+    /// passing property moves the counter, so a stuck zero would fail.
+    #[test]
+    fn forall_rev_check_does_not_enter_exec() {
+        reset_exec_entered();
+        let rev_src = include_str!("../../../../golden/forall_rev.strake");
+        let rev_path = std::env::temp_dir().join("strake_forall_rev_exec.strake");
+        std::fs::write(&rev_path, rev_src).expect("write");
+        let blocked = strake_test(rev_path.to_str().unwrap(), Opts::default());
+        assert_eq!(blocked.code, 1, "{}", blocked.stderr);
+        assert!(
+            blocked.stderr.contains("\"E_FORALL\""),
+            "{}",
+            blocked.stderr
+        );
+        assert_eq!(exec_entered_count(), 0);
+        let after_check = exec_entered_count();
+
+        let ok_src = include_str!("../../../../golden/forall_ok.strake");
+        let ok_path = std::env::temp_dir().join("strake_forall_ok_exec.strake");
+        std::fs::write(&ok_path, ok_src).expect("write");
+        let ran = strake_test(ok_path.to_str().unwrap(), Opts::default());
+        assert_eq!(ran.code, 0, "{}", ran.stderr);
+        assert_eq!(exec_entered_count(), after_check + 1);
+    }
+
     #[test]
     fn priv_fn_omitted_from_exports() {
         let src = include_str!("../../../../golden/priv.strake");
