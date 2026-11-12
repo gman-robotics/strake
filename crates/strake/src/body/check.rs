@@ -36,7 +36,7 @@ pub struct Sketch {
     pub module: Module,
     pub carry: CarryPlan,
     pub types: HashMap<String, HashMap<String, Type>>,
-    pub record_spans: HashMap<String, Vec<(String, u32, u32, String)>>,
+    pub(crate) record_spans: HashMap<String, Vec<SpanRow>>,
 }
 
 enum Ctrl {
@@ -58,7 +58,7 @@ struct CheckState {
     /// `import region mem : region` is present (`load`/`store` allowed).
     has_region: bool,
     item_types: HashMap<String, HashMap<String, Type>>,
-    record_spans: HashMap<String, Vec<(String, u32, u32, String)>>,
+    record_spans: HashMap<String, Vec<SpanRow>>,
 }
 
 impl CheckState {
@@ -334,10 +334,12 @@ fn walk_holes_rhs(rhs: &Rhs, diags: &mut Vec<Diag>) {
     }
 }
 
+pub(crate) type SpanRow = (String, u32, u32, String);
+
 struct BoundTypes {
     live: HashMap<String, Type>,
     log: Rc<RefCell<HashMap<String, Type>>>,
-    spans: Rc<RefCell<Vec<(String, u32, u32, String)>>>,
+    spans: Rc<RefCell<Vec<SpanRow>>>,
 }
 
 impl BoundTypes {
@@ -364,12 +366,12 @@ impl BoundTypes {
         self.log.borrow().clone()
     }
 
-    fn spans(&self) -> Vec<(String, u32, u32, String)> {
+    fn spans(&self) -> Vec<SpanRow> {
         self.spans.borrow().clone()
     }
 }
 
-fn note_type_span(spans: &Rc<RefCell<Vec<(String, u32, u32, String)>>>, ty: &Type) {
+fn note_type_span(spans: &Rc<RefCell<Vec<SpanRow>>>, ty: &Type) {
     let Type::Named(name, span) = ty else {
         return;
     };

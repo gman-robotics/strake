@@ -28,6 +28,9 @@ struct CalleeMaps<'a> {
     import_indices: &'a std::collections::HashMap<String, usize>,
 }
 
+type SpanKey = (String, u32, u32);
+type SpanRow = (String, u32, u32, String);
+
 struct LowerPlan<'a> {
     sketch: &'a Sketch,
     visited_loops: std::collections::HashSet<SiteId>,
@@ -40,7 +43,7 @@ struct LowerPlan<'a> {
     /// Types check recorded for the item currently being lowered.
     item_types: std::collections::HashMap<String, Type>,
     /// Record-literal span → record name, from the item's type table.
-    record_at: std::collections::HashMap<(String, u32, u32), String>,
+    record_at: std::collections::HashMap<SpanKey, String>,
 }
 
 struct BoundSnap {
@@ -1253,25 +1256,22 @@ fn item_type_map(plan: &LowerPlan<'_>, key: &str) -> std::collections::HashMap<S
 fn record_span_index(
     plan: &LowerPlan<'_>,
     key: &str,
-) -> std::collections::HashMap<(String, u32, u32), String> {
+) -> std::collections::HashMap<SpanKey, String> {
     let Some(spans) = plan.sketch.record_spans.get(key) else {
         return std::collections::HashMap::new();
     };
     span_index(spans, &plan.sketch.module)
 }
 
-fn span_index(
-    spans: &[(String, u32, u32, String)],
-    module: &Module,
-) -> std::collections::HashMap<(String, u32, u32), String> {
+fn span_index(spans: &[SpanRow], module: &Module) -> std::collections::HashMap<SpanKey, String> {
     let mut index = std::collections::HashMap::new();
     fill_span_index(&mut index, spans, module);
     index
 }
 
 fn fill_span_index(
-    index: &mut std::collections::HashMap<(String, u32, u32), String>,
-    spans: &[(String, u32, u32, String)],
+    index: &mut std::collections::HashMap<SpanKey, String>,
+    spans: &[SpanRow],
     module: &Module,
 ) {
     for (file, start, end, name) in spans {
@@ -1280,7 +1280,7 @@ fn fill_span_index(
 }
 
 fn keep_record_span(
-    index: &mut std::collections::HashMap<(String, u32, u32), String>,
+    index: &mut std::collections::HashMap<SpanKey, String>,
     module: &Module,
     file: &str,
     start: u32,
