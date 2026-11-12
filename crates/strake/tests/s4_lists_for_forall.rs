@@ -65,9 +65,14 @@ fn if_arm_for_exits_0() {
 #[test]
 fn if_arm_forall_exits_0() {
     let path = golden("if_arm_forall.strake");
+    let src = std::fs::read_to_string(&path).expect("read golden");
+    assert!(
+        src.contains("assert.eq n 0"),
+        "the then-arm forall must assert the bound, so exit 0 means the body ran"
+    );
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status, 0);
-    assert!(stderr.is_empty());
+    assert_eq!(status, 0, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
 }
 
 #[test]
@@ -76,6 +81,19 @@ fn match_arm_for_exits_0() {
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
     assert_eq!(status, 0);
     assert!(stderr.is_empty());
+}
+
+/// The golden asserts `n == 0`. The same body with `n == 1` is `E_TEST` got `0`,
+/// so exit 0 is the bound the body saw, not an empty then-arm.
+#[test]
+fn if_arm_forall_body_sees_the_bound() {
+    let src = std::fs::read_to_string(golden("if_arm_forall.strake"))
+        .expect("read golden")
+        .replace("assert.eq n 0", "assert.eq n 1");
+    let (status, stderr) = run_src("if_arm_forall_miss.strake", &src);
+    assert_eq!(status, 1, "{stderr}");
+    assert!(stderr.contains("\"E_TEST\""), "{stderr}");
+    assert!(stderr.contains("\"got\":\"0\""), "{stderr}");
 }
 
 #[test]
