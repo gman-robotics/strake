@@ -180,6 +180,11 @@ fn record_continue(
     Ok(())
 }
 
+/// Loop-parameter init is bool when check stored that type. Unknown inits are not.
+fn loop_init_is_bool(plan: &LowerPlan<'_>, init: &Operand) -> bool {
+    infer_operand_type(init, &plan.known_ty).is_some_and(|ty| type_is_bool(&ty))
+}
+
 /// A cross-parameter back edge cannot name the other header phi directly.
 /// Bool uses `eq` against `true` (identity). `add` is i64 and traps on a bool.
 fn copy_backedge_arg(b: &mut Builder, block: usize, span: Span, src: u32, is_bool: bool) -> u32 {
@@ -677,9 +682,7 @@ fn lower_loop(
     let mut preheader_env = env.clone();
     for p in params.iter() {
         let init = lower_operand(b, entry, &p.init, &preheader_env)?;
-        let init_ty = infer_operand_type(&p.init, &plan.known_ty);
-        let is_bool = init_ty.as_ref().is_some_and(type_is_bool);
-        if let Some(ty) = init_ty {
+        if let Some(ty) = infer_operand_type(&p.init, &plan.known_ty) {
             bind_type(plan, &p.name, ty);
         }
         let header_phi = b.alloc_vreg();
@@ -690,7 +693,7 @@ fn lower_loop(
             exit_phi,
             header_edges: vec![(entry, init)],
             exit_edges: Vec::new(),
-            is_bool,
+            is_bool: loop_init_is_bool(plan, &p.init),
         });
         preheader_env.insert(p.name.clone(), init);
         env.insert(p.name.clone(), header_phi);
