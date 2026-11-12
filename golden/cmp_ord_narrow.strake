@@ -1,0 +1,23 @@
+strake 1
+
+test t
+  lt_i = lt i32 -1 0
+  le_i = le i32 -2147483648 2147483647
+  gt_i = gt i32 -1 0
+  ge_i = ge i32 1 1
+  lt_z = lt f32 -0.0 0.0
+  le_z = le f32 -0.0 0.0
+  gt_z = gt f32 -0.0 0.0
+  ge_z = ge f32 -0.0 0.0
+  lt_p = lt f32 1.0 2.0
+  assert.eq lt_i true
+  assert.eq le_i true
+  assert.eq gt_i false
+  assert.eq ge_i true
+  assert.eq lt_z false
+  assert.eq le_z true
+  assert.eq gt_z false
+  assert.eq ge_z true
+  assert.eq lt_p true
+  ret 0
+end

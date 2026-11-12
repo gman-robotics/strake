@@ -1,0 +1,7 @@
+strake 1
+
+test t
+  c = lt bool true false
+  assert.eq c false
+  ret 0
+end

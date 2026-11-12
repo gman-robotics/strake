@@ -1,0 +1,32 @@
+strake 1
+
+test t
+  nan = div f64 0.0 0.0
+  lt_n = lt f64 nan 1.0
+  le_n = le f64 nan 1.0
+  gt_n = gt f64 nan 1.0
+  ge_n = ge f64 nan 1.0
+  lt_nn = lt f64 nan nan
+  le_nn = le f64 nan nan
+  gt_nn = gt f64 nan nan
+  ge_nn = ge f64 nan nan
+  lt_z = lt f64 -0.0 0.0
+  le_z = le f64 -0.0 0.0
+  gt_z = gt f64 -0.0 0.0
+  ge_z = ge f64 -0.0 0.0
+  lt_p = lt f64 1.0 2.0
+  assert.eq lt_n false
+  assert.eq le_n false
+  assert.eq gt_n false
+  assert.eq ge_n false
+  assert.eq lt_nn false
+  assert.eq le_nn false
+  assert.eq gt_nn false
+  assert.eq ge_nn false
+  assert.eq lt_z false
+  assert.eq le_z true
+  assert.eq gt_z false
+  assert.eq ge_z true
+  assert.eq lt_p true
+  ret 0
+end

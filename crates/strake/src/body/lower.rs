@@ -1,4 +1,4 @@
-//! Lower checked A into strake-1 via the IR builder (no opcode names).
+//! Lower checked A into strake-1 via the IR builder.
 
 #![allow(clippy::too_many_arguments)]
 
@@ -8,6 +8,8 @@ use super::carry::{
 };
 use super::check::Sketch;
 use super::diag::Span;
+use super::interp::ir::{Imm, Narrow};
+use super::interp::Op;
 use super::interp::Program;
 use super::interp::{Builder, FinishError, ScalarTy};
 use super::syntax::{
@@ -1723,7 +1725,7 @@ fn lower_operand(
             .copied()
             .ok_or_else(|| LowerError::unsupported("unbound name in lower")),
         Operand::Int(n, span) => Ok(b.const_i64(block, span.clone(), *n as i64)),
-        Operand::Unit(span) => Ok(b.const_i64(block, span.clone(), 0)),
+        Operand::Unit(span) => Ok(b.narrow_const(block, span.clone(), Narrow::Unit)),
         Operand::Bool(v, span) => Ok(b.const_bool(block, span.clone(), *v)),
         Operand::Bytes(bytes, span) => Ok(b.bytes_new(block, span.clone(), bytes)),
         Operand::Float(x, span) => Ok(b.const_f64(block, span.clone(), x.to_bits())),
@@ -1889,6 +1891,9 @@ fn lower_rhs_binop(
     rhs: &Operand,
     env: &std::collections::HashMap<String, u32>,
 ) -> Result<u32, LowerError> {
+    if try_ordered(op).is_some() {
+        return lower_ordered(b, block, span, op, ty, lhs, rhs, env);
+    }
     if !matches!(
         op,
         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Eq | BinOp::Ne
@@ -1897,8 +1902,57 @@ fn lower_rhs_binop(
             "binary operator not lowered in this slice",
         ));
     }
-    let (l, r) = lower_operand_pair(b, block, lhs, rhs, env)?;
+    let l = lower_typed_scalar(b, block, lhs, ty, env)?;
+    let r = lower_typed_scalar(b, block, rhs, ty, env)?;
     lower_binop_values(b, block, span, op, ty, l, r)
+}
+
+fn try_ordered(op: &BinOp) -> Option<Op> {
+    match op {
+        BinOp::Lt => Some(Op::Lt),
+        BinOp::Le => Some(Op::Le),
+        BinOp::Gt => Some(Op::Gt),
+        BinOp::Ge => Some(Op::Ge),
+        _ => None,
+    }
+}
+
+fn lower_ordered(
+    b: &mut Builder,
+    block: usize,
+    span: &Span,
+    op: &BinOp,
+    ty: &Type,
+    lhs: &Operand,
+    rhs: &Operand,
+    env: &std::collections::HashMap<String, u32>,
+) -> Result<u32, LowerError> {
+    let Some(opc) = try_ordered(op) else {
+        return Err(LowerError::unsupported("ordered compare"));
+    };
+    let l = lower_typed_scalar(b, block, lhs, ty, env)?;
+    let r = lower_typed_scalar(b, block, rhs, ty, env)?;
+    Ok(b.emit_i64_binop(block, span.clone(), opc, l, r, Imm::None))
+}
+
+/// `i32` and `f32` literals take the narrow const. Other operands stay on
+/// `lower_operand` (`i64`, `f64`, names, bools).
+fn lower_typed_scalar(
+    b: &mut Builder,
+    block: usize,
+    op: &Operand,
+    ty: &Type,
+    env: &std::collections::HashMap<String, u32>,
+) -> Result<u32, LowerError> {
+    match (op, ty) {
+        (Operand::Int(n, span), Type::Named(name, _)) if name == "i32" => {
+            Ok(b.narrow_const(block, span.clone(), Narrow::I32(*n as i32)))
+        }
+        (Operand::Float(x, span), Type::Named(name, _)) if name == "f32" => {
+            Ok(b.narrow_const(block, span.clone(), Narrow::F32((*x as f32).to_bits())))
+        }
+        _ => lower_operand(b, block, op, env),
+    }
 }
 
 fn lower_binop_values(
@@ -2292,5 +2346,73 @@ end
         assert!(ops.contains(&Op::Mul));
         assert!(ops.contains(&Op::Add));
         assert!(ops.contains(&Op::Ge));
+    }
+
+    #[test]
+    fn ordered_helper_rejects_add() {
+        let mut b = Builder::new();
+        let _ = b.begin_function("f", 0);
+        let span = Span {
+            file: "t".into(),
+            start: 0,
+            end: 0,
+        };
+        let ty = Type::Named("i64".into(), span.clone());
+        let lhs = Operand::Int(1, span.clone());
+        let rhs = Operand::Int(2, span.clone());
+        let env = std::collections::HashMap::new();
+        let err = lower_ordered(&mut b, 0, &span, &BinOp::Add, &ty, &lhs, &rhs, &env)
+            .expect_err("add is not ordered");
+        assert!(err.message().contains("ordered compare"));
+        assert!(try_ordered(&BinOp::Add).is_none());
+        assert_eq!(try_ordered(&BinOp::Lt), Some(Op::Lt));
+        assert_eq!(try_ordered(&BinOp::Le), Some(Op::Le));
+        assert_eq!(try_ordered(&BinOp::Gt), Some(Op::Gt));
+        assert_eq!(try_ordered(&BinOp::Ge), Some(Op::Ge));
+    }
+
+    #[test]
+    fn i32_compare_emits_const_i32() {
+        let src = "strake 1\n\ntest t\n  c = lt i32 -1 0\n  assert.eq c true\n  ret 0\nend\n";
+        let prog = compile_golden("t.strake", src);
+        let body = fn_named(&prog, "test.t");
+        let saw_i32 = body.blocks.iter().flat_map(|b| &b.insts).any(|i| {
+            i.op == Op::ConstI32 && matches!(i.imm, crate::body::interp::ir::Imm::I32(-1))
+        });
+        let saw_lt = body
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .any(|i| i.op == Op::Lt);
+        assert!(saw_i32);
+        assert!(saw_lt);
+    }
+
+    #[test]
+    fn f32_compare_emits_const_f32() {
+        let src = "strake 1\n\ntest t\n  c = le f32 -0.0 0.0\n  assert.eq c true\n  ret 0\nend\n";
+        let prog = compile_golden("t.strake", src);
+        let body = fn_named(&prog, "test.t");
+        let neg = (-0.0f32).to_bits();
+        let saw = body.blocks.iter().flat_map(|b| &b.insts).any(|i| {
+            i.op == Op::ConstF32
+                && matches!(i.imm, crate::body::interp::ir::Imm::F32(bits) if bits == neg)
+        });
+        assert!(saw);
+    }
+
+    #[test]
+    fn unit_literal_emits_const_unit() {
+        let src = "strake 1\n\nfn f() -> unit\n  ret unit\nend\n\ntest t\n  ret 0\nend\n";
+        let prog = compile_golden("t.strake", src);
+        let body = fn_named(&prog, "f");
+        let ops: Vec<Op> = body
+            .blocks
+            .iter()
+            .flat_map(|b| &b.insts)
+            .map(|i| i.op)
+            .collect();
+        assert!(ops.contains(&Op::ConstUnit));
+        assert!(!ops.contains(&Op::ConstI64));
     }
 }

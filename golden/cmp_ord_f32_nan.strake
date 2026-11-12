@@ -1,0 +1,35 @@
+strake 1
+
+import region mem : region
+
+test t
+  quiet = store i32 0 2143289344
+  n = load f32 0
+  signed = store i32 4 -4194304
+  m = load f32 4
+  lt_n = lt f32 n 1.0
+  le_n = le f32 n 1.0
+  gt_n = gt f32 n 1.0
+  ge_n = ge f32 n 1.0
+  lt_m = lt f32 m 0.0
+  le_m = le f32 m 0.0
+  gt_m = gt f32 m 0.0
+  ge_m = ge f32 m 0.0
+  lt_nn = lt f32 n m
+  le_nn = le f32 n m
+  gt_nn = gt f32 n m
+  ge_nn = ge f32 n m
+  assert.eq lt_n false
+  assert.eq le_n false
+  assert.eq gt_n false
+  assert.eq ge_n false
+  assert.eq lt_m false
+  assert.eq le_m false
+  assert.eq gt_m false
+  assert.eq ge_m false
+  assert.eq lt_nn false
+  assert.eq le_nn false
+  assert.eq gt_nn false
+  assert.eq ge_nn false
+  ret 0
+end

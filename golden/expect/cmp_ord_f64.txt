@@ -1,0 +1,4 @@
+args: test golden/cmp_ord_f64.strake
+exit: 0
+--- stdout
+--- stderr

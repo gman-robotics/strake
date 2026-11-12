@@ -160,3 +160,70 @@ fn assert_eq_compare_repros_run() {
         assert_eq!(compile_run(&src), 0, "{name}");
     }
 }
+
+fn golden_file(name: &str) -> String {
+    golden_dir().join(name).to_str().expect("utf8").to_string()
+}
+
+fn run_golden(name: &str) -> i64 {
+    let src = fs::read_to_string(golden_dir().join(name)).expect("read");
+    compile_run(&src)
+}
+
+#[test]
+fn cmp_ord_i64_answers_zero() {
+    assert_eq!(run_golden("cmp_ord_i64.strake"), 0);
+}
+
+#[test]
+fn cmp_ord_f64_nan_and_signed_zero() {
+    assert_eq!(run_golden("cmp_ord_f64.strake"), 0);
+}
+
+#[test]
+fn cmp_ord_narrow_i32_f32() {
+    assert_eq!(run_golden("cmp_ord_narrow.strake"), 0);
+}
+
+#[test]
+fn cmp_ord_f32_nan_is_unordered() {
+    assert_eq!(run_golden("cmp_ord_f32_nan.strake"), 0);
+}
+
+#[test]
+fn ordered_compare_cli_is_not_exit_70() {
+    let exit = crate::test(&golden_file("cmp_ord_i64.strake"), crate::Opts::default());
+    assert_eq!(exit.code, 0, "exit 70 on 30fb76a4; stderr={}", exit.stderr);
+}
+
+#[test]
+fn ordered_compare_out_of_range_is_check_not_lower() {
+    assert_etype(
+        "i32-hi",
+        "strake 1\n\ntest t\n  c = lt i32 2147483648 0\n  ret 0\nend\n",
+    );
+    assert_etype(
+        "i32-lo",
+        "strake 1\n\ntest t\n  c = lt i32 -2147483649 0\n  ret 0\nend\n",
+    );
+    assert_etype(
+        "f32-inexact",
+        "strake 1\n\ntest t\n  c = lt f32 0.1 1.0\n  ret 0\nend\n",
+    );
+}
+
+#[test]
+fn ordered_compare_forbidden_types_are_etype() {
+    assert_etype(
+        "bool",
+        "strake 1\n\ntest t\n  c = lt bool true false\n  ret 0\nend\n",
+    );
+    assert_etype(
+        "unit",
+        "strake 1\n\ntest t\n  c = lt unit unit unit\n  ret 0\nend\n",
+    );
+    assert_etype(
+        "bytes",
+        "strake 1\n\nfn f(a: bytes, b: bytes) -> i64\n  c = ge bytes a b\n  ret 0\nend\n\ntest t\n  ret 0\nend\n",
+    );
+}

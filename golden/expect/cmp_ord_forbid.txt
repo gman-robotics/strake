@@ -1,0 +1,5 @@
+args: test golden/cmp_ord_forbid.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/cmp_ord_forbid.strake","start":23,"end":41}}
