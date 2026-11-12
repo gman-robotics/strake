@@ -538,9 +538,9 @@ def _fails_crap(
     base_index: dict[tuple[str, str], CrapRow],
     threshold: float,
 ) -> bool:
-    if not _crap_over(row, threshold):
-        return False
-    return _is_worsened(row, _lookup_base(base_index, row))
+    if _crap_over(row, threshold):
+        return _is_worsened(row, _lookup_base(base_index, row))
+    return _crap_over(row, threshold)
 
 
 def _record_preexisting(

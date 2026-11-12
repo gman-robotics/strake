@@ -8,7 +8,14 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[2]
+def _repo_root() -> Path:
+    cwd = Path.cwd()
+    if (cwd / "scripts" / "check_pr_body.py").is_file():
+        return cwd
+    return Path(__file__).resolve().parents[2]
+
+
+ROOT = _repo_root()
 CHECK = ROOT / "scripts" / "check_pr_body.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "pr-body"
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
@@ -39,6 +46,11 @@ class PrBodyTests(unittest.TestCase):
         proc = _run([str(FIXTURES / "empty-summary.md")])
         self.assertEqual(proc.returncode, 1, proc.stderr)
         self.assertIn("empty Summary", proc.stderr)
+
+    def test_empty_first_section_exits_one(self) -> None:
+        proc = _run([str(FIXTURES / "empty-tier.md")])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("empty Tier", proc.stderr)
 
     def test_env_body_matches_the_file_contract(self) -> None:
         text = (FIXTURES / "complete.md").read_text(encoding="utf-8")

@@ -11,7 +11,14 @@ import unittest
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[2]
+def _repo_root() -> Path:
+    cwd = Path.cwd()
+    if (cwd / "scripts" / "run_ub_gates_ci.sh").is_file():
+        return cwd
+    return Path(__file__).resolve().parents[2]
+
+
+ROOT = _repo_root()
 SCOPE_PY = ROOT / "scripts" / "ub_changed_scope.py"
 CI_SH = ROOT / "scripts" / "run_ub_gates_ci.sh"
 CONTAINER_SH = ROOT / "scripts" / "ub_gates_container.sh"
@@ -150,6 +157,9 @@ def _env(bin_dir: Path, **extra: str) -> dict[str, str]:
         "TMPDIR": os.environ.get("TMPDIR", "/tmp"),
         "LANG": os.environ.get("LANG", "C"),
     }
+    for key in ("COVERAGE_PROCESS_CONFIG", "COVERAGE_PROCESS_START", "COVERAGE_FILE"):
+        if key in os.environ:
+            kept[key] = os.environ[key]
     kept.update(extra)
     return kept
 
@@ -550,6 +560,30 @@ class CrapperChangedScopeTests(unittest.TestCase):
             self.assertIn("crapper debt pkg hot crap=40.0", text)
             self.assertIn("crapper debt pkg old crap=213.0", text)
 
+    def test_missing_head_complexity_with_base_complexity_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                [("hot", 30.0, None), ("old", 213.0, 20)],
+                [("hot", None, 8), ("old", 213.0, 20)],
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=ran_with_findings", _outcome(Path(tmp)))
+            self.assertIn("crapper findings pkg hot crap=30.0", text)
+
+    def test_equal_numeric_crap_is_not_worse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                [("hot", 30.0, 4), ("old", 213.0, 20)],
+                [("hot", 30.0, 4), ("old", 213.0, 20)],
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            self.assertIn("crapper debt pkg hot crap=30.0", text)
+            self.assertNotIn("crapper findings pkg hot", text)
+
     def test_missing_base_complexity_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc = self._run(
@@ -560,6 +594,122 @@ class CrapperChangedScopeTests(unittest.TestCase):
             text = proc.stdout + proc.stderr
             self.assertEqual(proc.returncode, 1, text)
             self.assertIn("crapper findings pkg hot crap=30.0", text)
+
+
+def _mutator_edn(killed: int, survived: int, uncovered: int, sites: int) -> str:
+    return (
+        "{:version 1\n"
+        ' :source "lib/a.py"\n'
+        " :namespace \"lib.a\"\n"
+        " :forms [{:id \"defn/hot\""
+        f" :killed {killed} :survived {survived} :uncovered {uncovered} :sites {sites}"
+        "}]}\n"
+    )
+
+
+class MutatorCoverageTests(unittest.TestCase):
+    def _run(self, tmp: str, edn: str, *, advisory: str = "0", with_tests: bool = False) -> subprocess.CompletedProcess[str]:
+        repo = Path(tmp)
+        _init_repo(repo)
+        lib = repo / "lib"
+        lib.mkdir()
+        (lib / "a.py").write_text("def hot():\n    return 1\n", encoding="utf-8")
+        _git(repo, "add", "lib/a.py")
+        _git(repo, "commit", "-m", "base")
+        _git(repo, "checkout", "-b", "feat")
+        (lib / "a.py").write_text("def hot():\n    return 2\n", encoding="utf-8")
+        _git(repo, "add", "lib/a.py")
+        _git(repo, "commit", "-m", "change")
+        bin_dir = repo / "bin"
+        bin_dir.mkdir()
+        if with_tests:
+            tests = repo / "scripts" / "tests"
+            tests.mkdir(parents=True)
+            (tests / "test_noop.py").write_text("import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n", encoding="utf-8")
+            _write_exe(
+                bin_dir / "coverage",
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$*\" >> COVERAGE_LOG\n"
+                "if [[ \"$1\" == \"lcov\" ]]; then\n"
+                "  out=target/coverage/python/lcov.info\n"
+                "  prev=\n"
+                "  for arg in \"$@\"; do\n"
+                "    if [[ \"${prev}\" == \"-o\" ]]; then out=\"${arg}\"; fi\n"
+                "    prev=\"${arg}\"\n"
+                "  done\n"
+                "  mkdir -p \"$(dirname \"$out\")\"\n"
+                "  printf '%s\\n' 'SF:lib/a.py' 'DA:1,1' 'end_of_record' > \"${out}\"\n"
+                "fi\n"
+                "exit 0\n",
+            )
+        _write_exe(
+            bin_dir / "crapper",
+            "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:entries []}' > .metrics/crap.edn\nexit 0\n",
+        )
+        _write_exe(
+            bin_dir / "dryer",
+            "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+        )
+        _write_exe(
+            bin_dir / "mutator",
+            "#!/usr/bin/env bash\n"
+            "mkdir -p .metrics/mutate\n"
+            "printf '%s\\n' \"$*\" >> MUTATOR_LOG\n"
+            "cat > .metrics/mutate/lib.a.edn <<'EDN'\n"
+            + edn
+            + "EDN\nexit 0\n",
+        )
+        span_path = repo / "spans.json"
+        span_path.write_text(
+            json.dumps([{"namespace": "pkg", "name": "hot", "start_line": 1, "end_line": 2, "path": "lib/a.py"}]),
+            encoding="utf-8",
+        )
+        env = _env(
+            bin_dir,
+            UB_GATES_ADVISORY=advisory,
+            UB_GATES_BASE_REF="main",
+            UB_GATES_MUTATOR_BUDGET_SECS="30",
+            UB_GATES_MUTATOR_TEST_CMD="cargo test --locked",
+            UB_SCOPE_FUNCTIONS_JSON=str(span_path),
+            UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+        )
+        return _run_ci(repo, env)
+
+    def test_blocking_zero_covered_sites_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, _mutator_edn(0, 0, 4, 4))
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=mutator_no_coverage", _outcome(Path(tmp)))
+            self.assertIn("mutator sites=4 covered=0 killed=0 survived=0 uncovered=4", text)
+            self.assertIn("blocking mode — mutator covered no sites", text)
+
+    def test_covered_sites_pass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, _mutator_edn(4, 0, 0, 4))
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            outcome = _outcome(Path(tmp))
+            self.assertIn("outcome=ran_clean", outcome)
+            self.assertIn("mutator_sites=4", outcome)
+            self.assertIn("mutator_covered=4", outcome)
+            self.assertIn("mutator_killed=4", outcome)
+            self.assertIn("mutator_survived=0", outcome)
+
+    def test_python_scope_measures_coverage_and_uses_script_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, _mutator_edn(2, 0, 0, 2), with_tests=True)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            repo = Path(tmp)
+            coverage_log = (repo / "COVERAGE_LOG").read_text(encoding="utf-8")
+            self.assertIn("run --rcfile", coverage_log)
+            self.assertIn("-m unittest discover -s scripts/tests", coverage_log)
+            self.assertIn("lcov --rcfile", coverage_log)
+            mutator_log = (repo / "MUTATOR_LOG").read_text(encoding="utf-8")
+            self.assertIn("python3 -m unittest discover -s scripts/tests", mutator_log)
+            self.assertIn("--use-existing-coverage", mutator_log)
+            self.assertNotIn("cargo test --locked", mutator_log)
 
 
 class WorkflowTextTests(unittest.TestCase):
