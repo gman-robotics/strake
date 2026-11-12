@@ -36,6 +36,7 @@ pub struct Sketch {
     pub module: Module,
     pub carry: CarryPlan,
     pub types: HashMap<String, HashMap<String, Type>>,
+    pub record_spans: HashMap<String, Vec<(String, u32, u32, String)>>,
 }
 
 enum Ctrl {
@@ -57,6 +58,7 @@ struct CheckState {
     /// `import region mem : region` is present (`load`/`store` allowed).
     has_region: bool,
     item_types: HashMap<String, HashMap<String, Type>>,
+    record_spans: HashMap<String, Vec<(String, u32, u32, String)>>,
 }
 
 impl CheckState {
@@ -78,6 +80,7 @@ impl CheckState {
             module_list_binds: HashMap::new(),
             has_region,
             item_types: HashMap::new(),
+            record_spans: HashMap::new(),
         }
     }
 
@@ -121,6 +124,7 @@ pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure
         module: module.clone(),
         carry: state.carry,
         types: state.item_types,
+        record_spans: state.record_spans,
     })
 }
 
@@ -333,6 +337,7 @@ fn walk_holes_rhs(rhs: &Rhs, diags: &mut Vec<Diag>) {
 struct BoundTypes {
     live: HashMap<String, Type>,
     log: Rc<RefCell<HashMap<String, Type>>>,
+    spans: Rc<RefCell<Vec<(String, u32, u32, String)>>>,
 }
 
 impl BoundTypes {
@@ -340,10 +345,12 @@ impl BoundTypes {
         Self {
             live: HashMap::new(),
             log: Rc::new(RefCell::new(HashMap::new())),
+            spans: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
     fn insert(&mut self, name: String, ty: Type) {
+        note_type_span(&self.spans, &ty);
         self.log.borrow_mut().insert(name.clone(), ty.clone());
         self.live.insert(name, ty);
     }
@@ -356,6 +363,19 @@ impl BoundTypes {
     fn recorded(&self) -> HashMap<String, Type> {
         self.log.borrow().clone()
     }
+
+    fn spans(&self) -> Vec<(String, u32, u32, String)> {
+        self.spans.borrow().clone()
+    }
+}
+
+fn note_type_span(spans: &Rc<RefCell<Vec<(String, u32, u32, String)>>>, ty: &Type) {
+    let Type::Named(name, span) = ty else {
+        return;
+    };
+    spans
+        .borrow_mut()
+        .push((span.file.clone(), span.start, span.end, name.clone()));
 }
 
 impl Clone for BoundTypes {
@@ -363,6 +383,7 @@ impl Clone for BoundTypes {
         Self {
             live: self.live.clone(),
             log: Rc::clone(&self.log),
+            spans: Rc::clone(&self.spans),
         }
     }
 }
@@ -563,6 +584,9 @@ fn note_item_types(state: &mut CheckState, key: &str, ctx: &Ctx) {
     state
         .item_types
         .insert(key.to_string(), ctx.types.recorded());
+    state
+        .record_spans
+        .insert(key.to_string(), ctx.types.spans());
 }
 
 fn stmt_check_span(stmt: &Stmt) -> Span {

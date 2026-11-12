@@ -39,6 +39,8 @@ struct LowerPlan<'a> {
     known_ty: std::collections::HashMap<String, Type>,
     /// Types check recorded for the item currently being lowered.
     item_types: std::collections::HashMap<String, Type>,
+    /// Record-literal span → record name, from the item's type table.
+    record_at: std::collections::HashMap<(String, u32, u32), String>,
 }
 
 struct BoundSnap {
@@ -263,6 +265,7 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
         rec_ty: std::collections::HashMap::new(),
         known_ty: std::collections::HashMap::new(),
         item_types: std::collections::HashMap::new(),
+        record_at: std::collections::HashMap::new(),
     };
     for item in &sketch.module.items {
         if let Item::Fn(f) = item {
@@ -1172,7 +1175,7 @@ fn lower_rhs_record(
     env: &std::collections::HashMap<String, u32>,
     plan: &LowerPlan<'_>,
 ) -> Result<u32, LowerError> {
-    let rname = match_record_name(&plan.sketch.module, fields, &plan.known_ty)?;
+    let rname = record_name_at(plan, span)?;
     let decls = record_decls(&plan.sketch.module, &rname)
         .ok_or_else(|| LowerError::unsupported("record type"))?;
     let mut regs = Vec::with_capacity(decls.len());
@@ -1234,15 +1237,59 @@ fn reset_type_env(plan: &mut LowerPlan<'_>) {
     plan.rec_ty.clear();
     plan.known_ty.clear();
     plan.item_types.clear();
+    plan.record_at.clear();
     clear_bool_names();
 }
 
 fn install_item_types(plan: &mut LowerPlan<'_>, key: &str) {
     plan.item_types = item_type_map(plan, key);
+    plan.record_at = record_span_index(plan, key);
 }
 
 fn item_type_map(plan: &LowerPlan<'_>, key: &str) -> std::collections::HashMap<String, Type> {
     plan.sketch.types.get(key).cloned().unwrap_or_default()
+}
+
+fn record_span_index(
+    plan: &LowerPlan<'_>,
+    key: &str,
+) -> std::collections::HashMap<(String, u32, u32), String> {
+    let Some(spans) = plan.sketch.record_spans.get(key) else {
+        return std::collections::HashMap::new();
+    };
+    span_index(spans, &plan.sketch.module)
+}
+
+fn span_index(
+    spans: &[(String, u32, u32, String)],
+    module: &Module,
+) -> std::collections::HashMap<(String, u32, u32), String> {
+    let mut index = std::collections::HashMap::new();
+    fill_span_index(&mut index, spans, module);
+    index
+}
+
+fn fill_span_index(
+    index: &mut std::collections::HashMap<(String, u32, u32), String>,
+    spans: &[(String, u32, u32, String)],
+    module: &Module,
+) {
+    for (file, start, end, name) in spans {
+        keep_record_span(index, module, file, *start, *end, name);
+    }
+}
+
+fn keep_record_span(
+    index: &mut std::collections::HashMap<(String, u32, u32), String>,
+    module: &Module,
+    file: &str,
+    start: u32,
+    end: u32,
+    name: &str,
+) {
+    if record_decls(module, name).is_some() {
+        index.insert((file.to_string(), start, end), name.to_string());
+    }
 }
 
 fn clear_bool_names() {
@@ -1433,74 +1480,12 @@ fn record_decls<'a>(module: &'a Module, name: &str) -> Option<&'a [FieldDecl]> {
     None
 }
 
-fn match_record_name(
-    module: &Module,
-    fields: &[(String, Operand)],
-    known: &std::collections::HashMap<String, Type>,
-) -> Result<String, LowerError> {
-    let mut names: Vec<&str> = fields.iter().map(|(n, _)| n.as_str()).collect();
-    names.sort_unstable();
-    if names.windows(2).any(|w| w[0] == w[1]) {
-        return Err(LowerError::unsupported("record type"));
-    }
-    let mut hits = Vec::new();
-    for item in &module.items {
-        let Item::TypeDef(td) = item else {
-            continue;
-        };
-        let TypeDefKind::Record(decls) = &td.kind else {
-            continue;
-        };
-        let mut dn: Vec<&str> = decls.iter().map(|f| f.name.as_str()).collect();
-        dn.sort_unstable();
-        if dn == names && record_fields_fit(decls, fields, known) {
-            hits.push(td.name.clone());
-        }
-    }
-    if hits.len() == 1 {
-        Ok(hits.remove(0))
-    } else {
-        Err(LowerError::unsupported("record type"))
-    }
-}
-
-fn record_fields_fit(
-    decls: &[FieldDecl],
-    fields: &[(String, Operand)],
-    known: &std::collections::HashMap<String, Type>,
-) -> bool {
-    decls.iter().all(|decl| {
-        fields
-            .iter()
-            .find(|(n, _)| n == &decl.name)
-            .is_some_and(|(_, op)| operand_fits(op, &decl.ty, known))
-    })
-}
-
-/// Mirrors check's `float_literal_ty`: `f32` only when the literal is exact in f32.
-fn float_fits(x: f64, expected: &Type) -> bool {
-    type_name_is(expected, "f64") || (type_name_is(expected, "f32") && f64::from(x as f32) == x)
-}
-
-fn operand_fits(
-    op: &Operand,
-    expected: &Type,
-    known: &std::collections::HashMap<String, Type>,
-) -> bool {
-    match op {
-        Operand::Bool(_, _) => type_name_is(expected, "bool"),
-        Operand::Float(x, _) => float_fits(*x, expected),
-        Operand::Bytes(_, _) => type_name_is(expected, "bytes"),
-        Operand::Unit(_) => type_name_is(expected, "unit"),
-        Operand::Int(n, _) => match expected {
-            Type::Named(name, _) if name == "i32" => fits_i32(*n),
-            Type::Named(name, _) if name == "i64" => fits_i64(*n),
-            _ => false,
-        },
-        Operand::Name(name, _) => known
-            .get(name)
-            .is_some_and(|got| types_match(got, expected)),
-    }
+fn record_name_at(plan: &LowerPlan<'_>, span: &Span) -> Result<String, LowerError> {
+    let key = (span.file.clone(), span.start, span.end);
+    plan.record_at
+        .get(&key)
+        .cloned()
+        .ok_or_else(|| LowerError::unsupported("record type"))
 }
 
 fn types_match(found: &Type, expected: &Type) -> bool {
@@ -1524,10 +1509,6 @@ fn type_name_is(ty: &Type, name: &str) -> bool {
 
 fn fits_i64(n: i128) -> bool {
     n >= i64::MIN as i128 && n <= i64::MAX as i128
-}
-
-fn fits_i32(n: i128) -> bool {
-    n >= i32::MIN as i128 && n <= i32::MAX as i128
 }
 
 fn project_field_index(
@@ -2353,6 +2334,7 @@ end
         let module = syntax::parse(src, "golden/record_project.strake").expect("parse");
         let mut sketch = crate::body::check::check(&module, false).expect("check");
         sketch.types.get_mut("f").expect("fn f").remove("p");
+        sketch.record_spans.get_mut("f").expect("spans").clear();
         let err = lower(&sketch).expect_err("lower");
         assert_eq!(err, LowerError::unsupported("record type"));
     }
