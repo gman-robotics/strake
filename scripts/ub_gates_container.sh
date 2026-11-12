@@ -80,6 +80,9 @@ inside() {
   clone_tool dryer https://github.com/unclebob/dryer "$(awk -F= '$1=="dryer" {print $2; exit}' "${lock}")"
   clone_tool mutator https://github.com/unclebob/mutator "$(awk -F= '$1=="mutator" {print $2; exit}' "${lock}")"
   VIRTUAL_ENV=/opt/ub/.venv /tmp/uv/uv pip install "${dest}/crapper" "${dest}/dryer" "${dest}/mutator"
+  cov_ver="$(awk -F= '$1=="coverage" {print $2; exit}' "${lock}")"
+  test -n "${cov_ver}"
+  VIRTUAL_ENV=/opt/ub/.venv /tmp/uv/uv pip install "coverage==${cov_ver}"
   if [[ "${UB_GATES_COVERAGE_CMD:-}" == *llvm-cov* ]]; then
     cov_ver="$(awk -F= '$1=="cargo_llvm_cov" {print $2; exit}' "${lock}")"
     test -n "${cov_ver}"

@@ -96,6 +96,9 @@ runs:
         clone_tool dryer https://github.com/unclebob/dryer "$(awk -F= '$1=="dryer" {print $2; exit}' "${lock}")"
         clone_tool mutator https://github.com/unclebob/mutator "$(awk -F= '$1=="mutator" {print $2; exit}' "${lock}")"
         VIRTUAL_ENV="${venv}" uv pip install "${dest}/crapper" "${dest}/dryer" "${dest}/mutator"
+        cov_ver="$(awk -F= '$1=="coverage" {print $2; exit}' "${lock}")"
+        test -n "${cov_ver}"
+        VIRTUAL_ENV="${venv}" uv pip install "coverage==${cov_ver}"
         if [[ -f "${hub}/requirements-dev.txt" ]]; then
           VIRTUAL_ENV="${venv}" uv pip install -r "${hub}/requirements-dev.txt"
         fi

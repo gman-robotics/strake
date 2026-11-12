@@ -8,6 +8,8 @@
 `UB_SCOPE_FUNCTIONS_JSON` is a test seam. When it is set, `crap` reads that
 JSON file instead of importing crapper. Each object is
 `{namespace, name, start_line, end_line, path}`.
+`--base-edn` is the merge-base snapshot. A changed function over the threshold
+fails when it is new or the score rose. An unchanged over-threshold row is debt.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 _NAME = re.compile(r'^"((?:\\.|[^"\\])*)"')
 _NS = re.compile(r':namespace\s+"((?:\\.|[^"\\])*)"')
 _CRAP = re.compile(r":crap\s+(nil|-?\d+(?:\.\d+)?)")
+_COMPLEXITY = re.compile(r":complexity\s+(\d+)")
 _SCORE = re.compile(r":score\s+([\d.]+)")
 _SPAN = re.compile(
     r'\{:file\s+"((?:\\.|[^"\\])*)"\s*,\s*:start-line\s+(\d+)\s*,\s*:end-line\s+(\d+)\}'
@@ -54,6 +57,7 @@ class CrapRow:
     namespace: str
     name: str
     crap: float | None
+    complexity: int | None = None
 
 
 @dataclass
@@ -202,11 +206,23 @@ def _crap_value(rest: str) -> float | None:
     return _crap_number(match.group(1))
 
 
+def _complexity_value(rest: str) -> int | None:
+    match = _COMPLEXITY.search(rest)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
 def _crap_named(name: str, rest: str) -> CrapRow | None:
     namespace = _NS.search(rest)
     if namespace is None:
         return None
-    return CrapRow(_unescape(namespace.group(1)), _unescape(name), _crap_value(rest))
+    return CrapRow(
+        _unescape(namespace.group(1)),
+        _unescape(name),
+        _crap_value(rest),
+        _complexity_value(rest),
+    )
 
 
 def _crap_row(chunk: str) -> CrapRow | None:
@@ -461,10 +477,119 @@ def _unjoined(row: CrapRow, threshold: float, coverage_expected: bool) -> None:
     _unjoined_present(row, threshold)
 
 
+def _index_rows(rows: list[CrapRow]) -> dict[tuple[str, str], CrapRow]:
+    return {(row.namespace, row.name): row for row in rows}
+
+
+def _index_base(text: str | None) -> dict[tuple[str, str], CrapRow]:
+    if not text:
+        return {}
+    return _index_rows(parse_crap_edn(text))
+
+
+def _lookup_base(index: dict[tuple[str, str], CrapRow], row: CrapRow) -> CrapRow | None:
+    return index.get((row.namespace, row.name))
+
+
+def _both_scores(left: object, right: object) -> bool:
+    pair = (left, right)
+    return pair[0] is not None and pair[1] is not None
+
+
+def _row_crap(row: CrapRow) -> float:
+    return float(row.crap)
+
+
+def _score_rose(row: CrapRow, base: CrapRow) -> bool | None:
+    if not _both_scores(row.crap, base.crap):
+        return None
+    return _row_crap(row) > _row_crap(base)
+
+
+def _complexity_number(row: CrapRow) -> int:
+    return int(row.complexity)
+
+
+def _complexity_rose(row: CrapRow, base: CrapRow) -> bool:
+    return _complexity_number(row) > _complexity_number(base)
+
+
+def _worse_by_complexity(row: CrapRow, base: CrapRow) -> bool:
+    present = _both_scores(row.complexity, base.complexity)
+    if present:
+        return _complexity_rose(row, base)
+    return True
+
+
+def _worse_known(row: CrapRow, base: CrapRow, rose: bool | None) -> bool:
+    if rose is not None:
+        return rose
+    return _worse_by_complexity(row, base)
+
+
+def _is_worsened(row: CrapRow, base: CrapRow | None) -> bool:
+    if base is None:
+        return True
+    return _worse_known(row, base, _score_rose(row, base))
+
+
+def _fails_crap(
+    row: CrapRow,
+    base_index: dict[tuple[str, str], CrapRow],
+    threshold: float,
+) -> bool:
+    if _crap_over(row, threshold):
+        return _is_worsened(row, _lookup_base(base_index, row))
+    return _crap_over(row, threshold)
+
+
+def _record_preexisting(
+    row: CrapRow,
+    matched: list[FnSpan],
+    threshold: float,
+    debt: list[dict[str, object]],
+) -> None:
+    if _crap_over(row, threshold):
+        _keep_debt(row, matched, debt)
+
+
+def _keep_scored(
+    row: CrapRow,
+    matched: list[FnSpan],
+    base_index: dict[tuple[str, str], CrapRow],
+    threshold: float,
+    findings: list[dict[str, object]],
+    debt: list[dict[str, object]],
+    coverage_expected: bool,
+) -> None:
+    if _fails_crap(row, base_index, threshold):
+        _keep_finding(row, threshold, findings, coverage_expected)
+        return
+    _record_preexisting(row, matched, threshold, debt)
+
+
+def _keep_changed(
+    row: CrapRow,
+    matched: list[FnSpan],
+    base_index: dict[tuple[str, str], CrapRow],
+    threshold: float,
+    findings: list[dict[str, object]],
+    debt: list[dict[str, object]],
+    coverage_expected: bool,
+) -> None:
+    if row.crap is None:
+        _keep_finding(row, threshold, findings, coverage_expected)
+        return
+    _keep_scored(
+        row, matched, base_index, threshold, findings, debt, coverage_expected
+    )
+
+
 def _classify_matched(
     row: CrapRow,
     matched: list[FnSpan],
     changed: dict[str, list[int]],
+    base_index: dict[tuple[str, str], CrapRow],
     threshold: float,
     findings: list[dict[str, object]],
     debt: list[dict[str, object]],
@@ -472,7 +597,15 @@ def _classify_matched(
     coverage_expected: bool,
 ) -> None:
     if _any_changed(matched, changed, root):
-        _keep_finding(row, threshold, findings, coverage_expected)
+        _keep_changed(
+            row,
+            matched,
+            base_index,
+            threshold,
+            findings,
+            debt,
+            coverage_expected,
+        )
         return
     _keep_debt(row, matched, debt)
 
@@ -481,6 +614,7 @@ def _classify_crap(
     row: CrapRow,
     functions: list[FnSpan],
     changed: dict[str, list[int]],
+    base_index: dict[tuple[str, str], CrapRow],
     threshold: float,
     findings: list[dict[str, object]],
     debt: list[dict[str, object]],
@@ -492,7 +626,15 @@ def _classify_crap(
         _unjoined(row, threshold, coverage_expected)
         return
     _classify_matched(
-        row, matched, changed, threshold, findings, debt, root, coverage_expected
+        row,
+        matched,
+        changed,
+        base_index,
+        threshold,
+        findings,
+        debt,
+        root,
+        coverage_expected,
     )
 
 
@@ -519,6 +661,7 @@ def _apply_crap_rows(
     edn_text: str,
     functions: list[FnSpan],
     changed: dict[str, list[int]],
+    base_index: dict[tuple[str, str], CrapRow],
     threshold: float,
     findings: list[dict[str, object]],
     debt: list[dict[str, object]],
@@ -526,7 +669,17 @@ def _apply_crap_rows(
     coverage_expected: bool,
 ) -> None:
     for row in parse_crap_edn(edn_text):
-        _classify_crap(row, functions, changed, threshold, findings, debt, root, coverage_expected)
+        _classify_crap(
+            row,
+            functions,
+            changed,
+            base_index,
+            threshold,
+            findings,
+            debt,
+            root,
+            coverage_expected,
+        )
 
 
 def filter_crap(
@@ -537,13 +690,22 @@ def filter_crap(
     root: Path | None = None,
     *,
     coverage_expected: bool = False,
+    base_edn_text: str | None = None,
 ) -> dict[str, list[dict[str, object]]]:
     base = _filter_root(root)
     findings: list[dict[str, object]] = []
     debt: list[dict[str, object]] = []
     functions = _collect(changed, provider, base)
     _apply_crap_rows(
-        edn_text, functions, changed, threshold, findings, debt, base, coverage_expected
+        edn_text,
+        functions,
+        changed,
+        _index_base(base_edn_text),
+        threshold,
+        findings,
+        debt,
+        base,
+        coverage_expected,
     )
     return {"findings": findings, "debt": debt}
 
@@ -799,12 +961,20 @@ def _coverage_expected(argv: list[str]) -> bool:
     return "--coverage-expected" in argv
 
 
+def _base_edn_text(argv: list[str]) -> str | None:
+    path = _flag(argv, "--base-edn")
+    if path is None:
+        return None
+    return Path(path).read_text(encoding="utf-8")
+
+
 def _payload(
     kind: str,
     base: str,
     edn: str,
     threshold: float,
     coverage_expected: bool,
+    base_edn_text: str | None,
 ) -> dict[str, list[dict[str, object]]]:
     changed = changed_lines_from_diff(git_diff_text(base))
     text = Path(edn).read_text(encoding="utf-8")
@@ -816,6 +986,7 @@ def _payload(
             threshold,
             Path.cwd(),
             coverage_expected=coverage_expected,
+            base_edn_text=base_edn_text,
         )
     return filter_dry(text, changed, threshold, Path.cwd())
 
@@ -835,6 +1006,7 @@ def _print_payload(kind: str, base: str, edn: str, argv: list[str], default_thre
             edn,
             _threshold(argv, default_threshold),
             _coverage_expected(argv),
+            _base_edn_text(argv),
         )
     except (RuntimeError, OSError, CrapperUnavailable, ValueError, ScopeJoinError) as exc:
         return _filter_error(exc)

@@ -30,13 +30,11 @@ reference interpreter and `golden/` exist — Wasm/Cranelift are not part of the
   come after the interpreter and `golden/`, not before
 - Agent-native rules: see SPEC.md
 
-Eng is gated until a written re-review accepts the current docs tip.
+## Run ub-gates
 
-## Run the ub-gates report
+The `ub-gates` job in `.github/workflows/ci.yml` scores the merge-base diff with crapper, dryer, and mutator. The job is blocking (`advisory: "0"`). Findings in changed code, a tool error, a skipped mutator, and a mutator budget timeout fail the job. No gate-relevant files is `skipped_no_scope` and passes. Pre-existing crapper debt the diff does not worsen is reported and does not fail. Install failures still fail the job: `uv`, `cargo install`, and `rustup component add llvm-tools-preview`.
 
-The `ub-gates` job in `.github/workflows/ci.yml` scores the merge-base diff with crapper, dryer, and mutator. It sets advisory mode (`UB_GATES_ADVISORY=1`). Findings, tool errors, and a mutator timeout are reported and the job exits 0. Gate results do not fail the build. Install failures still fail the job: `uv`, `cargo install`, and `rustup component add llvm-tools-preview`.
-
-The mutator budget is 20 minutes (`UB_GATES_MUTATOR_BUDGET_SECS=1200`) in advisory mode and in blocking mode. Changed-line scope (`--lines`) applies in advisory mode too. A timeout is reported and does not fail the job. The job `timeout-minutes` stays 45 so the budget and coverage fit in the job.
+The mutator budget is 20 minutes (`UB_GATES_MUTATOR_BUDGET_SECS=1200`) in blocking mode and in advisory mode. Changed-line scope (`--lines`) applies in both. A timeout fails the blocking job. Set `UB_GATES_ADVISORY=1` for a local report that records the timeout and exits 0. The job `timeout-minutes` stays 45 so the budget and coverage fit in the job.
 
 Rust coverage is `cargo llvm-cov --locked` at the version in `scripts/ub-tools.lock`. The command creates `target/coverage/rust` and writes `lcov.info` there. The mutator test command is `cargo test --locked`.
 

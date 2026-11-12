@@ -6,14 +6,17 @@
 # UB_GATES_ADVISORY defaults to 0 (blocking). UB_GATES_ADVISORY=1 reports and exits 0.
 # run_ub_gates_report.sh sets UB_GATES_ADVISORY=1. A direct call does not.
 # Blocking mode fails on skip (except skipped_no_scope), tool_error, findings in
-# changed scope, and skipped_mutator.
+# changed scope, a mutator budget timeout, uncovered mutation sites, and skipped_mutator.
 # UB_GATES_SKIP_MUTATOR=1 and the CURSOR_AGENT auto-skip are skipped_mutator.
 # They are never ran_clean. Blocking mode exits 1. Advisory mode records the
 # same outcome and exits 0.
 # A failed git diff --name-only is tool_error. A missing merge base is tool_error.
 # Base-ref fetch honors UB_GATES_BASE_REF, uses no depth limit, and unshallows
-# a shallow clone. Mutator budget timeout is non-blocking; the step summary's
-# first line states the timeout. .pyi and .d.ts are outside gate scope.
+# a shallow clone. A mutator budget timeout fails the job in blocking mode.
+# Advisory mode reports that timeout and still exits 0. The step summary's
+# first line states which of those happened. Changed Python is measured with
+# coverage.py before the mutator. Blocking mode fails when a changed file has
+# mutation sites and none of them are covered. .pyi and .d.ts are outside gate scope.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,6 +48,11 @@ write_outcome() {
     if [[ -n "${MUTATOR_SKIPPED:-}" ]]; then printf 'mutator_skipped=%s\n' "${MUTATOR_SKIPPED}"; fi
     if [[ -n "${MUTATOR_TIMEOUT:-}" ]]; then printf 'mutator_timeout=%s\n' "${MUTATOR_TIMEOUT}"; fi
     if [[ -n "${MUTATOR_BUDGET_USED:-}" ]]; then printf 'mutator_budget_secs=%s\n' "${MUTATOR_BUDGET_USED}"; fi
+    if [[ -n "${MUTATOR_SITES:-}" ]]; then printf 'mutator_sites=%s\n' "${MUTATOR_SITES}"; fi
+    if [[ -n "${MUTATOR_COVERED:-}" ]]; then printf 'mutator_covered=%s\n' "${MUTATOR_COVERED}"; fi
+    if [[ -n "${MUTATOR_KILLED:-}" ]]; then printf 'mutator_killed=%s\n' "${MUTATOR_KILLED}"; fi
+    if [[ -n "${MUTATOR_SURVIVED:-}" ]]; then printf 'mutator_survived=%s\n' "${MUTATOR_SURVIVED}"; fi
+    if [[ -n "${MUTATOR_UNCOVERED:-}" ]]; then printf 'mutator_uncovered=%s\n' "${MUTATOR_UNCOVERED}"; fi
     if [[ -n "${TOOL_ERROR:-}" ]]; then printf 'tool_error=%s\n' "${TOOL_ERROR}"; fi
   } >"${OUTCOME_FILE}"
 }
@@ -64,8 +72,11 @@ append_step_summary() {
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
   mkdir -p "$(dirname "${GITHUB_STEP_SUMMARY}")" 2>/dev/null || return 0
   {
-    if [[ "${MUTATOR_TIMEOUT:-0}" == "1" ]]; then
+    if [[ "${MUTATOR_TIMEOUT:-0}" == "1" && "${ADVISORY}" == "1" ]]; then
       echo "mutator timeout: budget exhausted; non-blocking"
+    fi
+    if [[ "${MUTATOR_TIMEOUT:-0}" == "1" && "${ADVISORY}" != "1" ]]; then
+      echo "mutator timeout: budget exhausted; blocking"
     fi
     echo "## ub-gates"
     echo ""
@@ -108,6 +119,11 @@ append_step_summary() {
     if [[ -n "${DRYER_DEBT:-}" ]]; then echo "| dryer_debt | ${DRYER_DEBT} |"; fi
     if [[ -n "${MUTATOR_RC:-}" ]]; then echo "| mutator_exit | ${MUTATOR_RC} |"; fi
     if [[ -n "${MUTATOR_TIMEOUT:-}" ]]; then echo "| mutator_timeout | ${MUTATOR_TIMEOUT} |"; fi
+    if [[ -n "${MUTATOR_SITES:-}" ]]; then echo "| mutator_sites | ${MUTATOR_SITES} |"; fi
+    if [[ -n "${MUTATOR_COVERED:-}" ]]; then echo "| mutator_covered | ${MUTATOR_COVERED} |"; fi
+    if [[ -n "${MUTATOR_KILLED:-}" ]]; then echo "| mutator_killed | ${MUTATOR_KILLED} |"; fi
+    if [[ -n "${MUTATOR_SURVIVED:-}" ]]; then echo "| mutator_survived | ${MUTATOR_SURVIVED} |"; fi
+    if [[ -n "${MUTATOR_UNCOVERED:-}" ]]; then echo "| mutator_uncovered | ${MUTATOR_UNCOVERED} |"; fi
     echo ""
     echo "Outcome file: \`${OUTCOME_FILE}\`"
   } >>"${GITHUB_STEP_SUMMARY}"
@@ -150,6 +166,19 @@ exit_for_outcome() {
         code=0
       else
         log "ub-gates: blocking mode — mutator skip is not ran_clean"
+        code=1
+      fi
+      ;;
+    mutator_timeout)
+      log "ub-gates: blocking mode — mutator budget timeout fails the job"
+      code=1
+      ;;
+    mutator_no_coverage)
+      if [[ "${ADVISORY}" == "1" ]]; then
+        log "ub-gates: advisory mode — mutator covered no sites; job succeeds"
+        code=0
+      else
+        log "ub-gates: blocking mode — mutator covered no sites"
         code=1
       fi
       ;;
@@ -244,6 +273,9 @@ apply_scope_filter() {
   local out rc counts findings debt
   local -a flags
   flags=(--base "${MERGE_BASE}" --edn "${edn}" --threshold "${thresh}")
+  if [[ "${cmd}" == "crap" && -n "${BASE_EDN:-}" ]]; then
+    flags+=(--base-edn "${BASE_EDN}")
+  fi
   if [[ "${cmd}" == "crap" && ${#COVERAGE_PREFIX[@]} -gt 0 ]]; then
     flags+=(--coverage-expected)
   fi
@@ -257,6 +289,22 @@ apply_scope_filter() {
     rm -f "${out}"
     return "${rc}"
   fi
+  python3 - "${out}" "${cmd}" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+kind = sys.argv[2]
+for bucket in ("findings", "debt"):
+    for row in payload[bucket]:
+        if kind == "crap":
+            print(
+                "ub-gates: crapper %s %s %s crap=%s"
+                % (bucket, row["namespace"], row["name"], row["crap"])
+            )
+        else:
+            print("ub-gates: dryer %s score=%s" % (bucket, row["score"]))
+PY
   counts="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print(len(d["findings"])); print(len(d["debt"]))' "${out}")"
   rm -f "${out}"
   findings="${counts%%$'\n'*}"
@@ -272,8 +320,47 @@ apply_scope_filter() {
   return 0
 }
 
+score_base_crapper() {
+  local base_root file dest rc
+  local -a base_files
+  BASE_EDN=""
+  base_root="$(mktemp -d "${TMPDIR:-/tmp}/ub-crap-base.XXXXXX")"
+  base_files=()
+  for file in "${SCOPE_FILES[@]}"; do
+    if git cat-file -e "${MERGE_BASE}:${file}" 2>/dev/null; then
+      dest="${base_root}/${file}"
+      mkdir -p "$(dirname "${dest}")"
+      git show "${MERGE_BASE}:${file}" >"${dest}"
+      base_files+=("${file}")
+    fi
+  done
+  if [[ "${#base_files[@]}" -eq 0 ]]; then
+    rm -rf "${base_root}"
+    return 0
+  fi
+  set +e
+  (
+    cd "${base_root}"
+    "${CRAPPER}" --no-coverage --threshold 10 "${base_files[@]}"
+  )
+  rc=$?
+  set -e
+  if [[ -f "${base_root}/.metrics/crap.edn" ]]; then
+    mkdir -p .metrics
+    cp "${base_root}/.metrics/crap.edn" .metrics/crap-base.edn
+    BASE_EDN=".metrics/crap-base.edn"
+  fi
+  rm -rf "${base_root}"
+  if [[ "${rc}" -ne 0 && "${rc}" -ne 2 ]]; then
+    return 1
+  fi
+  [[ -n "${BASE_EDN}" ]]
+}
+
 run_crapper() {
   local args=(--threshold 10)
+  BASE_EDN=""
+  BASE_SCORE_FAILED=0
   if [[ ${#COVERAGE_PREFIX[@]} -gt 0 ]]; then
     args+=("${COVERAGE_PREFIX[@]}")
   fi
@@ -282,6 +369,10 @@ run_crapper() {
   "${CRAPPER}" "${args[@]}"
   CRAPPER_RC=$?
   set -e
+  if ! score_base_crapper; then
+    BASE_SCORE_FAILED=1
+    emit_warning "tool_error — base crapper score failed"
+  fi
 }
 
 run_dryer() {
@@ -313,11 +404,134 @@ note_mutator_rc() {
 
 mark_mutator_timeout() {
   MUTATOR_TIMEOUT=1
-  emit_warning "mutator budget exhausted; remaining files skipped; non-blocking"
+  if [[ "${ADVISORY}" == "1" ]]; then
+    emit_warning "mutator budget exhausted; remaining files skipped; non-blocking"
+    return 0
+  fi
+  emit_warning "mutator budget exhausted; remaining files skipped; blocking"
+}
+
+scope_has_python() {
+  local file
+  for file in "${SCOPE_FILES[@]}"; do
+    case "${file}" in
+      *.py) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+run_python_coverage() {
+  local rc rcfile
+  if ! scope_has_python; then
+    return 0
+  fi
+  if [[ ! -d scripts/tests ]]; then
+    return 0
+  fi
+  if ! command -v coverage >/dev/null 2>&1; then
+    return 1
+  fi
+  rcfile="$(mktemp)"
+  cat >"${rcfile}" <<EOF
+[run]
+patch = subprocess
+parallel = true
+source = ${SCRIPT_DIR}
+omit = ${SCRIPT_DIR}/tests/*
+EOF
+  mkdir -p target/coverage/python
+  set +e
+  coverage run --rcfile "${rcfile}" -m unittest discover -s scripts/tests
+  rc=$?
+  if [[ "${rc}" -eq 0 ]]; then
+    coverage combine --rcfile "${rcfile}"
+    rc=$?
+  fi
+  if [[ "${rc}" -eq 0 ]]; then
+    coverage lcov --rcfile "${rcfile}" -o target/coverage/python/lcov.info
+    rc=$?
+  fi
+  set -e
+  rm -f "${rcfile}"
+  if [[ "${rc}" -ne 0 || ! -s target/coverage/python/lcov.info ]]; then
+    return 1
+  fi
+  if [[ ${#COVERAGE_PREFIX[@]} -eq 0 ]]; then
+    COVERAGE_PREFIX=(--use-existing-coverage)
+  fi
+  log "ub-gates: python coverage target/coverage/python/lcov.info"
+  return 0
+}
+
+mutator_test_command() {
+  case "$1" in
+    *.py)
+      if [[ -d scripts/tests ]]; then
+        printf '%s\n' "python3 -m unittest discover -s scripts/tests"
+        return 0
+      fi
+      ;;
+  esac
+  if [[ -n "${UB_GATES_MUTATOR_TEST_CMD:-}" ]]; then
+    printf '%s\n' "${UB_GATES_MUTATOR_TEST_CMD}"
+  fi
+}
+
+read_mutator_counts() {
+  local counts
+  MUTATOR_SITES=0
+  MUTATOR_KILLED=0
+  MUTATOR_SURVIVED=0
+  MUTATOR_UNCOVERED=0
+  MUTATOR_COVERED=0
+  MUTATOR_NO_COVERAGE=0
+  if [[ -d .metrics/mutate ]]; then
+    counts="$(python3 - <<'PY'
+import re
+from pathlib import Path
+
+sites = killed = survived = uncovered = 0
+bare = False
+root = Path(".metrics/mutate")
+for path in root.rglob("*.edn"):
+    text = path.read_text(encoding="utf-8", errors="replace")
+    def total(name: str) -> int:
+        return sum(int(item) for item in re.findall(rf":{name}\s+(\d+)", text))
+    file_sites = total("sites")
+    file_killed = total("killed")
+    file_survived = total("survived")
+    sites += file_sites
+    killed += file_killed
+    survived += file_survived
+    uncovered += total("uncovered")
+    if file_sites > 0 and file_killed + file_survived == 0:
+        bare = True
+if bare:
+    print("bare")
+print(sites)
+print(killed)
+print(survived)
+print(uncovered)
+PY
+)"
+    if [[ "${counts%%$'\n'*}" == "bare" ]]; then
+      MUTATOR_NO_COVERAGE=1
+      counts="${counts#*$'\n'}"
+    fi
+    MUTATOR_SITES="${counts%%$'\n'*}"
+    counts="${counts#*$'\n'}"
+    MUTATOR_KILLED="${counts%%$'\n'*}"
+    counts="${counts#*$'\n'}"
+    MUTATOR_SURVIVED="${counts%%$'\n'*}"
+    MUTATOR_UNCOVERED="${counts##*$'\n'}"
+    MUTATOR_COVERED=$((MUTATOR_KILLED + MUTATOR_SURVIVED))
+  fi
+  log "ub-gates: mutator sites=${MUTATOR_SITES} covered=${MUTATOR_COVERED} killed=${MUTATOR_KILLED} survived=${MUTATOR_SURVIVED} uncovered=${MUTATOR_UNCOVERED}"
 }
 
 run_mutator() {
-  local deadline file lines left rc args
+  local deadline file lines left rc args test_cmd
   MUTATOR_RC=0
   MUTATOR_TIMEOUT=0
   MUTATOR_BUDGET_USED="${MUTATOR_BUDGET}"
@@ -338,8 +552,9 @@ run_mutator() {
       return 0
     fi
     args=(--lines "${lines}")
-    if [[ -n "${UB_GATES_MUTATOR_TEST_CMD:-}" ]]; then
-      args+=(--test-command "${UB_GATES_MUTATOR_TEST_CMD}")
+    test_cmd="$(mutator_test_command "${file}")"
+    if [[ -n "${test_cmd}" ]]; then
+      args+=(--test-command "${test_cmd}")
     fi
     if [[ ${#COVERAGE_PREFIX[@]} -gt 0 ]]; then
       args+=("${COVERAGE_PREFIX[@]}")
@@ -523,11 +738,18 @@ run_crapper
 run_dryer
 MUTATOR_SKIPPED=0
 MUTATOR_TIMEOUT=0
+MUTATOR_NO_COVERAGE=0
+PYTHON_COVERAGE_FAILED=0
 if [[ "${SKIP_MUTATOR}" == "1" ]]; then
   MUTATOR_SKIPPED=1
   MUTATOR_RC=""
 else
+  if ! run_python_coverage; then
+    PYTHON_COVERAGE_FAILED=1
+    emit_warning "tool_error — python coverage for changed .py files failed"
+  fi
   run_mutator
+  read_mutator_counts
 fi
 
 if [[ -n "${MUTATOR_RC}" ]]; then
@@ -542,6 +764,12 @@ fi
 if ! classify_dryer; then
   TOOL_ERROR=1
 fi
+if [[ "${BASE_SCORE_FAILED:-0}" -eq 1 ]]; then
+  TOOL_ERROR=1
+fi
+if [[ "${PYTHON_COVERAGE_FAILED:-0}" -eq 1 ]]; then
+  TOOL_ERROR=1
+fi
 
 if [[ "${TOOL_ERROR}" -eq 0 ]]; then
   if [[ "${CRAPPER_FINDINGS}" -gt 0 ]]; then FINDING=1; fi
@@ -554,6 +782,12 @@ if [[ "${TOOL_ERROR}" -eq 1 ]]; then
   OUTCOME="tool_error"
   GATE_MISS=1
   emit_warning "tool_error — dryer/mutator tool failure or missing .metrics/dry.edn after dryer; not ran_clean."
+elif [[ "${MUTATOR_NO_COVERAGE:-0}" == "1" ]]; then
+  OUTCOME="mutator_no_coverage"
+  GATE_MISS=1
+elif [[ "${MUTATOR_TIMEOUT:-0}" == "1" && "${ADVISORY}" != "1" ]]; then
+  OUTCOME="mutator_timeout"
+  GATE_MISS=1
 elif [[ "${FINDING}" -eq 1 ]]; then
   OUTCOME="ran_with_findings"
 elif [[ "${MUTATOR_SKIPPED}" == "1" ]]; then
