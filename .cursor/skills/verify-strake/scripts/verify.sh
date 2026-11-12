@@ -126,6 +126,7 @@ if [[ -d "$ROOT/golden" ]]; then
     "0:test golden/cmp_ord_f64.strake"
     "1:test golden/cmp_ord_forbid.strake"
     "0:test golden/f32_arith.strake"
+    "0:test golden/f32_div.strake"
   )
   for entry in "${GOLDEN_SMOKE[@]}"; do
     want_exit="${entry%%:*}"

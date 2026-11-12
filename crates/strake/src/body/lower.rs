@@ -1669,6 +1669,9 @@ fn lower_div(
         Type::Named(name, _) if name == "i32" => Ok(b.div_i32(block, span, l, r)),
         Type::Named(name, _) if name == "i64" => Ok(b.div_i64(block, span, l, r)),
         Type::Named(name, _) if name == "f64" => Ok(b.div_f64(block, span, l, r)),
+        Type::Named(name, _) if name == "f32" => {
+            Ok(b.emit_i64_binop(block, span, Op::Div, l, r, Imm::F32(0)))
+        }
         _ => Err(LowerError::unsupported("div type")),
     }
 }
@@ -2426,10 +2429,16 @@ end
 
     #[test]
     fn f32_arith_goldens_return_zero() {
-        let cases = [(
-            "golden/f32_arith.strake",
-            include_str!("../../../../golden/f32_arith.strake"),
-        )];
+        let cases = [
+            (
+                "golden/f32_arith.strake",
+                include_str!("../../../../golden/f32_arith.strake"),
+            ),
+            (
+                "golden/f32_div.strake",
+                include_str!("../../../../golden/f32_div.strake"),
+            ),
+        ];
         for (file, src) in cases {
             let module = syntax::parse(src, file).expect("parse");
             let program = compile_module(&module, false).expect("compile");
