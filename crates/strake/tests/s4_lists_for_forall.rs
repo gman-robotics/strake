@@ -246,3 +246,59 @@ fn nested_forall_binder_is_not_visible_after() {
     assert!(stderr.contains("\"E_TYPE\""), "{stderr}");
     assert!(!stderr.contains("\"E_TEST\""), "{stderr}");
 }
+
+/// `break` leaves the `for`. The outer loop then continues until `acc` is 1.
+fn break_for_acc_src(under_if: bool) -> String {
+    let fors = if under_if {
+        "    if true\n      for x in xs\n        break\n      end\n    end\n"
+    } else {
+        "    for x in xs\n      break\n    end\n"
+    };
+    format!(
+        "strake 1\n\ntest t\n  e = list.empty i64\n  xs = list.cons 1 e\n  acc0 = 0\n  loop acc = acc0\n{fors}    one = add i64 acc 1\n    stop = eq i64 one 2\n    if stop\n      break\n    end\n    continue acc = one\n  end\n  assert.eq acc 1\nend\n"
+    )
+}
+
+#[test]
+fn break_in_for_direct_in_loop_continues_after() {
+    let (code, stderr) = run_src("break_for_direct.strake", &break_for_acc_src(false));
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn break_in_for_under_if_continues_after() {
+    let (code, stderr) = run_src("break_for_if.strake", &break_for_acc_src(true));
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn break_in_for_stops_before_the_next_element() {
+    let src = "strake 1\n\ntest t\n  e = list.empty i64\n  a = list.cons 9 e\n  xs = list.cons 1 a\n  for x in xs\n    assert.eq x 1\n    break\n  end\n  ret 0\nend\n";
+    let (code, stderr) = run_src("break_for_elements.strake", src);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+fn continue_in_for_src(under_if: bool) -> String {
+    let fors = if under_if {
+        "    if true\n      for x in xs\n        continue acc = acc0\n      end\n    end\n"
+    } else {
+        "    for x in xs\n      continue acc = acc0\n    end\n"
+    };
+    format!(
+        "strake 1\n\ntest t\n  e = list.empty i64\n  xs = list.cons 1 e\n  acc0 = 0\n  loop acc = acc0\n{fors}    one = add i64 acc 1\n    stop = eq i64 one 3\n    if stop\n      break\n    end\n    continue acc = one\n  end\n  ret 0\nend\n"
+    )
+}
+
+#[test]
+fn continue_in_for_is_etype() {
+    for (name, under_if) in [("continue_for_direct.strake", false), ("continue_for_if.strake", true)]
+    {
+        let (code, stderr) = run_src(name, &continue_in_for_src(under_if));
+        assert_eq!(code, 1, "{name} {stderr}");
+        assert!(stderr.contains("\"E_TYPE\""), "{name} {stderr}");
+        assert!(!stderr.contains("E_FUEL"), "{name} {stderr}");
+    }
+}
