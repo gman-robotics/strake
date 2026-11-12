@@ -7,21 +7,17 @@ fn golden(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn run(args: &[&str]) -> (std::process::ExitStatus, String, String) {
-    let bin = env!("CARGO_BIN_EXE_strake");
-    let out = Command::new(bin).args(args).output().expect("run strake");
-    (
-        out.status,
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
+/// `strake test` through the library, in this process, so llvm-cov sees lower and exec.
+fn run(args: &[&str]) -> (i32, String, String) {
+    let exit = strake::test(args[1], strake::Opts::default());
+    (exit.code, exit.stdout, exit.stderr)
 }
 
 #[test]
 fn for_list_exits_0_no_e_oob() {
     let path = golden("for_list.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
+    assert_eq!(status, 0);
     assert!(!stderr.contains("E_OOB"));
 }
 
@@ -29,7 +25,7 @@ fn for_list_exits_0_no_e_oob() {
 fn forall_rev_exits_1_e_forall() {
     let path = golden("forall_rev.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(1));
+    assert_eq!(status, 1);
     assert!(stderr.contains("E_FORALL"));
 }
 
@@ -37,7 +33,7 @@ fn forall_rev_exits_1_e_forall() {
 fn forall_ok_exits_0() {
     let path = golden("forall_ok.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
+    assert_eq!(status, 0);
     assert!(stderr.is_empty());
 }
 
@@ -45,7 +41,7 @@ fn forall_ok_exits_0() {
 fn forall_list_bad_exits_3_no_e_forall() {
     let path = golden("forall_list_bad.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(3));
+    assert_eq!(status, 3);
     assert!(!stderr.contains("E_FORALL"));
     assert!(!stderr.contains("\"code\""));
 }
@@ -54,7 +50,7 @@ fn forall_list_bad_exits_3_no_e_forall() {
 fn forall_rev_in_match_arm_exits_1_e_forall() {
     let path = golden("forall_rev_match_arm.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(1));
+    assert_eq!(status, 1);
     assert!(stderr.contains("E_FORALL"));
 }
 
@@ -62,7 +58,7 @@ fn forall_rev_in_match_arm_exits_1_e_forall() {
 fn if_arm_for_exits_0() {
     let path = golden("if_arm_for.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
+    assert_eq!(status, 0);
     assert!(stderr.is_empty());
 }
 
@@ -70,7 +66,7 @@ fn if_arm_for_exits_0() {
 fn if_arm_forall_exits_0() {
     let path = golden("if_arm_forall.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
+    assert_eq!(status, 0);
     assert!(stderr.is_empty());
 }
 
@@ -78,7 +74,7 @@ fn if_arm_forall_exits_0() {
 fn match_arm_for_exits_0() {
     let path = golden("match_arm_for.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0));
+    assert_eq!(status, 0);
     assert!(stderr.is_empty());
 }
 
@@ -101,12 +97,12 @@ fn forall_rev_exec_counter_stays_zero() {
 fn forall_module_list_name_is_legal_and_runs() {
     let path = golden("forall_list_ok.strake");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(0), "{stderr}");
+    assert_eq!(status, 0, "{stderr}");
     assert!(stderr.is_empty());
 }
 
 /// Runs forall_list_ok ([2, 3]) with the body asserting `x == want`.
-fn forall_list_ok_asserting(want: &str) -> (std::process::ExitStatus, String) {
+fn forall_list_ok_asserting(want: &str) -> (i32, String) {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let path = dir.join(format!("forall_list_each_{want}.strake"));
     let src = std::fs::read_to_string(golden("forall_list_ok.strake"))
@@ -122,7 +118,7 @@ fn forall_module_list_body_sees_every_element() {
     // Asserting 2 fails on 3 and asserting 3 fails on 2, so both were visited.
     for (want, got) in [("2", "3"), ("3", "2")] {
         let (status, stderr) = forall_list_ok_asserting(want);
-        assert_eq!(status.code(), Some(1), "{stderr}");
+        assert_eq!(status, 1, "{stderr}");
         assert!(stderr.contains("\"E_TEST\""));
         assert!(stderr.contains(&format!("\"got\":\"{got}\"")), "{stderr}");
     }
@@ -133,7 +129,7 @@ fn run_src(name: &str, src: &str) -> (i32, String) {
     let path = dir.join(name);
     std::fs::write(&path, src).expect("write");
     let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    (status.code().unwrap_or(-1), stderr)
+    (status, stderr)
 }
 
 /// Module list `[2, 3]`, same shape as `golden/forall_list_ok.strake`, driven with `for`.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -608,7 +609,15 @@ def _mutator_edn(killed: int, survived: int, uncovered: int, sites: int) -> str:
 
 
 class MutatorCoverageTests(unittest.TestCase):
-    def _run(self, tmp: str, edn: str, *, advisory: str = "0", with_tests: bool = False) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self,
+        tmp: str,
+        edn: str,
+        *,
+        advisory: str = "0",
+        with_tests: bool = False,
+        status: str = "",
+    ) -> subprocess.CompletedProcess[str]:
         repo = Path(tmp)
         _init_repo(repo)
         lib = repo / "lib"
@@ -650,12 +659,16 @@ class MutatorCoverageTests(unittest.TestCase):
             bin_dir / "dryer",
             "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
         )
+        status_line = ""
+        if status:
+            status_line = f"printf '%s\\n' {shlex.quote(status)}\n"
         _write_exe(
             bin_dir / "mutator",
             "#!/usr/bin/env bash\n"
             "mkdir -p .metrics/mutate\n"
             "printf '%s\\n' \"$*\" >> MUTATOR_LOG\n"
-            "cat > .metrics/mutate/lib.a.edn <<'EDN'\n"
+            + status_line
+            + "cat > .metrics/mutate/lib.a.edn <<'EDN'\n"
             + edn
             + "EDN\nexit 0\n",
         )
@@ -683,6 +696,36 @@ class MutatorCoverageTests(unittest.TestCase):
             self.assertIn("outcome=mutator_no_coverage", _outcome(Path(tmp)))
             self.assertIn("mutator sites=4 covered=0 killed=0 survived=0 uncovered=4", text)
             self.assertIn("blocking mode — mutator covered no sites", text)
+            self.assertIn("not_run=0", text)
+
+    def test_unrun_sites_outside_changed_lines_pass(self) -> None:
+        # a116686: namespace snapshots listed whole-file sites, killed none of
+        # them, and uncovered only lines outside the diff. That is not "no
+        # coverage". The old rule (sites > 0 and killed + survived == 0) failed it.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                _mutator_edn(0, 0, 1, 47),
+                status="UNCOVERED lib/a.py:99 0 -> 1",
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            self.assertIn("outcome=ran_clean", _outcome(Path(tmp)))
+            self.assertIn("mutator sites=47 covered=0 killed=0 survived=0 uncovered=1 not_run=46", text)
+            self.assertNotIn("blocking mode — mutator covered no sites", text)
+
+    def test_uncovered_changed_line_with_no_run_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                _mutator_edn(0, 0, 1, 47),
+                status="UNCOVERED lib/a.py:2 true -> false",
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=mutator_no_coverage", _outcome(Path(tmp)))
+            self.assertIn("blocking mode — mutator covered no sites", text)
+            self.assertIn("uncovered on a changed line", text)
 
     def test_covered_sites_pass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
