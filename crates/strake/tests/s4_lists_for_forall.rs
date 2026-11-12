@@ -332,3 +332,22 @@ fn wide_module_bind_as_forall_bound_stays_check_error() {
     assert!(!stderr.contains("\"E_TEST\""), "{stderr}");
     assert!(!stderr.contains("-9223372036854775808"), "{stderr}");
 }
+
+#[test]
+fn module_i64_bind_rejects_value_before_min() {
+    let (code, stderr) = run_src(
+        "wide_i64_bind_min.strake",
+        &int_bind_src("-9223372036854775809", "0"),
+    );
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("\"E_TYPE\""), "{stderr}");
+    assert!(!stderr.contains("\"got\""), "{stderr}");
+}
+
+#[test]
+fn break_in_loop_inside_for_leaves_the_loop() {
+    let src = "strake 1\n\ntest t\n  e = list.empty i64\n  xs = list.cons 1 e\n  acc0 = 0\n  for x in xs\n    loop acc = acc0\n      one = add i64 acc 1\n      stop = eq i64 one 2\n      if stop\n        break\n      end\n      continue acc = one\n    end\n    assert.eq acc 1\n  end\n  ret 0\nend\n";
+    let (code, stderr) = run_src("break_loop_in_for.strake", src);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
