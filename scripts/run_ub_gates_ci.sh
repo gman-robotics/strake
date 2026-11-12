@@ -21,7 +21,8 @@
 # changed-line site was killed or survived. The mutator reports N/A and passes
 # only when every changed line in every gate-relevant file is test code: an
 # is_test_path (tests/ and the other test paths) or a line inside a #[cfg(test)]
-# item. Any other diff uses the per-file and uncovered-line checks above,
+# item. An empty or whitespace-only line outside a string is neither test nor
+# production, and N/A still needs one real test line. Any other diff uses the per-file and uncovered-line checks above,
 # unchanged. A scan that cannot classify a line fails closed. A diff failure
 # still fails. .pyi and .d.ts are outside gate scope.
 set -euo pipefail
@@ -575,9 +576,11 @@ def _is_test_path(path: str) -> bool:
 def _blank_rust(text: str):
     # Hide comments and strings so a #[cfg(test)] inside one is not an item.
     # None means the scan did not finish; the caller fails closed.
+    # The string line set is the spans this scan already blanks.
     chars = list(text)
     i = 0
     n = len(chars)
+    string_lines: set[int] = set()
 
     def spaces(j: int, stop: int) -> None:
         while j < stop:
@@ -648,16 +651,22 @@ def _blank_rust(text: str):
                 j += 1
             if j >= n:
                 return None
-            spaces(start, j + len(closer))
-            i = j + len(closer)
+            stop = j + len(closer)
+            spaces(start, stop)
+            if start < stop:
+                first = text.count("\n", 0, start) + 1
+                last = text.count("\n", 0, stop - 1) + 1
+                string_lines.update(range(first, last + 1))
+            i = stop
             continue
         i += 1
-    return "".join(chars)
+    return "".join(chars), string_lines
 
 def _cfg_test_lines(text: str):
-    masked = _blank_rust(text)
-    if masked is None:
+    blanked = _blank_rust(text)
+    if blanked is None:
         return None
+    masked, string_lines = blanked
     found = set()
     for match in re.finditer(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]", masked):
         cursor = match.end()
@@ -707,11 +716,21 @@ def _cfg_test_lines(text: str):
         first = text.count("\n", 0, match.start()) + 1
         last = text.count("\n", 0, max(match.start(), end - 1)) + 1
         found.update(range(first, last + 1))
-    return found
+    return found, string_lines
+
+def _neutral_line(source: str, number: int, string_lines: set[int]) -> bool:
+    # Whitespace-only, and outside every string span the scan already found.
+    rows = source.splitlines()
+    if number < 1 or number > len(rows):
+        return False
+    if rows[number - 1].strip() != "":
+        return False
+    return number not in string_lines
 
 def _changed_lines_are_test(changed: dict) -> bool:
     # True only when every changed line of every gate-relevant file is test
-    # code. One production line, or a scan we cannot finish, is false.
+    # code or a neutral blank. One production line, or a scan we cannot
+    # finish, is false. At least one real test line is required.
     saw = False
     for path, lines in changed.items():
         if not isinstance(path, str) or not _gate_relevant(path):
@@ -730,11 +749,16 @@ def _changed_lines_are_test(changed: dict) -> bool:
             source = Path(path).read_text(encoding="utf-8")
         except OSError:
             return False
-        spans = _cfg_test_lines(source)
-        if spans is None:
+        scanned = _cfg_test_lines(source)
+        if scanned is None:
             return False
+        spans, string_lines = scanned
         for number in lines:
-            if not isinstance(number, int) or number not in spans:
+            if not isinstance(number, int):
+                return False
+            if _neutral_line(source, number, string_lines):
+                continue
+            if number not in spans:
                 return False
             saw = True
     return saw

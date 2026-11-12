@@ -35,6 +35,49 @@ fn checks_production() -> i32 {
 }
 """
 
+_CFG_ITEMS = (
+    "fn test_step() -> i32 {\n"
+    "    1\n"
+    "}\n"
+    "\n"
+    "#[cfg(test)]\n"
+    "fn checks_production() -> i32 {\n"
+    "    2\n"
+    "}\n"
+    " \n"
+    "#[cfg(test)]\n"
+    "fn checks_other() -> i32 {\n"
+    "    4\n"
+    "}\n"
+)
+
+_BLANK_ONLY_BEFORE = "fn other() -> i32 {\n    1\n}\n"
+_BLANK_ONLY_AFTER = "fn other() -> i32 {\n\n    1\n}\n"
+
+_STRING_BLANK_BEFORE = (
+    "fn prod() -> &'static str {\n"
+    '    r#"hello\n'
+    'world"#\n'
+    "}\n"
+    "\n"
+    "#[cfg(test)]\n"
+    "fn checks_production() -> i32 {\n"
+    "    2\n"
+    "}\n"
+)
+_STRING_BLANK_AFTER = (
+    "fn prod() -> &'static str {\n"
+    '    r#"hello\n'
+    "\n"
+    'world"#\n'
+    "}\n"
+    "\n"
+    "#[cfg(test)]\n"
+    "fn checks_production() -> i32 {\n"
+    "    3\n"
+    "}\n"
+)
+
 _DIFF_FAIL_GIT = """#!/usr/bin/env bash
 if [[ "$1" == "diff" ]]; then
   echo "diff failed" >&2
@@ -260,6 +303,63 @@ class MutatorNaTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 1, text)
             outcome = _outcome(repo)
             self.assertIn("outcome=mutator_no_coverage", outcome)
+            self.assertIn("blocking mode — mutator covered no sites", text)
+            self.assertNotIn("mutator N/A", text)
+            self.assertNotIn("mutator_na=1", outcome)
+
+    def test_cfg_test_items_separated_by_blank_lines_are_na(self) -> None:
+        # New #[cfg(test)] items in a production file. The blank line and the
+        # whitespace-only line between them are changed and are not production.
+        edn = _edn(
+            [
+                _form("test_step", 1, 3, 4),
+                _form("checks_production", 5, 8, 2, uncovered=2),
+                _form("checks_other", 10, 13, 2, uncovered=2),
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, bin_dir = self._repo(tmp, _PRODUCTION, _CFG_ITEMS)
+            env = self._tools(repo, bin_dir, edn, "UNCOVERED src/lib.rs:7 2 -> 3")
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            outcome = _outcome(repo)
+            self.assertIn("outcome=ran_clean", outcome)
+            self.assertIn("mutator_na=1", outcome)
+            self.assertIn("ub-gates: mutator N/A (0 production mutation sites)", text)
+            self.assertNotIn("outcome=mutator_no_coverage", outcome)
+            self.assertNotIn("covered no sites", text)
+
+    def test_blank_only_diff_is_not_na(self) -> None:
+        # The only changed line is blank. Sites in the file did not run.
+        # A blank line is not a real test line, so this is not N/A.
+        edn = _edn([_form("other", 1, 3, 3)])
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, bin_dir = self._repo(tmp, _BLANK_ONLY_BEFORE, _BLANK_ONLY_AFTER)
+            env = self._tools(repo, bin_dir, edn, "")
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            outcome = _outcome(repo)
+            self.assertIn("outcome=mutator_no_coverage", outcome)
+            self.assertIn("killed + survived == 0", text)
+            self.assertIn("blocking mode — mutator covered no sites", text)
+            self.assertNotIn("mutator N/A", text)
+            self.assertNotIn("mutator_na=1", outcome)
+
+    def test_blank_line_inside_string_is_not_na(self) -> None:
+        # The blank line is inside r#"..."#. It is production. The other
+        # changed line is inside #[cfg(test)]. That is not N/A.
+        edn = _edn([_form("prod", 1, 4, 3)])
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, bin_dir = self._repo(tmp, _STRING_BLANK_BEFORE, _STRING_BLANK_AFTER)
+            env = self._tools(repo, bin_dir, edn, "")
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            outcome = _outcome(repo)
+            self.assertIn("outcome=mutator_no_coverage", outcome)
+            self.assertIn("killed + survived == 0", text)
             self.assertIn("blocking mode — mutator covered no sites", text)
             self.assertNotIn("mutator N/A", text)
             self.assertNotIn("mutator_na=1", outcome)
