@@ -619,6 +619,12 @@ def _blank_rust(text: str):
             if depth:
                 return None
             continue
+        if c == "'" and nxt == '"' and i + 2 < n and chars[i + 2] == "'":
+            i += 3
+            continue
+        if c == "'" and nxt == "\\" and i + 3 < n and chars[i + 2] == '"' and chars[i + 3] == "'":
+            i += 4
+            continue
         raw = False
         if c in {"r", "b"} and nxt in {'"', "#"}:
             raw = c == "r" or (c == "b" and nxt == '"')
@@ -647,7 +653,12 @@ def _blank_rust(text: str):
                 j = i
             j += 1
             closer = '"' + ("#" * hashes)
+            prev = text[i - 1] if i else ""
+            honor_escape = (not raw) and c == '"' and (prev == "b" or prev not in {"r", "c", "#"})
             while j < n and not text.startswith(closer, j):
+                if honor_escape and text.startswith("\\", j):
+                    j += 2
+                    continue
                 j += 1
             if j >= n:
                 return None
