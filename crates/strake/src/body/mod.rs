@@ -35,20 +35,6 @@ pub(crate) fn compile_module(module: &Module, draft: bool) -> Result<Program, Co
     Ok(program)
 }
 
-#[cfg(test)]
-pub(crate) static EXEC_ENTERED: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-pub(crate) fn exec_entered_count() -> usize {
-    EXEC_ENTERED.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-#[cfg(test)]
-pub(crate) fn reset_exec_entered() {
-    EXEC_ENTERED.store(0, std::sync::atomic::Ordering::SeqCst);
-}
-
 pub(crate) fn lower_abort_message(err: &LowerError) -> String {
     err.message()
 }
@@ -61,7 +47,6 @@ mod tests {
 
     #[test]
     fn catalog_check_failures_do_not_enter_exec() {
-        reset_exec_entered();
         let src = include_str!("../../../../golden/shadow.strake");
         let tmp = std::env::temp_dir().join("strake_t4_shadow_exec.strake");
         std::fs::write(&tmp, src).expect("write");
@@ -69,10 +54,7 @@ mod tests {
         let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
         assert_eq!(exit.code, 1);
         assert_eq!(crate::exec_entries_on_this_thread(), before);
-        // Other threads share this counter, so its value is not the assertion.
-        let _process_wide = exec_entered_count();
 
-        reset_exec_entered();
         let src = include_str!("../../../../golden/priv_call.strake");
         let tmp = std::env::temp_dir().join("strake_t4_priv_call_exec.strake");
         std::fs::write(&tmp, src).expect("write");
@@ -80,7 +62,6 @@ mod tests {
         let exit = strake_test(tmp.to_str().unwrap(), Opts::default());
         assert_eq!(exit.code, 3);
         assert_eq!(crate::exec_entries_on_this_thread(), before);
-        let _process_wide = exec_entered_count();
     }
 
     /// `forall_rev` is check `E_FORALL` before any export runs. The count is
