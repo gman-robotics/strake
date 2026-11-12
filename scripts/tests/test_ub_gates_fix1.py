@@ -1193,5 +1193,234 @@ class CrapperBaseJoinTests(unittest.TestCase):
             self.assertNotIn("skipped_tools_missing", text)
 
 
+_COVERAGE_SH = """#!/usr/bin/env bash
+mkdir -p target/coverage/rust
+mode=bare
+if grep -q covered "$1"; then mode=full; fi
+if grep -q partial "$1"; then mode=partial; fi
+{
+  printf '%s\\n' "SF:$1"
+  if [[ "$mode" == full ]]; then
+    printf '%s\\n' 'DA:2,1'
+  elif [[ "$mode" == partial ]]; then
+    printf '%s\\n' 'DA:1,1' 'DA:2,0' 'DA:3,0' 'DA:4,0' 'DA:5,0'
+  else
+    printf '%s\\n' 'DA:2,0'
+  fi
+  printf '%s\\n' end_of_record
+} > target/coverage/rust/lcov.info
+printf '%s\\n' "$PWD $mode" >> "$COVERAGE_LOG"
+"""
+
+_CRAP_FROM_LCOV = """#!/usr/bin/env python3
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(".")
+args = sys.argv[1:]
+prev = ""
+for arg in args:
+    if prev == "--root":
+        root = pathlib.Path(arg)
+    prev = arg
+infos = list(root.glob("target/coverage/**/lcov.info"))
+infos.extend(root.glob("coverage/**/lcov.info"))
+text = "\\n".join(path.read_text(encoding="utf-8") for path in infos)
+hits = 0
+total = 0
+for line in text.splitlines():
+    if not line.startswith("DA:"):
+        continue
+    total += 1
+    if int(line.split(",")[1]) > 0:
+        hits += 1
+cov = 0.0
+if total:
+    cov = hits / total
+cc = int(os.environ["UB_FIXTURE_CC"])
+crap = cc * cc * (1.0 - cov) ** 3 + cc
+name = os.environ.get("UB_FIXTURE_NAME", "hot")
+metrics = root / ".metrics"
+metrics.mkdir(parents=True, exist_ok=True)
+(metrics / "crap.edn").write_text(
+    "{:entries [\\n"
+    f'  {{:name "{name}", :namespace "pkg", :complexity {cc}, :coverage {cov:.4f}, :crap {crap:.4f}}}\\n'
+    "]}\\n",
+    encoding="utf-8",
+)
+log = os.environ.get("UB_FIXTURE_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(f"{root.resolve()} hits={hits} total={total} crap={crap:.4f}\\n")
+"""
+
+
+class SeparateCoverageTests(unittest.TestCase):
+    def _run(self, tmp: str, before: str, after: str, cc: str) -> subprocess.CompletedProcess[str]:
+        repo = Path(tmp)
+        _init_repo(repo)
+        lib = repo / "lib"
+        lib.mkdir()
+        source = lib / "hot.py"
+        source.write_text(before, encoding="utf-8")
+        _git(repo, "add", "lib/hot.py")
+        _git(repo, "commit", "-m", "base")
+        _git(repo, "checkout", "-b", "feat")
+        source.write_text(after, encoding="utf-8")
+        _git(repo, "add", "lib/hot.py")
+        _git(repo, "commit", "-m", "change")
+        bin_dir = repo / "bin"
+        bin_dir.mkdir()
+        _write_exe(bin_dir / "crapper", _CRAP_FROM_LCOV)
+        _write_exe(
+            bin_dir / "dryer",
+            "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+        )
+        _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+        cover = bin_dir / "write-lcov"
+        _write_exe(cover, _COVERAGE_SH)
+        span = [{"namespace": "pkg", "name": "hot", "start_line": 1, "end_line": 2, "path": "lib/hot.py"}]
+        (repo / "spans.json").write_text(json.dumps(span), encoding="utf-8")
+        env = _env(
+            bin_dir,
+            UB_GATES_ADVISORY="0",
+            UB_GATES_BASE_REF="main",
+            UB_GATES_MUTATOR_BUDGET_SECS="30",
+            UB_SCOPE_FUNCTIONS_JSON=str(repo / "spans.json"),
+            UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+            UB_GATES_COVERAGE_CMD=f"bash {cover} lib/hot.py",
+            UB_FIXTURE_CC=cc,
+            UB_FIXTURE_NAME="hot",
+            UB_FIXTURE_LOG=str(repo / "crap-log.txt"),
+            COVERAGE_LOG=str(repo / "coverage-log.txt"),
+        )
+        return _run_ci(repo, env)
+
+    def test_lost_coverage_raises_crap_from_under_10(self) -> None:
+        before = "def hot():\n    return 1  # covered\n"
+        after = "def hot():\n    return 2  # bare\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, before, after, "3")
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=ran_with_findings", _outcome(Path(tmp)))
+            self.assertIn("crapper findings pkg hot crap=12.0", text)
+            places = (Path(tmp) / "coverage-log.txt").read_text(encoding="utf-8")
+            self.assertIn("full", places)
+            self.assertIn("bare", places)
+            self.assertIn("ub-crap-base", places)
+            scores = (Path(tmp) / "crap-log.txt").read_text(encoding="utf-8")
+            self.assertIn("crap=3.0", scores)
+            self.assertIn("crap=12.0", scores)
+
+    def test_coverage_drop_raises_crap_that_was_already_over_10(self) -> None:
+        before = "def hot():\n    return 1  # partial\n"
+        after = "def hot():\n    return 2  # bare\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, before, after, "5")
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=ran_with_findings", _outcome(Path(tmp)))
+            self.assertIn("crapper findings pkg hot", text)
+            scores = (Path(tmp) / "crap-log.txt").read_text(encoding="utf-8")
+            base = [line for line in scores.splitlines() if "ub-crap-base" in line][0]
+            head = [line for line in scores.splitlines() if "ub-crap-base" not in line][0]
+            base_crap = float(base.rsplit("crap=", 1)[1])
+            head_crap = float(head.rsplit("crap=", 1)[1])
+            self.assertGreater(base_crap, 10.0)
+            self.assertGreater(head_crap, base_crap)
+            self.assertIn("base coverage worktree", text)
+
+    def test_failed_base_coverage_command_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _init_repo(repo)
+            lib = repo / "lib"
+            lib.mkdir()
+            (lib / "hot.py").write_text("def hot():\n    return 1\n", encoding="utf-8")
+            _git(repo, "add", "lib/hot.py")
+            _git(repo, "commit", "-m", "base")
+            _git(repo, "checkout", "-b", "feat")
+            (lib / "hot.py").write_text("def hot():\n    return 2\n", encoding="utf-8")
+            _git(repo, "add", "lib/hot.py")
+            _git(repo, "commit", "-m", "change")
+            bin_dir = repo / "bin"
+            bin_dir.mkdir()
+            _write_exe(
+                bin_dir / "crapper",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:entries []}' > .metrics/crap.edn\nexit 0\n",
+            )
+            _write_exe(
+                bin_dir / "dryer",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+            )
+            _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+            span = [{"namespace": "pkg", "name": "hot", "start_line": 1, "end_line": 2, "path": "lib/hot.py"}]
+            (repo / "spans.json").write_text(json.dumps(span), encoding="utf-8")
+            env = _env(
+                bin_dir,
+                UB_GATES_ADVISORY="0",
+                UB_GATES_BASE_REF="main",
+                UB_GATES_MUTATOR_BUDGET_SECS="30",
+                UB_SCOPE_FUNCTIONS_JSON=str(repo / "spans.json"),
+                UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+                UB_GATES_COVERAGE_CMD=(
+                    "if [[ \"$PWD\" == *ub-crap-base* ]]; then exit 1; fi; "
+                    "mkdir -p target/coverage/rust; "
+                    "printf '%s\\n' 'SF:lib/hot.py' 'DA:2,1' end_of_record > target/coverage/rust/lcov.info"
+                ),
+            )
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=tool_error", _outcome(repo))
+            self.assertIn("base coverage command failed", text)
+
+    def test_base_lcov_missing_the_file_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _init_repo(repo)
+            lib = repo / "lib"
+            lib.mkdir()
+            (lib / "hot.py").write_text("def hot():\n    return 1\n", encoding="utf-8")
+            _git(repo, "add", "lib/hot.py")
+            _git(repo, "commit", "-m", "base")
+            _git(repo, "checkout", "-b", "feat")
+            (lib / "hot.py").write_text("def hot():\n    return 2\n", encoding="utf-8")
+            _git(repo, "add", "lib/hot.py")
+            _git(repo, "commit", "-m", "change")
+            bin_dir = repo / "bin"
+            bin_dir.mkdir()
+            _write_exe(
+                bin_dir / "crapper",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:entries []}' > .metrics/crap.edn\nexit 0\n",
+            )
+            _write_exe(
+                bin_dir / "dryer",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+            )
+            _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+            span = [{"namespace": "pkg", "name": "hot", "start_line": 1, "end_line": 2, "path": "lib/hot.py"}]
+            (repo / "spans.json").write_text(json.dumps(span), encoding="utf-8")
+            env = _env(
+                bin_dir,
+                UB_GATES_ADVISORY="0",
+                UB_GATES_BASE_REF="main",
+                UB_GATES_MUTATOR_BUDGET_SECS="30",
+                UB_SCOPE_FUNCTIONS_JSON=str(repo / "spans.json"),
+                UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+                UB_GATES_COVERAGE_CMD=(
+                    "mkdir -p target/coverage/rust; "
+                    "printf '%s\\n' 'SF:lib/other.py' 'DA:1,1' end_of_record > target/coverage/rust/lcov.info"
+                ),
+            )
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=tool_error", _outcome(repo))
+            self.assertIn("base lcov missing lib/hot.py", text)
+
+
 if __name__ == "__main__":
     unittest.main()

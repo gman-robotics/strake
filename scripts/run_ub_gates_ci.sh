@@ -11,12 +11,13 @@
 # They are never ran_clean. Blocking mode exits 1. Advisory mode records the
 # same outcome and exits 0.
 # A failed git diff --name-only is tool_error. A missing merge base is tool_error.
-# The base crapper runs under existing coverage, never --no-coverage, so the
-# gate compares CRAP to CRAP. Base and head rows join on file path plus
-# function name. A temp-tree namespace (crate::) still matches the head
-# namespace (strake::body::) for the same file and name. A missing or
-# unreadable base score is tool_error and blocks. Thresholds, --lines, and
-# blocking mode are unchanged.
+# The base crapper runs in a git worktree at the merge base. When
+# UB_GATES_COVERAGE_CMD is set, that command runs in the worktree and crapper
+# reads that lcov, never the head lcov. A failed base coverage command, or
+# lcov that misses a base file, is tool_error. --no-coverage is not used.
+# Base and head rows join on file path plus function name. A missing or
+# unreadable base score is tool_error and blocks. Pass is CRAP under 10.
+# --lines and blocking mode are unchanged.
 # Base-ref fetch honors UB_GATES_BASE_REF, uses no depth limit, and unshallows
 # a shallow clone. A mutator budget timeout fails the job in blocking mode.
 # Advisory mode reports that timeout and still exits 0. The step summary's
@@ -338,172 +339,103 @@ PY
   return 0
 }
 
-# Rewrite base :namespace values to the head namespace for the same file and
-# function name, then write one base EDN. Head rows are not modified.
-align_base_crap() {
-  python3 - "${SCOPE_PY}" "$1" "$2" <<'PY'
-import importlib.util
-import sys
-from pathlib import Path
-
-
-def load_scope(path):
-    spec = importlib.util.spec_from_file_location("ub_changed_scope_align", path)
-    if spec is None or spec.loader is None:
-        return None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def edn_string(value):
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
-    return '"' + escaped + '"'
-
-
-def format_crap(value):
-    text = f"{value:.4f}".rstrip("0").rstrip(".")
-    if "." not in text:
-        text = text + ".0"
-    return text
-
-
-def render(rows):
-    lines = ["{:entries ["]
-    for row in rows:
-        parts = [":name " + edn_string(row.name), ":namespace " + edn_string(row.namespace)]
-        if row.complexity is not None:
-            parts.append(":complexity " + str(row.complexity))
-        token = "nil" if row.crap is None else format_crap(row.crap)
-        parts.append(":crap " + token)
-        lines.append("  {" + ", ".join(parts) + "}")
-    lines.append("]}")
-    return "\n".join(lines) + "\n"
-
-
-def read_rows(scope, path):
-    file_path = Path(path)
-    if not file_path.is_file():
-        return []
-    text = file_path.read_text(encoding="utf-8")
-    if "{:entries" not in text:
-        raise ValueError("unreadable " + path)
-    return scope.parse_crap_edn(text)
-
-
-def names_for(rows):
-    found = {}
-    for row in rows:
-        found.setdefault(row.name, []).append(row)
-    return found
-
-
-def take_namespace(row, by_name, path):
-    hits = by_name.get(row.name, [])
-    if len(hits) != 1:
-        return row.namespace
-    chosen = hits[0].namespace
-    if chosen == row.namespace:
-        return row.namespace
-    print(
-        "ub-gates: crapper join file="
-        + path
-        + " name="
-        + row.name
-        + " namespace "
-        + row.namespace
-        + " -> "
-        + chosen
-    )
-    return chosen
-
-
-def align(scope, manifest_path):
-    emitted = []
-    seen = set()
-    text = Path(manifest_path).read_text(encoding="utf-8")
-    for line in text.splitlines():
-        if line.strip() == "":
-            continue
-        path, base_edn, head_edn = line.split("\t")
-        by_name = names_for(read_rows(scope, head_edn))
-        for row in read_rows(scope, base_edn):
-            row.namespace = take_namespace(row, by_name, path)
-            key = (row.namespace, row.name)
-            if key in seen:
-                continue
-            seen.add(key)
-            emitted.append(row)
-    return render(emitted)
-
-
-def main():
-    scope = load_scope(sys.argv[1])
-    if scope is None:
-        return 1
-    try:
-        body = align(scope, sys.argv[2])
-    except (OSError, ValueError, UnicodeError):
-        return 1
-    Path(sys.argv[3]).write_text(body, encoding="utf-8")
-    return 0
-
-
-sys.exit(main())
-PY
-}
-
-link_base_coverage() {
-  local base_root="$1"
-  local repo_root="$2"
-  if [[ -d "${repo_root}/target/coverage" ]]; then
-    mkdir -p "${base_root}/target"
-    ln -s "${repo_root}/target/coverage" "${base_root}/target/coverage"
-  fi
-  if [[ -d "${repo_root}/coverage" ]]; then
-    ln -s "${repo_root}/coverage" "${base_root}/coverage"
-  fi
-}
-
 base_edn_readable() {
   local path="$1"
   [[ -f "${path}" && -r "${path}" && -s "${path}" ]]
 }
 
-# Score the merge-base sources one file at a time under existing coverage.
-# A missing, empty, or unreadable score fails closed. --no-coverage is not used.
+drop_base_worktree() {
+  local dest="$1"
+  if [[ -z "${dest}" ]]; then
+    return 0
+  fi
+  git worktree remove --force "${dest}" >/dev/null 2>&1 || rm -rf "${dest}"
+  git worktree prune >/dev/null 2>&1 || true
+}
+
+add_base_worktree() {
+  local dest="$1"
+  local rc
+  if [[ -e "${dest}" ]]; then
+    rmdir "${dest}" 2>/dev/null || rm -rf "${dest}"
+  fi
+  set +e
+  git worktree add --detach "${dest}" "${MERGE_BASE}"
+  rc=$?
+  set -e
+  return "${rc}"
+}
+
+# Run UB_GATES_COVERAGE_CMD inside the base worktree. Head lcov is not copied.
+# A failed command, or lcov that misses a base file, fails closed.
+run_base_coverage() {
+  local root="$1"
+  local listing="$2"
+  local rc
+  if [[ -z "${UB_GATES_COVERAGE_CMD:-}" ]]; then
+    return 0
+  fi
+  log "ub-gates: base coverage worktree ${root}"
+  set +e
+  (
+    cd "${root}"
+    bash -c "${UB_GATES_COVERAGE_CMD}"
+  )
+  rc=$?
+  set -e
+  if [[ "${rc}" -ne 0 ]]; then
+    log "ub-gates: base coverage command failed"
+    return 1
+  fi
+  python3 "${SCOPE_PY}" lcov-covers --root "${root}" --list "${listing}"
+}
+
+# Score merge-base files in a worktree at MERGE_BASE. Base coverage is the
+# coverage command run in that worktree, never the head lcov. --no-coverage
+# is not used. A missing or unreadable score fails closed.
 write_base_crap_edn() {
-  local base_root work file dest rc prc idx src manifest repo_root join_log status
+  local base_root work file rc prc idx src manifest repo_root join_log status listing
   local -a base_files=()
+  local -a base_args=()
   BASE_EDN=""
   status=0
   repo_root="$(pwd)"
   base_root="$(mktemp -d "${TMPDIR:-/tmp}/ub-crap-base.XXXXXX")"
   work="$(mktemp -d "${TMPDIR:-/tmp}/ub-crap-join.XXXXXX")"
   manifest="${work}/manifest"
+  listing="${work}/files.txt"
   : >"${manifest}"
+  : >"${listing}"
   for file in "${SCOPE_FILES[@]}"; do
     if git cat-file -e "${MERGE_BASE}:${file}" 2>/dev/null; then
-      dest="${base_root}/${file}"
-      mkdir -p "$(dirname "${dest}")"
-      git show "${MERGE_BASE}:${file}" >"${dest}"
       base_files+=("${file}")
+      printf '%s\n' "${file}" >>"${listing}"
     fi
   done
   if [[ "${#base_files[@]}" -eq 0 ]]; then
     rm -rf "${base_root}" "${work}"
     return 0
   fi
-  link_base_coverage "${base_root}" "${repo_root}" || status=1
+  if ! add_base_worktree "${base_root}"; then
+    rm -rf "${work}"
+    return 1
+  fi
+  log "ub-gates: base worktree ${MERGE_BASE}"
+  if ! run_base_coverage "${base_root}" "${listing}"; then
+    status=1
+  fi
+  base_args=(--threshold 10)
+  if [[ -n "${UB_GATES_COVERAGE_CMD:-}" ]]; then
+    base_args+=(--use-existing-coverage)
+  fi
   idx=0
   if [[ "${status}" -eq 0 ]]; then
     for file in "${base_files[@]}"; do
-      log "ub-gates: base crapper --use-existing-coverage ${file}"
+      log "ub-gates: base crapper ${base_args[*]} ${file}"
       set +e
       (
         cd "${base_root}"
-        "${CRAPPER}" --use-existing-coverage --threshold 10 "${file}"
+        "${CRAPPER}" "${base_args[@]}" "${file}"
       )
       rc=$?
       set -e
@@ -520,8 +452,8 @@ write_base_crap_edn() {
       if [[ "${status}" -ne 0 ]]; then
         break
       fi
-      # --root is the repo so the head file and Cargo.toml resolve. Metrics
-      # land in .metrics/crap.edn; the saved head report is restored later.
+      # Head probe names the function in the real tree. Its metrics overwrite
+      # .metrics/crap.edn; the saved head report is restored later.
       set +e
       "${CRAPPER}" --root "${repo_root}" --use-existing-coverage --threshold 10 "${file}"
       prc=$?
@@ -541,7 +473,7 @@ write_base_crap_edn() {
   if [[ "${status}" -eq 0 ]]; then
     mkdir -p .metrics
     set +e
-    join_log="$(align_base_crap "${manifest}" ".metrics/crap-base.edn")"
+    join_log="$(python3 "${SCOPE_PY}" align-base --manifest "${manifest}" --dest ".metrics/crap-base.edn")"
     rc=$?
     set -e
     if [[ "${rc}" -ne 0 ]]; then
@@ -552,7 +484,8 @@ write_base_crap_edn() {
       printf '%s\n' "${join_log}"
     fi
   fi
-  rm -rf "${base_root}" "${work}"
+  drop_base_worktree "${base_root}"
+  rm -rf "${work}"
   if [[ "${status}" -ne 0 ]]; then
     BASE_EDN=""
     return 1
