@@ -18,7 +18,12 @@
 # coverage.py before the mutator. Blocking mode fails when a changed file has
 # mutation sites and none were killed or survived. Kills in another file do not
 # cover it. An uncovered site on a changed line is that miss when no
-# changed-line site was killed or survived. .pyi and .d.ts are outside gate scope.
+# changed-line site was killed or survived. The mutator reports N/A and passes
+# only when every changed line in every gate-relevant file is test code: an
+# is_test_path (tests/ and the other test paths) or a line inside a #[cfg(test)]
+# item. Any other diff uses the per-file and uncovered-line checks above,
+# unchanged. A scan that cannot classify a line fails closed. A diff failure
+# still fails. .pyi and .d.ts are outside gate scope.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,6 +61,7 @@ write_outcome() {
     if [[ -n "${MUTATOR_SURVIVED:-}" ]]; then printf 'mutator_survived=%s\n' "${MUTATOR_SURVIVED}"; fi
     if [[ -n "${MUTATOR_UNCOVERED:-}" ]]; then printf 'mutator_uncovered=%s\n' "${MUTATOR_UNCOVERED}"; fi
     if [[ -n "${MUTATOR_NOT_RUN:-}" ]]; then printf 'mutator_not_run=%s\n' "${MUTATOR_NOT_RUN}"; fi
+    if [[ -n "${MUTATOR_NA:-}" ]]; then printf 'mutator_na=%s\n' "${MUTATOR_NA}"; fi
     if [[ -n "${TOOL_ERROR:-}" ]]; then printf 'tool_error=%s\n' "${TOOL_ERROR}"; fi
   } >"${OUTCOME_FILE}"
 }
@@ -128,6 +134,7 @@ append_step_summary() {
     if [[ -n "${MUTATOR_SURVIVED:-}" ]]; then echo "| mutator_survived | ${MUTATOR_SURVIVED} |"; fi
     if [[ -n "${MUTATOR_UNCOVERED:-}" ]]; then echo "| mutator_uncovered | ${MUTATOR_UNCOVERED} |"; fi
     if [[ -n "${MUTATOR_NOT_RUN:-}" ]]; then echo "| mutator_not_run | ${MUTATOR_NOT_RUN} |"; fi
+    if [[ -n "${MUTATOR_NA:-}" ]]; then echo "| mutator_na | ${MUTATOR_NA} |"; fi
     echo ""
     echo "Outcome file: \`${OUTCOME_FILE}\`"
   } >>"${GITHUB_STEP_SUMMARY}"
@@ -491,6 +498,7 @@ read_mutator_counts() {
   MUTATOR_COVERED=0
   MUTATOR_NOT_RUN=0
   MUTATOR_NO_COVERAGE=0
+  MUTATOR_NA=0
   if [[ -d .metrics/mutate ]]; then
     set +e
     changed_json="$(python3 "${SCOPE_PY}" lines --base "${MERGE_BASE}" 2>/dev/null)"
@@ -538,8 +546,202 @@ def source_of(text: str) -> str:
         return ""
     return match.group(1).replace('\\"', '"').replace("\\\\", "\\")
 
+def _gate_relevant(path: str) -> bool:
+    if path.endswith(".pyi") or path.endswith(".d.ts"):
+        return False
+    return path.endswith((
+        ".py", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs",
+        ".go", ".rs", ".java", ".clj", ".cljs", ".cljc",
+    ))
+
+def _is_test_path(path: str) -> bool:
+    # Same rules as bash is_test_path. A tests/ file is test code.
+    base = path.rsplit("/", 1)[-1]
+    wrapped = "/" + path.strip("/") + "/"
+    dirs = ("/test/", "/tests/", "/spec/", "/specs/", "/testdata/", "/__tests__/", "/fixtures/")
+    if any(part in wrapped for part in dirs):
+        return True
+    if base.startswith("test_") and base.endswith(".py"):
+        return True
+    if base.endswith(("_test.py", "_test.go", "_test.rs", "Test.java")):
+        return True
+    test_suffixes = (
+        ".test.ts", ".test.tsx", ".test.js", ".test.jsx", ".test.mts", ".test.cts",
+        ".test.mjs", ".test.cjs", ".spec.ts", ".spec.tsx", ".spec.js", ".spec.jsx",
+        ".spec.mts", ".spec.cts", ".spec.mjs", ".spec.cjs",
+    )
+    return base.endswith(test_suffixes)
+
+def _blank_rust(text: str):
+    # Hide comments and strings so a #[cfg(test)] inside one is not an item.
+    # None means the scan did not finish; the caller fails closed.
+    chars = list(text)
+    i = 0
+    n = len(chars)
+
+    def spaces(j: int, stop: int) -> None:
+        while j < stop:
+            if chars[j] != "\n":
+                chars[j] = " "
+            j += 1
+
+    while i < n:
+        c = chars[i]
+        nxt = chars[i + 1] if i + 1 < n else ""
+        if c == "/" and nxt == "/":
+            j = i
+            while j < n and chars[j] != "\n":
+                chars[j] = " "
+                j += 1
+            i = j
+            continue
+        if c == "/" and nxt == "*":
+            depth = 1
+            chars[i] = chars[i + 1] = " "
+            i += 2
+            while i < n and depth:
+                if chars[i] == "/" and i + 1 < n and chars[i + 1] == "*":
+                    depth += 1
+                    chars[i] = chars[i + 1] = " "
+                    i += 2
+                    continue
+                if chars[i] == "*" and i + 1 < n and chars[i + 1] == "/":
+                    depth -= 1
+                    chars[i] = chars[i + 1] = " "
+                    i += 2
+                    continue
+                if chars[i] != "\n":
+                    chars[i] = " "
+                i += 1
+            if depth:
+                return None
+            continue
+        raw = False
+        if c in {"r", "b"} and nxt in {'"', "#"}:
+            raw = c == "r" or (c == "b" and nxt == '"')
+            if c == "b" and nxt == "r":
+                raw = True
+        if c == "b" and nxt == "r" and i + 2 < n and chars[i + 2] in {'"', "#"}:
+            chars[i] = chars[i + 1] = " "
+            i += 2
+            c = chars[i]
+            nxt = chars[i + 1] if i + 1 < n else ""
+            raw = True
+        if raw or c == '"':
+            start = i
+            j = i + (0 if c == '"' and not raw else 1)
+            if raw and c != '"':
+                j = i
+            hashes = 0
+            if raw:
+                while j < n and chars[j] == "#":
+                    hashes += 1
+                    j += 1
+                if j >= n or chars[j] != '"':
+                    i += 1
+                    continue
+            else:
+                j = i
+            j += 1
+            closer = '"' + ("#" * hashes)
+            while j < n and not text.startswith(closer, j):
+                j += 1
+            if j >= n:
+                return None
+            spaces(start, j + len(closer))
+            i = j + len(closer)
+            continue
+        i += 1
+    return "".join(chars)
+
+def _cfg_test_lines(text: str):
+    masked = _blank_rust(text)
+    if masked is None:
+        return None
+    found = set()
+    for match in re.finditer(r"#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]", masked):
+        cursor = match.end()
+        while True:
+            while cursor < len(masked) and masked[cursor].isspace():
+                cursor += 1
+            if cursor >= len(masked) or masked[cursor] != "#":
+                break
+            nxt = cursor + 1
+            while nxt < len(masked) and masked[nxt].isspace():
+                nxt += 1
+            if nxt >= len(masked) or masked[nxt] != "[":
+                break
+            depth = 0
+            while nxt < len(masked):
+                if masked[nxt] == "[":
+                    depth += 1
+                elif masked[nxt] == "]":
+                    depth -= 1
+                    if depth == 0:
+                        nxt += 1
+                        break
+                nxt += 1
+            else:
+                return None
+            cursor = nxt
+        depth = 0
+        seen_brace = False
+        end = cursor
+        while end < len(masked):
+            char = masked[end]
+            if char in "([{":
+                depth += 1
+                if char == "{":
+                    seen_brace = True
+            elif char in ")]}":
+                depth = max(0, depth - 1)
+                if depth == 0 and seen_brace and char == "}":
+                    end += 1
+                    break
+            elif char == ";" and depth == 0 and not seen_brace:
+                end += 1
+                break
+            end += 1
+        else:
+            return None
+        first = text.count("\n", 0, match.start()) + 1
+        last = text.count("\n", 0, max(match.start(), end - 1)) + 1
+        found.update(range(first, last + 1))
+    return found
+
+def _changed_lines_are_test(changed: dict) -> bool:
+    # True only when every changed line of every gate-relevant file is test
+    # code. One production line, or a scan we cannot finish, is false.
+    saw = False
+    for path, lines in changed.items():
+        if not isinstance(path, str) or not _gate_relevant(path):
+            continue
+        if not isinstance(lines, list):
+            return False
+        if _is_test_path(path):
+            if lines:
+                saw = True
+            continue
+        if not path.endswith(".rs"):
+            if lines:
+                return False
+            continue
+        try:
+            source = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return False
+        spans = _cfg_test_lines(source)
+        if spans is None:
+            return False
+        for number in lines:
+            if not isinstance(number, int) or number not in spans:
+                return False
+            saw = True
+    return saw
+
 sites = killed = survived = uncovered = 0
 bare = False
+na = False
 reason = ""
 root = Path(".metrics/mutate")
 by_source: dict[str, list[int]] = {}
@@ -574,21 +776,26 @@ else:
     if not isinstance(changed, dict):
         mark_uncovered_files(" and the diff was unreadable")
     else:
-        mark_uncovered_files("")
-        reported = status_lines(Path(os.environ["UB_MUTATOR_STATUS"]))
-        for source, lines in changed.items():
-            if not isinstance(lines, list):
-                continue
-            numbers = [int(number) for number in lines]
-            uncovered_hit = hits(reported["UNCOVERED"], source, numbers)
-            ran = hits(reported["KILLED"], source, numbers) or hits(reported["SURVIVED"], source, numbers)
-            if uncovered_hit and not ran:
-                bare = True
-                reason = f"{source} uncovered on a changed line and no changed-line mutant ran"
+        if _changed_lines_are_test(changed):
+            na = True
+        else:
+            mark_uncovered_files("")
+            reported = status_lines(Path(os.environ["UB_MUTATOR_STATUS"]))
+            for source, lines in changed.items():
+                if not isinstance(lines, list):
+                    continue
+                numbers = [int(number) for number in lines]
+                uncovered_hit = hits(reported["UNCOVERED"], source, numbers)
+                ran = hits(reported["KILLED"], source, numbers) or hits(reported["SURVIVED"], source, numbers)
+                if uncovered_hit and not ran:
+                    bare = True
+                    reason = f"{source} uncovered on a changed line and no changed-line mutant ran"
 if bare:
     print("bare")
     if reason:
         print(f"ub-gates: mutator no-coverage: {reason}", file=sys.stderr)
+elif na:
+    print("na")
 print(sites)
 print(killed)
 print(survived)
@@ -597,6 +804,9 @@ PY
     )"
     if [[ "${counts%%$'\n'*}" == "bare" ]]; then
       MUTATOR_NO_COVERAGE=1
+      counts="${counts#*$'\n'}"
+    elif [[ "${counts%%$'\n'*}" == "na" ]]; then
+      MUTATOR_NA=1
       counts="${counts#*$'\n'}"
     fi
     MUTATOR_SITES="${counts%%$'\n'*}"
@@ -609,6 +819,9 @@ PY
     MUTATOR_NOT_RUN=$((MUTATOR_SITES - MUTATOR_COVERED - MUTATOR_UNCOVERED))
   fi
   log "ub-gates: mutator sites=${MUTATOR_SITES} covered=${MUTATOR_COVERED} killed=${MUTATOR_KILLED} survived=${MUTATOR_SURVIVED} uncovered=${MUTATOR_UNCOVERED} not_run=${MUTATOR_NOT_RUN}"
+  if [[ "${MUTATOR_NA}" == "1" ]]; then
+    log "ub-gates: mutator N/A (0 production mutation sites)"
+  fi
 }
 
 run_mutator() {
