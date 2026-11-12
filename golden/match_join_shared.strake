@@ -1,0 +1,25 @@
+strake 1
+
+fn pick(r: result i64 unit) -> i64
+  match r
+    ok v ->
+      u = v
+    err _ ->
+      u = 0
+  end
+  ret u
+end
+
+test match_join_shared.ok
+  v = ok i64 7
+  n = call pick(v)
+  assert.eq n 7
+  ret 0
+end
+
+test match_join_shared.err
+  v = err unit unit
+  n = call pick(v)
+  assert.eq n 0
+  ret 0
+end
