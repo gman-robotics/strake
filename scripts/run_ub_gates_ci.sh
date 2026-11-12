@@ -11,6 +11,14 @@
 # They are never ran_clean. Blocking mode exits 1. Advisory mode records the
 # same outcome and exits 0.
 # A failed git diff --name-only is tool_error. A missing merge base is tool_error.
+# The base crapper runs in a git worktree at the merge base. When
+# UB_GATES_COVERAGE_CMD is set, that command runs in the worktree and crapper
+# reads that lcov, never the head lcov. A failed base coverage command, or
+# lcov that misses a base file, is tool_error. --no-coverage is not used.
+# Base and head rows join on file path plus function name. A missing or
+# unreadable base score is tool_error and blocks, including a readable file
+# that is not crapper entries. Pass is CRAP under 10.
+# --lines and blocking mode are unchanged.
 # Base-ref fetch honors UB_GATES_BASE_REF, uses no depth limit, and unshallows
 # a shallow clone. A mutator budget timeout fails the job in blocking mode.
 # Advisory mode reports that timeout and still exits 0. The step summary's
@@ -332,41 +340,176 @@ PY
   return 0
 }
 
-score_base_crapper() {
-  local base_root file dest rc
-  local -a base_files
-  BASE_EDN=""
-  base_root="$(mktemp -d "${TMPDIR:-/tmp}/ub-crap-base.XXXXXX")"
-  base_files=()
-  for file in "${SCOPE_FILES[@]}"; do
-    if git cat-file -e "${MERGE_BASE}:${file}" 2>/dev/null; then
-      dest="${base_root}/${file}"
-      mkdir -p "$(dirname "${dest}")"
-      git show "${MERGE_BASE}:${file}" >"${dest}"
-      base_files+=("${file}")
-    fi
-  done
-  if [[ "${#base_files[@]}" -eq 0 ]]; then
-    rm -rf "${base_root}"
+base_edn_readable() {
+  local path="$1"
+  [[ -f "${path}" && -r "${path}" && -s "${path}" ]]
+}
+
+drop_base_worktree() {
+  local dest="$1"
+  if [[ -z "${dest}" ]]; then
     return 0
   fi
+  git worktree remove --force "${dest}" >/dev/null 2>&1 || rm -rf "${dest}"
+  git worktree prune >/dev/null 2>&1 || true
+}
+
+add_base_worktree() {
+  local dest="$1"
+  local rc
+  if [[ -e "${dest}" ]]; then
+    rmdir "${dest}" 2>/dev/null || rm -rf "${dest}"
+  fi
+  set +e
+  git worktree add --detach "${dest}" "${MERGE_BASE}"
+  rc=$?
+  set -e
+  return "${rc}"
+}
+
+# Run UB_GATES_COVERAGE_CMD inside the base worktree. Head lcov is not copied.
+# A failed command, or lcov that misses a base file, fails closed.
+run_base_coverage() {
+  local root="$1"
+  local listing="$2"
+  local rc
+  if [[ -z "${UB_GATES_COVERAGE_CMD:-}" ]]; then
+    return 0
+  fi
+  log "ub-gates: base coverage worktree ${root}"
   set +e
   (
-    cd "${base_root}"
-    "${CRAPPER}" --no-coverage --threshold 10 "${base_files[@]}"
+    cd "${root}"
+    bash -c "${UB_GATES_COVERAGE_CMD}"
   )
   rc=$?
   set -e
-  if [[ -f "${base_root}/.metrics/crap.edn" ]]; then
-    mkdir -p .metrics
-    cp "${base_root}/.metrics/crap.edn" .metrics/crap-base.edn
-    BASE_EDN=".metrics/crap-base.edn"
-  fi
-  rm -rf "${base_root}"
-  if [[ "${rc}" -ne 0 && "${rc}" -ne 2 ]]; then
+  if [[ "${rc}" -ne 0 ]]; then
+    log "ub-gates: base coverage command failed"
     return 1
   fi
-  [[ -n "${BASE_EDN}" ]]
+  python3 "${SCOPE_PY}" lcov-covers --root "${root}" --list "${listing}"
+}
+
+# Score merge-base files in a worktree at MERGE_BASE. Base coverage is the
+# coverage command run in that worktree, never the head lcov. --no-coverage
+# is not used. A missing or unreadable score fails closed.
+write_base_crap_edn() {
+  local base_root work file rc prc idx src manifest repo_root join_log status listing
+  local -a base_files=()
+  local -a base_args=()
+  BASE_EDN=""
+  status=0
+  repo_root="$(pwd)"
+  base_root="$(mktemp -d "${TMPDIR:-/tmp}/ub-crap-base.XXXXXX")"
+  work="$(mktemp -d "${TMPDIR:-/tmp}/ub-crap-join.XXXXXX")"
+  manifest="${work}/manifest"
+  listing="${work}/files.txt"
+  : >"${manifest}"
+  : >"${listing}"
+  for file in "${SCOPE_FILES[@]}"; do
+    if git cat-file -e "${MERGE_BASE}:${file}" 2>/dev/null; then
+      base_files+=("${file}")
+      printf '%s\n' "${file}" >>"${listing}"
+    fi
+  done
+  if [[ "${#base_files[@]}" -eq 0 ]]; then
+    rm -rf "${base_root}" "${work}"
+    return 0
+  fi
+  if ! add_base_worktree "${base_root}"; then
+    rm -rf "${work}"
+    return 1
+  fi
+  log "ub-gates: base worktree ${MERGE_BASE}"
+  if ! run_base_coverage "${base_root}" "${listing}"; then
+    status=1
+  fi
+  base_args=(--threshold 10)
+  if [[ -n "${UB_GATES_COVERAGE_CMD:-}" ]]; then
+    base_args+=(--use-existing-coverage)
+  fi
+  idx=0
+  if [[ "${status}" -eq 0 ]]; then
+    for file in "${base_files[@]}"; do
+      log "ub-gates: base crapper ${base_args[*]} ${file}"
+      set +e
+      (
+        cd "${base_root}"
+        "${CRAPPER}" "${base_args[@]}" "${file}"
+      )
+      rc=$?
+      set -e
+      src="${base_root}/.metrics/crap.edn"
+      if [[ "${rc}" -ne 0 && "${rc}" -ne 2 ]]; then
+        status=1
+        break
+      fi
+      if ! base_edn_readable "${src}"; then
+        status=1
+        break
+      fi
+      cp "${src}" "${work}/base-${idx}.edn" || status=1
+      if [[ "${status}" -ne 0 ]]; then
+        break
+      fi
+      # Head probe names the function in the real tree. Its metrics overwrite
+      # .metrics/crap.edn; the saved head report is restored later.
+      set +e
+      "${CRAPPER}" --root "${repo_root}" --use-existing-coverage --threshold 10 "${file}"
+      prc=$?
+      set -e
+      if [[ "${prc}" -eq 0 || "${prc}" -eq 2 ]] && base_edn_readable "${repo_root}/.metrics/crap.edn"; then
+        cp "${repo_root}/.metrics/crap.edn" "${work}/head-${idx}.edn" || status=1
+      else
+        status=1
+      fi
+      if [[ "${status}" -ne 0 ]]; then
+        break
+      fi
+      printf '%s\t%s\t%s\n' "${file}" "${work}/base-${idx}.edn" "${work}/head-${idx}.edn" >>"${manifest}"
+      idx=$((idx + 1))
+    done
+  fi
+  if [[ "${status}" -eq 0 ]]; then
+    mkdir -p .metrics
+    set +e
+    join_log="$(python3 "${SCOPE_PY}" align-base --manifest "${manifest}" --dest ".metrics/crap-base.edn")"
+    rc=$?
+    set -e
+    if [[ "${rc}" -ne 0 ]]; then
+      status=1
+    elif ! base_edn_readable ".metrics/crap-base.edn"; then
+      status=1
+    elif [[ -n "${join_log}" ]]; then
+      printf '%s\n' "${join_log}"
+    fi
+  fi
+  drop_base_worktree "${base_root}"
+  rm -rf "${work}"
+  if [[ "${status}" -ne 0 ]]; then
+    BASE_EDN=""
+    return 1
+  fi
+  BASE_EDN=".metrics/crap-base.edn"
+  base_edn_readable "${BASE_EDN}"
+}
+
+score_base_crapper() {
+  local saved="" status=0
+  if [[ -f .metrics/crap.edn ]]; then
+    saved="$(mktemp)"
+    cp .metrics/crap.edn "${saved}" || return 1
+  fi
+  if ! write_base_crap_edn; then
+    status=1
+  fi
+  if [[ -n "${saved}" ]]; then
+    mkdir -p .metrics
+    cp "${saved}" .metrics/crap.edn || status=1
+    rm -f "${saved}"
+  fi
+  return "${status}"
 }
 
 run_crapper() {

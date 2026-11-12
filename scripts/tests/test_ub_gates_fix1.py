@@ -481,9 +481,9 @@ class CrapperChangedScopeTests(unittest.TestCase):
             "#!/usr/bin/env bash\n"
             "mkdir -p .metrics\n"
             f"src={str(head_path)!r}\n"
-            'if [[ " $* " == *" --no-coverage "* ]]; then\n'
-            f"  src={str(base_path)!r}\n"
-            "fi\n"
+            'case "$PWD" in\n'
+            f"  *ub-crap-base*) src={str(base_path)!r} ;;\n"
+            "esac\n"
             'cp "$src" .metrics/crap.edn\n'
             "exit 0\n",
         )
@@ -812,6 +812,725 @@ class WorkflowTextTests(unittest.TestCase):
         self.assertIn("`uv`", readme)
         self.assertIn("`cargo install`", readme)
         self.assertIn("20 minutes", readme)
+
+
+def _crap_row(name: str, namespace: str, crap: object, complexity: int) -> str:
+    token = "nil" if crap is None else str(crap)
+    return (
+        f'  {{:name "{name}", :namespace "{namespace}", '
+        f":complexity {complexity}, :coverage 0.0, :crap {token}}}"
+    )
+
+
+def _crap_edn(rows: list[str]) -> str:
+    return "{:entries [\n" + "\n".join(rows) + "\n]}\n"
+
+
+class CrapperBaseJoinTests(unittest.TestCase):
+    """Base rows join on file path and function name, and CRAP is compared to CRAP."""
+
+    _FILE = "crates/strake/src/body/check.rs"
+    _HEAD_NS = "strake::body::check"
+    _BASE_NS = "crate::check"
+
+    def _run(
+        self,
+        tmp: str,
+        head_rows: list[str],
+        base_rows: list[str],
+        *,
+        base_mode: str = "score",
+        source_before: str | None = None,
+        source_after: str | None = None,
+        spans: list[dict[str, object]] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        repo = Path(tmp)
+        _init_repo(repo)
+        path = repo / self._FILE
+        path.parent.mkdir(parents=True)
+        before = source_before or "fn check_match() {\n    let x = 1;\n}\nfn check_if() {\n    let y = 1;\n}\n"
+        after = source_after or "fn check_match() {\n    let x = 2;\n}\nfn check_if() {\n    let y = 2;\n}\n"
+        path.write_text(before, encoding="utf-8")
+        _git(repo, "add", self._FILE)
+        _git(repo, "commit", "-m", "base")
+        _git(repo, "checkout", "-b", "feat")
+        path.write_text(after, encoding="utf-8")
+        _git(repo, "add", self._FILE)
+        _git(repo, "commit", "-m", "change")
+        bin_dir = repo / "bin"
+        bin_dir.mkdir()
+        head_path = repo / "head.edn"
+        base_path = repo / "base.edn"
+        head_path.write_text(_crap_edn(head_rows), encoding="utf-8")
+        base_path.write_text(_crap_edn(base_rows), encoding="utf-8")
+        log_path = repo / "crapper.log"
+        _write_exe(
+            bin_dir / "crapper",
+            "#!/usr/bin/env bash\n"
+            f"printf '%s\\n' \"$PWD :: $*\" >> {shlex.quote(str(log_path))}\n"
+            'if [[ " $* " == *" --no-coverage "* ]]; then\n'
+            "  printf '%s\\n' 'unexpected --no-coverage' >&2\n"
+            "  exit 3\n"
+            "fi\n"
+            'root="."\n'
+            "prev=\n"
+            'for arg in "$@"; do\n'
+            '  if [[ "${prev}" == "--root" ]]; then root="${arg}"; fi\n'
+            '  prev="${arg}"\n'
+            "done\n"
+            'mkdir -p "${root}/.metrics"\n'
+            f"src={shlex.quote(str(head_path))}\n"
+            'case "$PWD" in\n'
+            f"  *ub-crap-base*) src={shlex.quote(str(base_path))} ;;\n"
+            "esac\n"
+            f"mode={shlex.quote(base_mode)}\n"
+            'if [[ "$PWD" == *ub-crap-base* && "${mode}" == missing ]]; then\n'
+            "  exit 0\n"
+            "fi\n"
+            'if [[ "$PWD" == *ub-crap-base* && "${mode}" == unreadable ]]; then\n'
+            "  printf '%s\\n' 'not edn' > \"${root}/.metrics/crap.edn\"\n"
+            "  exit 0\n"
+            "fi\n"
+            'cp "${src}" "${root}/.metrics/crap.edn"\n'
+            "exit 0\n",
+        )
+        _write_exe(
+            bin_dir / "dryer",
+            "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+        )
+        _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+        if spans is None:
+            spans = [
+                {
+                    "namespace": self._HEAD_NS,
+                    "name": "check_match",
+                    "start_line": 1,
+                    "end_line": 3,
+                    "path": self._FILE,
+                },
+                {
+                    "namespace": self._HEAD_NS,
+                    "name": "check_if",
+                    "start_line": 4,
+                    "end_line": 6,
+                    "path": self._FILE,
+                },
+            ]
+        span_path = repo / "spans.json"
+        span_path.write_text(json.dumps(spans), encoding="utf-8")
+        env = _env(
+            bin_dir,
+            UB_GATES_ADVISORY="0",
+            UB_GATES_BASE_REF="main",
+            UB_GATES_MUTATOR_BUDGET_SECS="30",
+            UB_SCOPE_FUNCTIONS_JSON=str(span_path),
+            UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+        )
+        return _run_ci(repo, env)
+
+    def _pair(self, name: str, base_crap: object, head_crap: object, base_cc: int, head_cc: int) -> tuple[str, str]:
+        return (
+            _crap_row(name, self._BASE_NS, base_crap, base_cc),
+            _crap_row(name, self._HEAD_NS, head_crap, head_cc),
+        )
+
+    def test_risen_crap_still_fails_when_namespaces_differ(self) -> None:
+        base_match, head_match = self._pair("check_match", 20.0, 28.0, 20, 28)
+        base_if, head_if = self._pair("check_if", 19.0, 19.0, 19, 19)
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, [head_match, head_if], [base_match, base_if])
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=ran_with_findings", _outcome(Path(tmp)))
+            self.assertIn(f"crapper findings {self._HEAD_NS} check_match crap=28.0", text)
+            self.assertIn(f"crapper debt {self._HEAD_NS} check_if crap=19.0", text)
+            self.assertIn(
+                f"crapper join file={self._FILE} name=check_match namespace {self._BASE_NS} -> {self._HEAD_NS}",
+                text,
+            )
+            self.assertNotIn("--no-coverage", text)
+
+    def test_lower_or_equal_crap_is_debt_across_namespace_prefixes(self) -> None:
+        # PR #46 replay: check_match 28 -> 26 and check_if 19 -> 19, joined on
+        # the file path plus the function name. crate:: and strake::body:: are
+        # the same functions.
+        base_match, head_match = self._pair("check_match", 28.0, 26.0, 28, 26)
+        base_if, head_if = self._pair("check_if", 19.0, 19.0, 19, 19)
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, [head_match, head_if], [base_match, base_if])
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            outcome = _outcome(Path(tmp))
+            self.assertIn("outcome=ran_clean", outcome)
+            self.assertIn("crapper_findings=0", outcome)
+            self.assertIn("crapper_debt=2", outcome)
+            self.assertIn(f"crapper debt {self._HEAD_NS} check_match crap=26.0", text)
+            self.assertIn(f"crapper debt {self._HEAD_NS} check_if crap=19.0", text)
+            self.assertNotIn("crapper findings", text)
+            self.assertIn(
+                f"crapper join file={self._FILE} name=check_match namespace {self._BASE_NS} -> {self._HEAD_NS}",
+                text,
+            )
+            self.assertIn(
+                f"crapper join file={self._FILE} name=check_if namespace {self._BASE_NS} -> {self._HEAD_NS}",
+                text,
+            )
+            log = (Path(tmp) / "crapper.log").read_text(encoding="utf-8")
+            self.assertIn("--use-existing-coverage", log)
+            self.assertNotIn("--no-coverage", log)
+
+    def test_new_function_over_threshold_fails(self) -> None:
+        base_if, head_if = self._pair("check_if", 19.0, 19.0, 19, 19)
+        fresh = _crap_row("fresh", self._HEAD_NS, 10.0, 10)
+        spans = [
+            {
+                "namespace": self._HEAD_NS,
+                "name": "check_if",
+                "start_line": 1,
+                "end_line": 3,
+                "path": self._FILE,
+            },
+            {
+                "namespace": self._HEAD_NS,
+                "name": "fresh",
+                "start_line": 4,
+                "end_line": 6,
+                "path": self._FILE,
+            },
+        ]
+        before = "fn check_if() {\n    let y = 1;\n}\nfn fresh() {\n    let z = 1;\n}\n"
+        after = "fn check_if() {\n    let y = 1;\n}\nfn fresh() {\n    let z = 2;\n}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                [head_if, fresh],
+                [base_if],
+                spans=spans,
+                source_before=before,
+                source_after=after,
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=ran_with_findings", _outcome(Path(tmp)))
+            self.assertIn(f"crapper findings {self._HEAD_NS} fresh crap=10.0", text)
+            self.assertIn(f"crapper debt {self._HEAD_NS} check_if crap=19.0", text)
+
+    def test_new_function_under_threshold_does_not_fail(self) -> None:
+        base_if, head_if = self._pair("check_if", 19.0, 19.0, 19, 19)
+        fresh = _crap_row("fresh", self._HEAD_NS, 9.0, 9)
+        spans = [
+            {
+                "namespace": self._HEAD_NS,
+                "name": "check_if",
+                "start_line": 1,
+                "end_line": 3,
+                "path": self._FILE,
+            },
+            {
+                "namespace": self._HEAD_NS,
+                "name": "fresh",
+                "start_line": 4,
+                "end_line": 6,
+                "path": self._FILE,
+            },
+        ]
+        before = "fn check_if() {\n    let y = 1;\n}\nfn fresh() {\n    let z = 1;\n}\n"
+        after = "fn check_if() {\n    let y = 1;\n}\nfn fresh() {\n    let z = 2;\n}\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                [head_if, fresh],
+                [base_if],
+                spans=spans,
+                source_before=before,
+                source_after=after,
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            outcome = _outcome(Path(tmp))
+            self.assertIn("outcome=ran_clean", outcome)
+            self.assertIn("crapper_findings=0", outcome)
+            self.assertIn(f"crapper debt {self._HEAD_NS} check_if crap=19.0", text)
+            self.assertNotIn("crapper findings", text)
+            self.assertNotIn("fresh", text)
+
+    def test_same_name_in_two_files_joins_on_the_file_path(self) -> None:
+        repo_files = (
+            ("crates/strake/src/body/check.rs", self._HEAD_NS, self._BASE_NS, 28.0, 26.0),
+            ("crates/strake/src/body/lower.rs", "strake::body::lower", "crate::lower", 5.0, 40.0),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _init_repo(repo)
+            spans = []
+            before = "fn hot() {\n    let x = 1;\n}\n"
+            after = "fn hot() {\n    let x = 2;\n}\n"
+            for path, _head_ns, _base_ns, _base_crap, _head_crap in repo_files:
+                file_path = repo / path
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text(before, encoding="utf-8")
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "base")
+            _git(repo, "checkout", "-b", "feat")
+            for path, head_ns, _base_ns, _base_crap, _head_crap in repo_files:
+                (repo / path).write_text(after, encoding="utf-8")
+                spans.append(
+                    {
+                        "namespace": head_ns,
+                        "name": "hot",
+                        "start_line": 1,
+                        "end_line": 3,
+                        "path": path,
+                    }
+                )
+            _git(repo, "add", ".")
+            _git(repo, "commit", "-m", "change")
+            bin_dir = repo / "bin"
+            bin_dir.mkdir()
+            case_lines = []
+            for path, head_ns, base_ns, base_crap, head_crap in repo_files:
+                head_edn = repo / (Path(path).stem + "-head.edn")
+                base_edn = repo / (Path(path).stem + "-base.edn")
+                head_edn.write_text(
+                    _crap_edn([_crap_row("hot", head_ns, head_crap, int(head_crap))]),
+                    encoding="utf-8",
+                )
+                base_edn.write_text(
+                    _crap_edn([_crap_row("hot", base_ns, base_crap, int(base_crap))]),
+                    encoding="utf-8",
+                )
+                case_lines.append(
+                    f"  {shlex.quote(path)}) head={shlex.quote(str(head_edn))}; "
+                    f"base={shlex.quote(str(base_edn))} ;;"
+                )
+            _write_exe(
+                bin_dir / "crapper",
+                "#!/usr/bin/env bash\n"
+                'root="."\n'
+                "prev=\n"
+                "files=()\n"
+                'for arg in "$@"; do\n'
+                '  if [[ "${prev}" == "--root" ]]; then root="${arg}"; fi\n'
+                '  if [[ "${prev}" != "--root" && "${prev}" != "--threshold" && "${arg}" != --* ]]; then\n'
+                '    files+=("${arg}")\n'
+                "  fi\n"
+                '  prev="${arg}"\n'
+                "done\n"
+                'mkdir -p "${root}/.metrics"\n'
+                'out="${root}/.metrics/crap.edn"\n'
+                "printf '%s\\n' '{:entries [' > \"${out}\"\n"
+                'for file in "${files[@]}"; do\n'
+                "  head=\n"
+                "  base=\n"
+                '  case "$file" in\n'
+                + "\n".join(case_lines)
+                + "\n"
+                "  esac\n"
+                '  src="${head}"\n'
+                '  case "$PWD" in\n'
+                '    *ub-crap-base*) src="${base}" ;;\n'
+                "  esac\n"
+                "  sed -e '1d' -e '$d' \"${src}\" >> \"${out}\"\n"
+                "done\n"
+                "printf '%s\\n' ']}' >> \"${out}\"\n"
+                "exit 0\n",
+            )
+            _write_exe(
+                bin_dir / "dryer",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+            )
+            _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+            span_path = repo / "spans.json"
+            span_path.write_text(json.dumps(spans), encoding="utf-8")
+            env = _env(
+                bin_dir,
+                UB_GATES_ADVISORY="0",
+                UB_GATES_BASE_REF="main",
+                UB_GATES_MUTATOR_BUDGET_SECS="30",
+                UB_SCOPE_FUNCTIONS_JSON=str(span_path),
+                UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+            )
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=ran_with_findings", _outcome(repo))
+            self.assertIn("crapper debt strake::body::check hot crap=26.0", text)
+            self.assertIn("crapper findings strake::body::lower hot crap=40.0", text)
+            self.assertNotIn("crapper findings strake::body::check hot", text)
+            self.assertIn(
+                "crapper join file=crates/strake/src/body/check.rs name=hot namespace crate::check -> strake::body::check",
+                text,
+            )
+            self.assertIn(
+                "crapper join file=crates/strake/src/body/lower.rs name=hot namespace crate::lower -> strake::body::lower",
+                text,
+            )
+
+    def test_missing_base_score_fails_closed(self) -> None:
+        base_if, head_if = self._pair("check_if", 19.0, 19.0, 19, 19)
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, [head_if], [base_if], base_mode="missing")
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            outcome = _outcome(Path(tmp))
+            self.assertIn("outcome=tool_error", outcome)
+            self.assertNotIn("outcome=ran_clean", outcome)
+            self.assertNotIn("outcome=skipped", outcome)
+            self.assertIn("base crapper score failed", text)
+
+    def test_unreadable_base_score_fails_closed(self) -> None:
+        base_if, head_if = self._pair("check_if", 19.0, 19.0, 19, 19)
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, [head_if], [base_if], base_mode="unreadable")
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            outcome = _outcome(Path(tmp))
+            self.assertIn("outcome=tool_error", outcome)
+            self.assertNotIn("outcome=ran_clean", outcome)
+            self.assertNotIn("outcome=skipped", outcome)
+            self.assertNotIn("skipped_no_scope", text)
+            self.assertNotIn("skipped_tools_missing", text)
+            self.assertIn("align-base failed", text)
+            self.assertIn("unreadable ", text)
+
+
+_COVERAGE_SH = """#!/usr/bin/env bash
+mkdir -p target/coverage/rust
+mode=bare
+if grep -q covered "$1"; then mode=full; fi
+if grep -q partial "$1"; then mode=partial; fi
+{
+  printf '%s\\n' "SF:$1"
+  if [[ "$mode" == full ]]; then
+    printf '%s\\n' 'DA:2,1'
+  elif [[ "$mode" == partial ]]; then
+    printf '%s\\n' 'DA:1,1' 'DA:2,0' 'DA:3,0' 'DA:4,0' 'DA:5,0'
+  else
+    printf '%s\\n' 'DA:2,0'
+  fi
+  printf '%s\\n' end_of_record
+} > target/coverage/rust/lcov.info
+printf '%s\\n' "$PWD $mode" >> "$COVERAGE_LOG"
+"""
+
+_CRAP_FROM_LCOV = """#!/usr/bin/env python3
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(".")
+args = sys.argv[1:]
+prev = ""
+for arg in args:
+    if prev == "--root":
+        root = pathlib.Path(arg)
+    prev = arg
+infos = list(root.glob("target/coverage/**/lcov.info"))
+infos.extend(root.glob("coverage/**/lcov.info"))
+text = "\\n".join(path.read_text(encoding="utf-8") for path in infos)
+hits = 0
+total = 0
+for line in text.splitlines():
+    if not line.startswith("DA:"):
+        continue
+    total += 1
+    if int(line.split(",")[1]) > 0:
+        hits += 1
+cov = 0.0
+if total:
+    cov = hits / total
+cc = int(os.environ["UB_FIXTURE_CC"])
+crap = cc * cc * (1.0 - cov) ** 3 + cc
+name = os.environ.get("UB_FIXTURE_NAME", "hot")
+metrics = root / ".metrics"
+metrics.mkdir(parents=True, exist_ok=True)
+(metrics / "crap.edn").write_text(
+    "{:entries [\\n"
+    f'  {{:name "{name}", :namespace "pkg", :complexity {cc}, :coverage {cov:.4f}, :crap {crap:.4f}}}\\n'
+    "]}\\n",
+    encoding="utf-8",
+)
+log = os.environ.get("UB_FIXTURE_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(f"{root.resolve()} hits={hits} total={total} crap={crap:.4f}\\n")
+"""
+
+
+class SeparateCoverageTests(unittest.TestCase):
+    def _run(self, tmp: str, before: str, after: str, cc: str) -> subprocess.CompletedProcess[str]:
+        repo = Path(tmp)
+        _init_repo(repo)
+        lib = repo / "lib"
+        lib.mkdir()
+        source = lib / "hot.py"
+        source.write_text(before, encoding="utf-8")
+        _git(repo, "add", "lib/hot.py")
+        _git(repo, "commit", "-m", "base")
+        _git(repo, "checkout", "-b", "feat")
+        source.write_text(after, encoding="utf-8")
+        _git(repo, "add", "lib/hot.py")
+        _git(repo, "commit", "-m", "change")
+        bin_dir = repo / "bin"
+        bin_dir.mkdir()
+        _write_exe(bin_dir / "crapper", _CRAP_FROM_LCOV)
+        _write_exe(
+            bin_dir / "dryer",
+            "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+        )
+        _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+        cover = bin_dir / "write-lcov"
+        _write_exe(cover, _COVERAGE_SH)
+        span = [{"namespace": "pkg", "name": "hot", "start_line": 1, "end_line": 2, "path": "lib/hot.py"}]
+        (repo / "spans.json").write_text(json.dumps(span), encoding="utf-8")
+        env = _env(
+            bin_dir,
+            UB_GATES_ADVISORY="0",
+            UB_GATES_BASE_REF="main",
+            UB_GATES_MUTATOR_BUDGET_SECS="30",
+            UB_SCOPE_FUNCTIONS_JSON=str(repo / "spans.json"),
+            UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+            UB_GATES_COVERAGE_CMD=f"bash {cover} lib/hot.py",
+            UB_FIXTURE_CC=cc,
+            UB_FIXTURE_NAME="hot",
+            UB_FIXTURE_LOG=str(repo / "crap-log.txt"),
+            COVERAGE_LOG=str(repo / "coverage-log.txt"),
+        )
+        return _run_ci(repo, env)
+
+    def test_lost_coverage_raises_crap_from_under_10(self) -> None:
+        before = "def hot():\n    return 1  # covered\n"
+        after = "def hot():\n    return 2  # bare\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, before, after, "3")
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=ran_with_findings", _outcome(Path(tmp)))
+            self.assertIn("crapper findings pkg hot crap=12.0", text)
+            places = (Path(tmp) / "coverage-log.txt").read_text(encoding="utf-8")
+            self.assertIn("full", places)
+            self.assertIn("bare", places)
+            self.assertIn("ub-crap-base", places)
+            scores = (Path(tmp) / "crap-log.txt").read_text(encoding="utf-8")
+            self.assertIn("crap=3.0", scores)
+            self.assertIn("crap=12.0", scores)
+
+    def test_coverage_drop_raises_crap_that_was_already_over_10(self) -> None:
+        before = "def hot():\n    return 1  # partial\n"
+        after = "def hot():\n    return 2  # bare\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(tmp, before, after, "5")
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=ran_with_findings", _outcome(Path(tmp)))
+            self.assertIn("crapper findings pkg hot", text)
+            scores = (Path(tmp) / "crap-log.txt").read_text(encoding="utf-8")
+            base = [line for line in scores.splitlines() if "ub-crap-base" in line][0]
+            head = [line for line in scores.splitlines() if "ub-crap-base" not in line][0]
+            base_crap = float(base.rsplit("crap=", 1)[1])
+            head_crap = float(head.rsplit("crap=", 1)[1])
+            self.assertGreater(base_crap, 10.0)
+            self.assertGreater(head_crap, base_crap)
+            self.assertIn("base coverage worktree", text)
+
+    def test_failed_base_coverage_command_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _init_repo(repo)
+            lib = repo / "lib"
+            lib.mkdir()
+            (lib / "hot.py").write_text("def hot():\n    return 1\n", encoding="utf-8")
+            _git(repo, "add", "lib/hot.py")
+            _git(repo, "commit", "-m", "base")
+            _git(repo, "checkout", "-b", "feat")
+            (lib / "hot.py").write_text("def hot():\n    return 2\n", encoding="utf-8")
+            _git(repo, "add", "lib/hot.py")
+            _git(repo, "commit", "-m", "change")
+            bin_dir = repo / "bin"
+            bin_dir.mkdir()
+            _write_exe(
+                bin_dir / "crapper",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:entries []}' > .metrics/crap.edn\nexit 0\n",
+            )
+            _write_exe(
+                bin_dir / "dryer",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+            )
+            _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+            span = [{"namespace": "pkg", "name": "hot", "start_line": 1, "end_line": 2, "path": "lib/hot.py"}]
+            (repo / "spans.json").write_text(json.dumps(span), encoding="utf-8")
+            env = _env(
+                bin_dir,
+                UB_GATES_ADVISORY="0",
+                UB_GATES_BASE_REF="main",
+                UB_GATES_MUTATOR_BUDGET_SECS="30",
+                UB_SCOPE_FUNCTIONS_JSON=str(repo / "spans.json"),
+                UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+                UB_GATES_COVERAGE_CMD=(
+                    "if [[ \"$PWD\" == *ub-crap-base* ]]; then exit 1; fi; "
+                    "mkdir -p target/coverage/rust; "
+                    "printf '%s\\n' 'SF:lib/hot.py' 'DA:2,1' end_of_record > target/coverage/rust/lcov.info"
+                ),
+            )
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=tool_error", _outcome(repo))
+            self.assertIn("base coverage command failed", text)
+
+    def test_base_lcov_missing_the_file_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _init_repo(repo)
+            lib = repo / "lib"
+            lib.mkdir()
+            (lib / "hot.py").write_text("def hot():\n    return 1\n", encoding="utf-8")
+            _git(repo, "add", "lib/hot.py")
+            _git(repo, "commit", "-m", "base")
+            _git(repo, "checkout", "-b", "feat")
+            (lib / "hot.py").write_text("def hot():\n    return 2\n", encoding="utf-8")
+            _git(repo, "add", "lib/hot.py")
+            _git(repo, "commit", "-m", "change")
+            bin_dir = repo / "bin"
+            bin_dir.mkdir()
+            _write_exe(
+                bin_dir / "crapper",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:entries []}' > .metrics/crap.edn\nexit 0\n",
+            )
+            _write_exe(
+                bin_dir / "dryer",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+            )
+            _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+            span = [{"namespace": "pkg", "name": "hot", "start_line": 1, "end_line": 2, "path": "lib/hot.py"}]
+            (repo / "spans.json").write_text(json.dumps(span), encoding="utf-8")
+            env = _env(
+                bin_dir,
+                UB_GATES_ADVISORY="0",
+                UB_GATES_BASE_REF="main",
+                UB_GATES_MUTATOR_BUDGET_SECS="30",
+                UB_SCOPE_FUNCTIONS_JSON=str(repo / "spans.json"),
+                UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+                UB_GATES_COVERAGE_CMD=(
+                    "mkdir -p target/coverage/rust; "
+                    "printf '%s\\n' 'SF:lib/other.py' 'DA:1,1' end_of_record > target/coverage/rust/lcov.info"
+                ),
+            )
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=tool_error", _outcome(repo))
+            self.assertIn("base lcov missing lib/hot.py", text)
+
+    def test_suffix_dot_at_zero_is_that_extension(self) -> None:
+        # A path whose only dot is the first character still has that suffix.
+        # It is not the empty suffix, which would match every lcov record.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _init_repo(repo)
+            source = repo / ".rs"
+            source.write_text("fn hot() {\n    return 1;\n}\n", encoding="utf-8")
+            _git(repo, "add", "-f", ".rs")
+            _git(repo, "commit", "-m", "base")
+            _git(repo, "checkout", "-b", "feat")
+            source.write_text("fn hot() {\n    return 2;\n}\n", encoding="utf-8")
+            _git(repo, "add", "-f", ".rs")
+            _git(repo, "commit", "-m", "change")
+            bin_dir = repo / "bin"
+            bin_dir.mkdir()
+            _write_exe(
+                bin_dir / "crapper",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:entries []}' > .metrics/crap.edn\nexit 0\n",
+            )
+            _write_exe(
+                bin_dir / "dryer",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+            )
+            _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+            (repo / "spans.json").write_text("[]", encoding="utf-8")
+            env = _env(
+                bin_dir,
+                UB_GATES_ADVISORY="0",
+                UB_GATES_BASE_REF="main",
+                UB_GATES_MUTATOR_BUDGET_SECS="30",
+                UB_SCOPE_FUNCTIONS_JSON=str(repo / "spans.json"),
+                UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+                UB_GATES_COVERAGE_CMD=(
+                    "mkdir -p target/coverage/rust; "
+                    "printf '%s\\n' 'SF:lib/other.py' 'DA:1,1' end_of_record > target/coverage/rust/lcov.info"
+                ),
+            )
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            self.assertIn("outcome=ran_clean", _outcome(repo))
+            self.assertNotIn("base lcov missing", text)
+
+
+class GateCommandTests(unittest.TestCase):
+    """align-base and lcov-covers, invoked the way the gate invokes them."""
+
+    def test_missing_args_fail(self) -> None:
+        align = subprocess.run(
+            ["python3", str(SCOPE_PY), "align-base"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(align.returncode, 1, align.stderr)
+        self.assertIn("align-base requires --manifest and --dest", align.stderr)
+        lcov = subprocess.run(
+            ["python3", str(SCOPE_PY), "lcov-covers"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(lcov.returncode, 1, lcov.stderr)
+        self.assertIn("lcov-covers requires --root and --list", lcov.stderr)
+
+    def test_align_base_without_entries_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "base.edn"
+            head = root / "head.edn"
+            dest = root / "out.edn"
+            manifest = root / "manifest"
+            base.write_text("not edn\n", encoding="utf-8")
+            head.write_text("{:entries [\n]}\n", encoding="utf-8")
+            manifest.write_text(f"lib/a.py\t{base}\t{head}\n", encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    "python3",
+                    str(SCOPE_PY),
+                    "align-base",
+                    "--manifest",
+                    str(manifest),
+                    "--dest",
+                    str(dest),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertIn("unreadable " + str(base), proc.stderr)
+            self.assertFalse(dest.exists())
+
+    def test_lcov_covers_missing_list_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "no-such-list"
+            proc = subprocess.run(
+                [
+                    "python3",
+                    str(SCOPE_PY),
+                    "lcov-covers",
+                    "--root",
+                    tmp,
+                    "--list",
+                    str(missing),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertEqual(proc.stderr, "")
 
 
 if __name__ == "__main__":

@@ -8,8 +8,9 @@
 `UB_SCOPE_FUNCTIONS_JSON` is a test seam. When it is set, `crap` reads that
 JSON file instead of importing crapper. Each object is
 `{namespace, name, start_line, end_line, path}`.
-`--base-edn` is the merge-base snapshot. A changed function over the threshold
-fails when it is new or the score rose. An unchanged over-threshold row is debt.
+`--base-edn` is the merge-base snapshot. A changed function at or over the
+threshold fails when it is new or the score rose. Pass is CRAP under the
+threshold. An unchanged at-or-over-threshold row is debt.
 """
 
 from __future__ import annotations
@@ -427,7 +428,7 @@ def _crap_payload(row: CrapRow) -> dict[str, object]:
 
 
 def _append_if_over(row: CrapRow, threshold: float, findings: list[dict[str, object]]) -> None:
-    if row.crap > threshold:
+    if row.crap >= threshold:
         findings.append(_crap_payload(row))
 
 
@@ -462,7 +463,7 @@ def _crap_over(row: CrapRow, threshold: float) -> bool:
     score = row.crap
     if score is None:
         return False
-    return score > threshold
+    return score >= threshold
 
 
 def _unjoined_present(row: CrapRow, threshold: float) -> None:
@@ -915,7 +916,10 @@ def _flag(argv: list[str], name: str) -> str | None:
 
 
 def _usage() -> int:
-    print("usage: ub_changed_scope.py lines|crap|dry ...", file=sys.stderr)
+    print(
+        "usage: ub_changed_scope.py lines|crap|dry|align-base|lcov-covers ...",
+        file=sys.stderr,
+    )
     return 1
 
 
@@ -1036,8 +1040,277 @@ def cmd_dry(argv: list[str]) -> int:
     return _cmd_filter("dry", argv, 0.8)
 
 
+def _edn_string(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + escaped + '"'
+
+
+def _format_crap(value: float) -> str:
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        text = text + ".0"
+    return text
+
+
+def _crap_token(value: float | None) -> str:
+    if value is None:
+        return "nil"
+    return _format_crap(value)
+
+
+def _with_complexity(parts: list[str], complexity: int | None) -> list[str]:
+    if complexity is None:
+        return parts
+    parts.append(":complexity " + str(complexity))
+    return parts
+
+
+def _render_row(row: CrapRow) -> str:
+    parts = [":name " + _edn_string(row.name), ":namespace " + _edn_string(row.namespace)]
+    parts = _with_complexity(parts, row.complexity)
+    parts.append(":crap " + _crap_token(row.crap))
+    return "  {" + ", ".join(parts) + "}"
+
+
+def _render_rows(rows: list[CrapRow]) -> str:
+    lines = ["{:entries ["]
+    for row in rows:
+        lines.append(_render_row(row))
+    lines.append("]}")
+    return "\n".join(lines) + "\n"
+
+
+def _names_for(rows: list[CrapRow]) -> dict[str, list[CrapRow]]:
+    found: dict[str, list[CrapRow]] = {}
+    for row in rows:
+        found.setdefault(row.name, []).append(row)
+    return found
+
+
+def _read_if_present(path: str) -> str:
+    file_path = Path(path)
+    if not file_path.is_file():
+        return ""
+    return file_path.read_text(encoding="utf-8")
+
+
+def _require_entries(path: str, text: str) -> str:
+    if "{:entries" not in text:
+        raise ValueError("unreadable " + path)
+    return text
+
+
+def _rows_from_text(path: str, text: str) -> list[CrapRow]:
+    if not text:
+        return []
+    return parse_crap_edn(_require_entries(path, text))
+
+
+def _chosen_namespace(row: CrapRow, hits: list[CrapRow]) -> str:
+    if len(hits) != 1:
+        return row.namespace
+    return hits[0].namespace
+
+
+def _note_join(path: str, row: CrapRow, chosen: str) -> str:
+    if chosen == row.namespace:
+        return row.namespace
+    print(
+        f"ub-gates: crapper join file={path} name={row.name} namespace {row.namespace} -> {chosen}"
+    )
+    return chosen
+
+
+def _assign_namespace(path: str, row: CrapRow, by_name: dict[str, list[CrapRow]]) -> CrapRow:
+    chosen = _chosen_namespace(row, by_name.get(row.name, []))
+    row.namespace = _note_join(path, row, chosen)
+    return row
+
+
+def _keep_row(seen: set[tuple[str, str]], row: CrapRow, emitted: list[CrapRow]) -> None:
+    key = (row.namespace, row.name)
+    if key in seen:
+        return
+    seen.add(key)
+    emitted.append(row)
+
+
+def _align_file(
+    path: str,
+    base_edn: str,
+    head_edn: str,
+    seen: set[tuple[str, str]],
+    emitted: list[CrapRow],
+) -> None:
+    by_name = _names_for(_rows_from_text(head_edn, _read_if_present(head_edn)))
+    for row in _rows_from_text(base_edn, _read_if_present(base_edn)):
+        _keep_row(seen, _assign_namespace(path, row, by_name), emitted)
+
+
+def _align_line(line: str, seen: set[tuple[str, str]], emitted: list[CrapRow]) -> None:
+    if line.strip() == "":
+        return
+    path, base_edn, head_edn = line.split("\t")
+    _align_file(path, base_edn, head_edn, seen, emitted)
+
+
+def _align_lines(lines: list[str], seen: set[tuple[str, str]], emitted: list[CrapRow]) -> None:
+    for line in lines:
+        _align_line(line, seen, emitted)
+
+
+def _align_text(manifest: Path) -> str:
+    seen: set[tuple[str, str]] = set()
+    emitted: list[CrapRow] = []
+    _align_lines(manifest.read_text(encoding="utf-8").splitlines(), seen, emitted)
+    return _render_rows(emitted)
+
+
+def _write_align(manifest: str, dest: str) -> int:
+    try:
+        Path(dest).write_text(_align_text(Path(manifest)), encoding="utf-8")
+    except (OSError, ValueError, UnicodeError) as exc:
+        print(f"ub-gates: align-base failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_align_base(argv: list[str]) -> int:
+    manifest = _flag(argv, "--manifest")
+    dest = _flag(argv, "--dest")
+    if not _need(manifest, dest):
+        print("align-base requires --manifest and --dest", file=sys.stderr)
+        return 1
+    return _write_align(manifest, dest)
+
+
+def _read_glob(root: Path, pattern: str) -> str:
+    parts: list[str] = []
+    for path in sorted(root.glob(pattern)):
+        parts.append(path.read_text(encoding="utf-8", errors="replace"))
+    return "\n".join(parts)
+
+
+def _lcov_blob(root: Path) -> str:
+    target = _read_glob(root, "target/coverage/**/lcov.info")
+    other = _read_glob(root, "coverage/**/lcov.info")
+    return target + "\n" + other
+
+
+def _sf_path(line: str) -> str:
+    if not line.startswith("SF:"):
+        return ""
+    return line[3:].replace("\\", "/")
+
+
+def _path_ends(path: str, needle: str) -> bool:
+    return path.endswith(needle)
+
+
+def _line_covers(line: str, needle: str) -> bool:
+    return _path_ends(_sf_path(line), needle)
+
+
+def _matching_lines(lines: list[str], needle: str) -> list[str]:
+    return [line for line in lines if _line_covers(line, needle)]
+
+
+def _has_cover(lines: list[str], needle: str) -> bool:
+    return bool(_matching_lines(lines, needle))
+
+
+def _suffix(rel: str) -> str:
+    dot = rel.rfind(".")
+    if dot < 0:
+        return ""
+    return rel[dot:]
+
+
+def _sf_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.startswith("SF:")]
+
+
+def _ends_with_suffix(line: str, suffix: str) -> bool:
+    return _sf_path(line).endswith(suffix)
+
+
+def _suffix_lines(lines: list[str], suffix: str) -> list[str]:
+    return [line for line in lines if _ends_with_suffix(line, suffix)]
+
+
+def _missing_among(lines: list[str], rel: str) -> str:
+    if _has_cover(lines, rel):
+        return ""
+    return rel
+
+
+def _missing_same_suffix(sf: list[str], rel: str) -> str:
+    same = _suffix_lines(sf, _suffix(rel))
+    if not same:
+        return ""
+    return _missing_among(same, rel)
+
+
+def _missing_in(sf: list[str], rel: str) -> str:
+    if not sf:
+        return rel
+    return _missing_same_suffix(sf, rel)
+
+
+def _one_missing(text: str, rel: str) -> str:
+    return _missing_in(_sf_lines(text), rel)
+
+
+def _prefer_missing(found: str, rest: str) -> str:
+    if found:
+        return found
+    return rest
+
+
+def _first_missing(text: str, files: list[str]) -> str:
+    if not files:
+        return ""
+    found = _one_missing(text, files[0])
+    return _prefer_missing(found, _first_missing(text, files[1:]))
+
+
+def _list_files(listing: Path) -> list[str]:
+    text = listing.read_text(encoding="utf-8")
+    return [line for line in text.splitlines() if line.strip()]
+
+
+def _emit_missing(missing: str) -> int:
+    if not missing:
+        return 0
+    print("ub-gates: base lcov missing " + missing, file=sys.stderr)
+    return 1
+
+
+def _report_missing(root: Path, listing: Path) -> int:
+    try:
+        missing = _first_missing(_lcov_blob(root), _list_files(listing))
+    except OSError:
+        return 1
+    return _emit_missing(missing)
+
+
+def cmd_lcov_covers(argv: list[str]) -> int:
+    root = _flag(argv, "--root")
+    listing = _flag(argv, "--list")
+    if not _need(root, listing):
+        print("lcov-covers requires --root and --list", file=sys.stderr)
+        return 1
+    return _report_missing(Path(root), Path(listing))
+
+
 def _dispatch(command: str, argv: list[str]) -> int:
-    commands = {"lines": cmd_lines, "crap": cmd_crap, "dry": cmd_dry}
+    commands = {
+        "lines": cmd_lines,
+        "crap": cmd_crap,
+        "dry": cmd_dry,
+        "align-base": cmd_align_base,
+        "lcov-covers": cmd_lcov_covers,
+    }
     func = commands.get(command)
     if func is None:
         return _usage()
