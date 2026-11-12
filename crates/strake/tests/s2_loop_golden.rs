@@ -46,12 +46,6 @@ fn check_e_if_phi(path: &Path) {
     assert!(stderr.contains(E_IF_PHI_MSG), "stderr={stderr}");
 }
 
-fn test_exits_70_contains(path: &Path, needle: &str) {
-    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
-    assert_eq!(status.code(), Some(70), "stderr={stderr}");
-    assert!(stderr.contains(needle), "stderr={stderr}");
-}
-
 #[test]
 fn loop_swap_exits_0() {
     test_exits_0(&golden("loop_swap.strake"));
@@ -115,11 +109,6 @@ fn loop_break_if_continue_else_exits_0() {
 #[test]
 fn loop_continue_nested_if_exits_0() {
     test_exits_0(&golden("loop_continue_nested_if.strake"));
-}
-
-#[test]
-fn if_join_s5_waiver_exits_70() {
-    test_exits_70_contains(&golden("if_join_s5_waiver.strake"), "unbound name in lower");
 }
 
 #[test]

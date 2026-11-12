@@ -95,31 +95,39 @@ pub struct JoinSite {
     pub names: Vec<NameSupply>,
 }
 
-/// Names `lower` must bind at an `if` join (S5 keeps only the first shared assign name).
+/// Names `lower` must bind at an `if` join: every shared assign, plus loop-join names.
 pub fn if_join_bind_names(
     plan: &CarryPlan,
     site: &JoinSite,
     then: &[Stmt],
     else_body: &[Stmt],
 ) -> Vec<String> {
-    let has_loop_join = site.names.iter().any(publishes_loop_join);
-    let mut out = if has_loop_join {
-        let mut names = Vec::new();
-        if let Some(n) = shared_assign_join_name(then, else_body) {
-            names.push(n);
+    let mut out = shared_assign_join_names(then, else_body);
+    for supply in &site.names {
+        if publishes_loop_join(supply) && !out.iter().any(|x| x == &supply.name) {
+            out.push(supply.name.clone());
         }
-        for supply in &site.names {
-            if publishes_loop_join(supply) && !names.iter().any(|x| x == &supply.name) {
-                names.push(supply.name.clone());
+    }
+    append_match_published_if_names(plan, then, else_body, &mut out);
+    out
+}
+
+/// Direct assign names written on both arms, in `then` source order.
+fn shared_assign_join_names(then: &[Stmt], else_body: &[Stmt]) -> Vec<String> {
+    let mut else_names = Vec::new();
+    for stmt in else_body {
+        if let Stmt::Assign { name, .. } = stmt {
+            else_names.push(name.clone());
+        }
+    }
+    let mut out = Vec::new();
+    for stmt in then {
+        if let Stmt::Assign { name, .. } = stmt {
+            if else_names.contains(name) {
+                out.push(name.clone());
             }
         }
-        names
-    } else {
-        shared_assign_join_name(then, else_body)
-            .map(|n| vec![n])
-            .unwrap_or_default()
-    };
-    append_match_published_if_names(plan, then, else_body, &mut out);
+    }
     out
 }
 
@@ -307,25 +315,6 @@ pub fn publishes_loop_join(supply: &NameSupply) -> bool {
     let else_ok = matches!(supply.else_arm, ArmSrc::Assign | ArmSrc::LoopExit);
     let any_loop = supply.then_arm == ArmSrc::LoopExit || supply.else_arm == ArmSrc::LoopExit;
     then_ok && else_ok && any_loop
-}
-
-/// Classic two-arm assign join (first shared top-level assign name).
-pub fn shared_assign_join_name(then: &[Stmt], else_body: &[Stmt]) -> Option<String> {
-    let t = first_direct_assign(then);
-    let e = first_direct_assign(else_body);
-    match (t, e) {
-        (Some(a), Some(b)) if a == b => Some(a),
-        _ => None,
-    }
-}
-
-fn first_direct_assign(body: &[Stmt]) -> Option<String> {
-    for stmt in body {
-        if let Stmt::Assign { name, .. } = stmt {
-            return Some(name.clone());
-        }
-    }
-    None
 }
 
 pub fn operands_for_continue(
@@ -588,7 +577,20 @@ mod tests {
             },
             names: join_name_supplies(&then2, &then2),
         };
-        assert_eq!(if_join_bind_names(&plan, &site2, &then2, &then2), vec!["x"]);
+        assert_eq!(
+            if_join_bind_names(&plan, &site2, &then2, &then2),
+            vec!["x", "y"]
+        );
+        let then_yx = vec![then2[1].clone(), then2[0].clone()];
+        let site3 = JoinSite {
+            id: SiteId(2),
+            span: site2.span.clone(),
+            names: join_name_supplies(&then_yx, &then2),
+        };
+        assert_eq!(
+            if_join_bind_names(&plan, &site3, &then_yx, &then2),
+            vec!["y", "x"]
+        );
     }
 
     #[test]

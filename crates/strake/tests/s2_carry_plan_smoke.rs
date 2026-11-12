@@ -90,13 +90,6 @@ fn blocker_shapes_no_exit_70() {
 }
 
 #[test]
-fn s5_waiver_still_exits_70() {
-    let (status, stderr) = run(&["test", golden("if_join_s5_waiver.strake").to_str().unwrap()]);
-    assert_eq!(status.code(), Some(70), "stderr={stderr}");
-    assert!(stderr.contains("unbound name in lower"), "stderr={stderr}");
-}
-
-#[test]
 fn nested_if_one_arm_check_e_if_phi_not_test() {
     let p = golden("if_nested_then_else_direct_e_if_phi.strake");
     let (status, stderr) = run(&["check", p.to_str().unwrap()]);

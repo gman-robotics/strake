@@ -62,3 +62,73 @@ fn loop_i64_swap_still_exits_0() {
     assert_eq!(code, 0, "stderr={stderr}");
     assert!(stderr.is_empty(), "stderr={stderr}");
 }
+
+#[test]
+fn if_join_keeps_every_shared_assign() {
+    let (code, stderr) = run_test("if_join_s5_waiver.strake");
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
+}
+
+#[test]
+fn match_arm_nested_if_keeps_second_assign() {
+    let src = "\
+strake 1
+
+fn pick(r: result i64 unit) -> i64
+  c = true
+  match r
+    ok v ->
+      if c
+        x = v
+        y = add i64 2 0
+      else
+        x = add i64 0 0
+        y = add i64 4 0
+      end
+    err _ ->
+      x = add i64 5 0
+      y = add i64 6 0
+  end
+  ret y
+end
+
+test t
+  v = ok i64 7
+  n = call pick(v)
+  assert.eq n 2
+  ret 0
+end
+";
+    let path = std::env::temp_dir().join("strake_gma612_match_nested_if.strake");
+    std::fs::write(&path, src).expect("write");
+    let exit = strake::test(path.to_str().unwrap(), strake::Opts::default());
+    assert_eq!(exit.code, 0, "stderr={}", exit.stderr);
+    assert!(exit.stderr.is_empty(), "stderr={}", exit.stderr);
+}
+
+#[test]
+fn if_join_name_on_one_arm_stays_rejected() {
+    let src = "\
+strake 1
+
+fn pick(c: bool) -> i64
+  if c
+    x = add i64 1 0
+    y = add i64 2 0
+  else
+    x = add i64 3 0
+  end
+  ret y
+end
+
+test t
+  ret 0
+end
+";
+    let path = std::env::temp_dir().join("strake_gma612_one_arm.strake");
+    std::fs::write(&path, src).expect("write");
+    let exit = strake::test(path.to_str().unwrap(), strake::Opts::default());
+    assert_eq!(exit.code, 1, "stderr={}", exit.stderr);
+    assert!(exit.stderr.contains("E_IF_PHI"), "stderr={}", exit.stderr);
+}
