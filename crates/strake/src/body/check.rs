@@ -368,12 +368,44 @@ fn note_break(state: &mut CheckState, span: &Span, diags: &mut Vec<Diag>) {
     }
 }
 
-fn for_blocks_continue(state: &CheckState, span: &Span, diags: &mut Vec<Diag>) -> bool {
+fn note_bare_jump(state: &mut CheckState, stmt: &Stmt, diags: &mut Vec<Diag>) {
+    match stmt {
+        Stmt::Break { span } => note_break(state, span, diags),
+        Stmt::Continue { span, .. } => diags.push(type_diag(span.clone())),
+        _ => {}
+    }
+}
+
+fn note_loop_continue(
+    state: &mut CheckState,
+    span: &Span,
+    edges: &[ContinueEdge],
+    loop_params: Option<&HashSet<String>>,
+    ctx: &mut Ctx,
+    fns: &[&FnItem],
+    diags: &mut Vec<Diag>,
+) {
     if matches!(state.ctrl.last(), Some(Ctrl::For)) {
         diags.push(type_diag(span.clone()));
-        true
-    } else {
-        false
+        return;
+    }
+    let Some(params) = loop_params else {
+        diags.push(type_diag(span.clone()));
+        return;
+    };
+    if check_continue_edges(span.clone(), edges, params, ctx, state, fns, diags) {
+        record_continue_edge(state, span, edges);
+    }
+}
+
+fn record_continue_edge(state: &mut CheckState, span: &Span, edges: &[ContinueEdge]) {
+    if let Some(&idx) = state.loop_stack.last() {
+        if let Some(ops) = operands_for_continue(&state.carry.loops[idx].params, edges) {
+            state.carry.loops[idx].backedges.push(BackEdge {
+                span: span.clone(),
+                operands: ops,
+            });
+        }
     }
 }
 
@@ -589,10 +621,7 @@ fn check_stmt(
         } => check_stmt_if(
             ctx, state, fns, in_fn, fn_ret, span, cond, then_body, else_body, diags,
         ),
-        Stmt::Break { span } => note_break(state, span, diags),
-        Stmt::Continue { span, .. } => {
-            diags.push(type_diag(span.clone()));
-        }
+        Stmt::Break { .. } | Stmt::Continue { .. } => note_bare_jump(state, stmt, diags),
         Stmt::For {
             span,
             binder,
@@ -914,19 +943,7 @@ fn check_stmt_loop(
     }
     match stmt {
         Stmt::Continue { edges, span, .. } => {
-            if !for_blocks_continue(state, span, diags)
-                && check_continue_edges(span.clone(), edges, loop_params, ctx, state, fns, diags)
-            {
-                if let Some(&idx) = state.loop_stack.last() {
-                    if let Some(ops) = operands_for_continue(&state.carry.loops[idx].params, edges)
-                    {
-                        state.carry.loops[idx].backedges.push(BackEdge {
-                            span: span.clone(),
-                            operands: ops,
-                        });
-                    }
-                }
-            }
+            note_loop_continue(state, span, edges, Some(loop_params), ctx, fns, diags);
         }
         Stmt::Break { span } => note_break(state, span, diags),
         Stmt::If {
@@ -1279,24 +1296,7 @@ fn check_stmt_in_arm(
             );
         }
         Stmt::Continue { edges, span, .. } => {
-            if !for_blocks_continue(state, span, diags) {
-                if let Some(params) = loop_params {
-                    if check_continue_edges(span.clone(), edges, params, ctx, state, fns, diags) {
-                        if let Some(&idx) = state.loop_stack.last() {
-                            if let Some(ops) =
-                                operands_for_continue(&state.carry.loops[idx].params, edges)
-                            {
-                                state.carry.loops[idx].backedges.push(BackEdge {
-                                    span: span.clone(),
-                                    operands: ops,
-                                });
-                            }
-                        }
-                    }
-                } else {
-                    diags.push(type_diag(span.clone()));
-                }
-            }
+            note_loop_continue(state, span, edges, loop_params, ctx, fns, diags);
         }
         Stmt::Break { span } => note_break(state, span, diags),
         Stmt::For {
