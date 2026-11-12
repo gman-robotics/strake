@@ -612,6 +612,24 @@ fn check_stmt(
             check_stmt_assign(ctx, state, fns, span, name, rhs, diags);
         }
         Stmt::Ret { value, span } => check_stmt_ret(ctx, state, fns, fn_ret, value, span, diags),
+        Stmt::AssertEq { span, got, want } => {
+            check_stmt_assert_eq(ctx, state, fns, in_fn, span, got, want, diags);
+        }
+        Stmt::Trap { .. } => {}
+        other => check_stmt_control(other, ctx, state, fns, in_fn, fn_ret, diags),
+    }
+}
+
+fn check_stmt_control(
+    stmt: &Stmt,
+    ctx: &mut Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    in_fn: bool,
+    fn_ret: Option<&Type>,
+    diags: &mut Vec<Diag>,
+) {
+    match stmt {
         Stmt::If {
             span,
             cond,
@@ -643,15 +661,12 @@ fn check_stmt(
         } => check_stmt_forall_ctx(
             ctx, state, fns, in_fn, fn_ret, span, binder, bound, body, diags,
         ),
-        Stmt::AssertEq { span, got, want } => {
-            check_stmt_assert_eq(ctx, state, fns, in_fn, span, got, want, diags);
-        }
         Stmt::Match {
             span,
             scrutinee,
             arms,
         } => check_stmt_match(span, scrutinee, arms, ctx, state, fns, in_fn, fn_ret, diags),
-        Stmt::Trap { .. } => {}
+        _ => {}
     }
 }
 
@@ -925,6 +940,20 @@ fn check_continue_edges(
     true
 }
 
+fn loop_param_assign_shadow(
+    stmt: &Stmt,
+    loop_params: &HashSet<String>,
+    diags: &mut Vec<Diag>,
+) -> bool {
+    if let Stmt::Assign { span, name, .. } = stmt {
+        if loop_params.contains(name) {
+            diags.push(shadow_diag(span.clone()));
+            return true;
+        }
+    }
+    false
+}
+
 fn check_stmt_loop(
     stmt: &Stmt,
     ctx: &mut Ctx,
@@ -935,11 +964,8 @@ fn check_stmt_loop(
     fn_ret: Option<&Type>,
     diags: &mut Vec<Diag>,
 ) {
-    if let Stmt::Assign { span, name, .. } = stmt {
-        if loop_params.contains(name) {
-            diags.push(shadow_diag(span.clone()));
-            return;
-        }
+    if loop_param_assign_shadow(stmt, loop_params, diags) {
+        return;
     }
     match stmt {
         Stmt::Continue { edges, span, .. } => {
@@ -1263,17 +1289,78 @@ fn check_stmt_in_arm(
 ) {
     match stmt {
         Stmt::Assign { span, name, rhs } => {
-            if pre.contains_key(name) {
-                diags.push(shadow_diag(span.clone()));
-                return;
-            }
-            let ty = check_rhs(rhs, ctx, state, fns, diags);
-            if ctx.types.contains_key(name) {
-                diags.push(shadow_diag(span.clone()));
-            } else {
-                ctx.types.insert(name.clone(), ty);
-            }
+            check_arm_assign(ctx, pre, state, fns, span, name, rhs, diags);
         }
+        Stmt::Ret { value, span } => check_arm_ret(ctx, state, fns, fn_ret, value, span, diags),
+        Stmt::AssertEq { span, got, want } => {
+            check_stmt_assert_eq(ctx, state, fns, in_fn, span, got, want, diags);
+        }
+        Stmt::Trap { .. } => {}
+        other => check_arm_control(
+            other,
+            ctx,
+            pre,
+            state,
+            fns,
+            in_fn,
+            fn_ret,
+            loop_params,
+            diags,
+        ),
+    }
+}
+
+fn check_arm_assign(
+    ctx: &mut Ctx,
+    pre: &HashMap<String, Type>,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    span: &Span,
+    name: &str,
+    rhs: &Rhs,
+    diags: &mut Vec<Diag>,
+) {
+    if pre.contains_key(name) {
+        diags.push(shadow_diag(span.clone()));
+        return;
+    }
+    let ty = check_rhs(rhs, ctx, state, fns, diags);
+    if ctx.types.contains_key(name) {
+        diags.push(shadow_diag(span.clone()));
+    } else {
+        ctx.types.insert(name.to_string(), ty);
+    }
+}
+
+fn check_arm_ret(
+    ctx: &mut Ctx,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    fn_ret: Option<&Type>,
+    value: &Operand,
+    span: &Span,
+    diags: &mut Vec<Diag>,
+) {
+    let got = operand_ty(value, ctx, state, fns, fn_ret, diags);
+    if let Some(expected) = fn_ret {
+        if !types_compatible(&got, expected) {
+            diags.push(type_diag(span.clone()));
+        }
+    }
+}
+
+fn check_arm_control(
+    stmt: &Stmt,
+    ctx: &mut Ctx,
+    pre: &HashMap<String, Type>,
+    state: &mut CheckState,
+    fns: &[&FnItem],
+    in_fn: bool,
+    fn_ret: Option<&Type>,
+    loop_params: Option<&HashSet<String>>,
+    diags: &mut Vec<Diag>,
+) {
+    match stmt {
         Stmt::If {
             span,
             cond,
@@ -1342,14 +1429,6 @@ fn check_stmt_in_arm(
         } => check_nested_loop_in_loop_body(
             span, params, body, ctx, state, fns, in_fn, fn_ret, diags,
         ),
-        Stmt::Ret { value, span } => {
-            let got = operand_ty(value, ctx, state, fns, fn_ret, diags);
-            if let Some(expected) = fn_ret {
-                if !types_compatible(&got, expected) {
-                    diags.push(type_diag(span.clone()));
-                }
-            }
-        }
         Stmt::Match {
             span,
             scrutinee,
@@ -1366,10 +1445,7 @@ fn check_stmt_in_arm(
             loop_params,
             diags,
         ),
-        Stmt::Trap { .. } => {}
-        Stmt::AssertEq { span, got, want } => {
-            check_stmt_assert_eq(ctx, state, fns, in_fn, span, got, want, diags);
-        }
+        _ => {}
     }
 }
 
