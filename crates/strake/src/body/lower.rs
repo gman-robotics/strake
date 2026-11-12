@@ -62,6 +62,7 @@ struct LoopParamLowering {
     exit_phi: u32,
     header_edges: Vec<(usize, u32)>,
     exit_edges: Vec<(usize, u32)>,
+    is_bool: bool,
 }
 
 struct LoopFrame {
@@ -169,9 +170,7 @@ fn record_continue(
             .enumerate()
             .any(|(j, h)| j != pi && *h == *v)
         {
-            let t = b.alloc_vreg();
-            b.copy_i64(block, span.clone(), t, *v);
-            t
+            copy_backedge_arg(b, block, span.clone(), *v, frame.params[pi].is_bool)
         } else {
             *v
         };
@@ -179,6 +178,19 @@ fn record_continue(
     }
     b.jump(block, span, frame.header);
     Ok(())
+}
+
+/// A cross-parameter back edge cannot name the other header phi directly.
+/// Bool uses `eq` against `true` (identity). `add` is i64 and traps on a bool.
+fn copy_backedge_arg(b: &mut Builder, block: usize, span: Span, src: u32, is_bool: bool) -> u32 {
+    if is_bool {
+        let yes = b.const_bool(block, span.clone(), true);
+        b.eq_bool(block, span, src, yes)
+    } else {
+        let dst = b.alloc_vreg();
+        b.copy_i64(block, span, dst, src);
+        dst
+    }
 }
 
 fn record_break(
@@ -665,7 +677,9 @@ fn lower_loop(
     let mut preheader_env = env.clone();
     for p in params.iter() {
         let init = lower_operand(b, entry, &p.init, &preheader_env)?;
-        if let Some(ty) = infer_operand_type(&p.init, &plan.known_ty) {
+        let init_ty = infer_operand_type(&p.init, &plan.known_ty);
+        let is_bool = init_ty.as_ref().is_some_and(type_is_bool);
+        if let Some(ty) = init_ty {
             bind_type(plan, &p.name, ty);
         }
         let header_phi = b.alloc_vreg();
@@ -676,6 +690,7 @@ fn lower_loop(
             exit_phi,
             header_edges: vec![(entry, init)],
             exit_edges: Vec::new(),
+            is_bool,
         });
         preheader_env.insert(p.name.clone(), init);
         env.insert(p.name.clone(), header_phi);
