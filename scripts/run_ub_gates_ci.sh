@@ -11,6 +11,12 @@
 # They are never ran_clean. Blocking mode exits 1. Advisory mode records the
 # same outcome and exits 0.
 # A failed git diff --name-only is tool_error. A missing merge base is tool_error.
+# The base crapper runs under existing coverage, never --no-coverage, so the
+# gate compares CRAP to CRAP. Base and head rows join on file path plus
+# function name. A temp-tree namespace (crate::) still matches the head
+# namespace (strake::body::) for the same file and name. A missing or
+# unreadable base score is tool_error and blocks. Thresholds, --lines, and
+# blocking mode are unchanged.
 # Base-ref fetch honors UB_GATES_BASE_REF, uses no depth limit, and unshallows
 # a shallow clone. A mutator budget timeout fails the job in blocking mode.
 # Advisory mode reports that timeout and still exits 0. The step summary's
@@ -332,12 +338,151 @@ PY
   return 0
 }
 
-score_base_crapper() {
-  local base_root file dest rc
-  local -a base_files
+# Rewrite base :namespace values to the head namespace for the same file and
+# function name, then write one base EDN. Head rows are not modified.
+align_base_crap() {
+  python3 - "${SCOPE_PY}" "$1" "$2" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+
+
+def load_scope(path):
+    spec = importlib.util.spec_from_file_location("ub_changed_scope_align", path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def edn_string(value):
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return '"' + escaped + '"'
+
+
+def format_crap(value):
+    text = f"{value:.4f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        text = text + ".0"
+    return text
+
+
+def render(rows):
+    lines = ["{:entries ["]
+    for row in rows:
+        parts = [":name " + edn_string(row.name), ":namespace " + edn_string(row.namespace)]
+        if row.complexity is not None:
+            parts.append(":complexity " + str(row.complexity))
+        token = "nil" if row.crap is None else format_crap(row.crap)
+        parts.append(":crap " + token)
+        lines.append("  {" + ", ".join(parts) + "}")
+    lines.append("]}")
+    return "\n".join(lines) + "\n"
+
+
+def read_rows(scope, path):
+    file_path = Path(path)
+    if not file_path.is_file():
+        return []
+    text = file_path.read_text(encoding="utf-8")
+    if "{:entries" not in text:
+        raise ValueError("unreadable " + path)
+    return scope.parse_crap_edn(text)
+
+
+def names_for(rows):
+    found = {}
+    for row in rows:
+        found.setdefault(row.name, []).append(row)
+    return found
+
+
+def take_namespace(row, by_name, path):
+    hits = by_name.get(row.name, [])
+    if len(hits) != 1:
+        return row.namespace
+    chosen = hits[0].namespace
+    if chosen == row.namespace:
+        return row.namespace
+    print(
+        "ub-gates: crapper join file="
+        + path
+        + " name="
+        + row.name
+        + " namespace "
+        + row.namespace
+        + " -> "
+        + chosen
+    )
+    return chosen
+
+
+def align(scope, manifest_path):
+    emitted = []
+    seen = set()
+    text = Path(manifest_path).read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line.strip() == "":
+            continue
+        path, base_edn, head_edn = line.split("\t")
+        by_name = names_for(read_rows(scope, head_edn))
+        for row in read_rows(scope, base_edn):
+            row.namespace = take_namespace(row, by_name, path)
+            key = (row.namespace, row.name)
+            if key in seen:
+                continue
+            seen.add(key)
+            emitted.append(row)
+    return render(emitted)
+
+
+def main():
+    scope = load_scope(sys.argv[1])
+    if scope is None:
+        return 1
+    try:
+        body = align(scope, sys.argv[2])
+    except (OSError, ValueError, UnicodeError):
+        return 1
+    Path(sys.argv[3]).write_text(body, encoding="utf-8")
+    return 0
+
+
+sys.exit(main())
+PY
+}
+
+link_base_coverage() {
+  local base_root="$1"
+  local repo_root="$2"
+  if [[ -d "${repo_root}/target/coverage" ]]; then
+    mkdir -p "${base_root}/target"
+    ln -s "${repo_root}/target/coverage" "${base_root}/target/coverage"
+  fi
+  if [[ -d "${repo_root}/coverage" ]]; then
+    ln -s "${repo_root}/coverage" "${base_root}/coverage"
+  fi
+}
+
+base_edn_readable() {
+  local path="$1"
+  [[ -f "${path}" && -r "${path}" && -s "${path}" ]]
+}
+
+# Score the merge-base sources one file at a time under existing coverage.
+# A missing, empty, or unreadable score fails closed. --no-coverage is not used.
+write_base_crap_edn() {
+  local base_root work file dest rc prc idx src manifest repo_root join_log status
+  local -a base_files=()
   BASE_EDN=""
+  status=0
+  repo_root="$(pwd)"
   base_root="$(mktemp -d "${TMPDIR:-/tmp}/ub-crap-base.XXXXXX")"
-  base_files=()
+  work="$(mktemp -d "${TMPDIR:-/tmp}/ub-crap-join.XXXXXX")"
+  manifest="${work}/manifest"
+  : >"${manifest}"
   for file in "${SCOPE_FILES[@]}"; do
     if git cat-file -e "${MERGE_BASE}:${file}" 2>/dev/null; then
       dest="${base_root}/${file}"
@@ -347,26 +492,90 @@ score_base_crapper() {
     fi
   done
   if [[ "${#base_files[@]}" -eq 0 ]]; then
-    rm -rf "${base_root}"
+    rm -rf "${base_root}" "${work}"
     return 0
   fi
-  set +e
-  (
-    cd "${base_root}"
-    "${CRAPPER}" --no-coverage --threshold 10 "${base_files[@]}"
-  )
-  rc=$?
-  set -e
-  if [[ -f "${base_root}/.metrics/crap.edn" ]]; then
-    mkdir -p .metrics
-    cp "${base_root}/.metrics/crap.edn" .metrics/crap-base.edn
-    BASE_EDN=".metrics/crap-base.edn"
+  link_base_coverage "${base_root}" "${repo_root}" || status=1
+  idx=0
+  if [[ "${status}" -eq 0 ]]; then
+    for file in "${base_files[@]}"; do
+      log "ub-gates: base crapper --use-existing-coverage ${file}"
+      set +e
+      (
+        cd "${base_root}"
+        "${CRAPPER}" --use-existing-coverage --threshold 10 "${file}"
+      )
+      rc=$?
+      set -e
+      src="${base_root}/.metrics/crap.edn"
+      if [[ "${rc}" -ne 0 && "${rc}" -ne 2 ]]; then
+        status=1
+        break
+      fi
+      if ! base_edn_readable "${src}"; then
+        status=1
+        break
+      fi
+      cp "${src}" "${work}/base-${idx}.edn" || status=1
+      if [[ "${status}" -ne 0 ]]; then
+        break
+      fi
+      # --root is the repo so the head file and Cargo.toml resolve. Metrics
+      # land in .metrics/crap.edn; the saved head report is restored later.
+      set +e
+      "${CRAPPER}" --root "${repo_root}" --use-existing-coverage --threshold 10 "${file}"
+      prc=$?
+      set -e
+      if [[ "${prc}" -eq 0 || "${prc}" -eq 2 ]] && base_edn_readable "${repo_root}/.metrics/crap.edn"; then
+        cp "${repo_root}/.metrics/crap.edn" "${work}/head-${idx}.edn" || status=1
+      else
+        status=1
+      fi
+      if [[ "${status}" -ne 0 ]]; then
+        break
+      fi
+      printf '%s\t%s\t%s\n' "${file}" "${work}/base-${idx}.edn" "${work}/head-${idx}.edn" >>"${manifest}"
+      idx=$((idx + 1))
+    done
   fi
-  rm -rf "${base_root}"
-  if [[ "${rc}" -ne 0 && "${rc}" -ne 2 ]]; then
+  if [[ "${status}" -eq 0 ]]; then
+    mkdir -p .metrics
+    set +e
+    join_log="$(align_base_crap "${manifest}" ".metrics/crap-base.edn")"
+    rc=$?
+    set -e
+    if [[ "${rc}" -ne 0 ]]; then
+      status=1
+    elif ! base_edn_readable ".metrics/crap-base.edn"; then
+      status=1
+    elif [[ -n "${join_log}" ]]; then
+      printf '%s\n' "${join_log}"
+    fi
+  fi
+  rm -rf "${base_root}" "${work}"
+  if [[ "${status}" -ne 0 ]]; then
+    BASE_EDN=""
     return 1
   fi
-  [[ -n "${BASE_EDN}" ]]
+  BASE_EDN=".metrics/crap-base.edn"
+  base_edn_readable "${BASE_EDN}"
+}
+
+score_base_crapper() {
+  local saved="" status=0
+  if [[ -f .metrics/crap.edn ]]; then
+    saved="$(mktemp)"
+    cp .metrics/crap.edn "${saved}" || return 1
+  fi
+  if ! write_base_crap_edn; then
+    status=1
+  fi
+  if [[ -n "${saved}" ]]; then
+    mkdir -p .metrics
+    cp "${saved}" .metrics/crap.edn || status=1
+    rm -f "${saved}"
+  fi
+  return "${status}"
 }
 
 run_crapper() {
