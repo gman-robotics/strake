@@ -768,6 +768,140 @@ class MutatorCoverageTests(unittest.TestCase):
             self.assertNotIn("cargo test --locked", mutator_log)
 
 
+class PythonLcovOrderTests(unittest.TestCase):
+    """CI runs the Rust coverage command, then crapper. Python lcov has to be
+    current before that score. These fixtures drive scripts/run_ub_gates_ci.sh
+    the same way: advisory 0, UB_GATES_BASE_REF, and UB_GATES_COVERAGE_CMD.
+    """
+
+    def _drive(self, tmp: str, mode: str) -> subprocess.CompletedProcess[str]:
+        repo = Path(tmp)
+        _init_repo(repo)
+        (repo / "README").write_text("base\n", encoding="utf-8")
+        _git(repo, "add", "README")
+        _git(repo, "commit", "-m", "base")
+        _git(repo, "checkout", "-b", "feat")
+        lib = repo / "lib"
+        lib.mkdir()
+        source = lib / "a.py"
+        source.write_text("def hot():\n    return 1\n", encoding="utf-8")
+        tests = repo / "scripts" / "tests"
+        tests.mkdir(parents=True)
+        (tests / "test_noop.py").write_text(
+            "import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        self.assertTrue(True)\n",
+            encoding="utf-8",
+        )
+        _git(repo, "add", "lib/a.py", "scripts/tests/test_noop.py")
+        _git(repo, "commit", "-m", "change")
+        if mode == "stale":
+            lcov = repo / "target" / "coverage" / "python" / "lcov.info"
+            lcov.parent.mkdir(parents=True)
+            lcov.write_text("SF:lib/a.py\nDA:1,0\nend_of_record\n", encoding="utf-8")
+            os.utime(lcov, (1, 1))
+            (repo / "STALE_LCOV").write_text("1\n", encoding="utf-8")
+        if mode == "missing":
+            (repo / "MISSING_LCOV").write_text("1\n", encoding="utf-8")
+        bin_dir = repo / "bin"
+        bin_dir.mkdir()
+        _write_exe(
+            bin_dir / "coverage",
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"$*\" >> COVERAGE_LOG\n"
+            "if [[ \"$1\" != \"lcov\" ]]; then exit 0; fi\n"
+            "printf '%s\\n' python >> ORDER\n"
+            "if [[ -f STALE_LCOV || -f MISSING_LCOV ]]; then exit 0; fi\n"
+            "out=target/coverage/python/lcov.info\n"
+            "mkdir -p \"$(dirname \"$out\")\"\n"
+            "printf '%s\\n' 'SF:lib/a.py' 'DA:1,1' 'end_of_record' > \"${out}\"\n"
+            "exit 0\n",
+        )
+        _write_exe(
+            bin_dir / "crapper",
+            "#!/usr/bin/env bash\n"
+            "printf '%s\\n' \"crapper $*\" >> ORDER\n"
+            "mkdir -p .metrics\n"
+            "printf '%s\\n' '{:entries []}' > .metrics/crap.edn\n"
+            "exit 0\n",
+        )
+        _write_exe(
+            bin_dir / "dryer",
+            "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+        )
+        _write_exe(
+            bin_dir / "mutator",
+            "#!/usr/bin/env bash\n"
+            "mkdir -p .metrics/mutate\n"
+            "cat > .metrics/mutate/lib.a.edn <<'EDN'\n"
+            + _mutator_edn(2, 0, 0, 2)
+            + "EDN\nexit 0\n",
+        )
+        span_path = repo / "spans.json"
+        span_path.write_text(
+            json.dumps([{"namespace": "pkg", "name": "hot", "start_line": 1, "end_line": 2, "path": "lib/a.py"}]),
+            encoding="utf-8",
+        )
+        env = _env(
+            bin_dir,
+            UB_GATES_ADVISORY="0",
+            UB_GATES_BASE_REF="main",
+            UB_GATES_COVERAGE_CMD=(
+                "mkdir -p target/coverage/rust && "
+                "printf '%s\\n' 'SF:unused.rs' 'DA:1,1' 'end_of_record' > target/coverage/rust/lcov.info && "
+                "printf '%s\\n' rust >> ORDER"
+            ),
+            UB_GATES_MUTATOR_BUDGET_SECS="30",
+            UB_GATES_MUTATOR_TEST_CMD="cargo test --locked",
+            UB_SCOPE_FUNCTIONS_JSON=str(span_path),
+            UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+        )
+        return _run_ci(repo, env)
+
+    def test_missing_python_lcov_fails_closed_before_crapper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._drive(tmp, "missing")
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            repo = Path(tmp)
+            outcome = _outcome(repo)
+            self.assertIn("outcome=tool_error", outcome)
+            self.assertIn("python lcov missing or older than scored sources", text)
+            self.assertTrue((repo / "target" / "coverage" / "rust" / "lcov.info").is_file())
+            order = (repo / "ORDER").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(order, ["rust", "python"])
+            self.assertNotIn("crapper exit", text)
+
+    def test_python_lcov_older_than_source_fails_closed_before_crapper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._drive(tmp, "stale")
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            repo = Path(tmp)
+            self.assertIn("outcome=tool_error", _outcome(repo))
+            self.assertIn("python lcov missing or older than scored sources", text)
+            lcov = repo / "target" / "coverage" / "python" / "lcov.info"
+            source = repo / "lib" / "a.py"
+            self.assertLess(lcov.stat().st_mtime, source.stat().st_mtime)
+            order = (repo / "ORDER").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(order, ["rust", "python"])
+            self.assertNotIn("crapper exit", text)
+
+    def test_fresh_python_lcov_is_scored_after_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._drive(tmp, "fresh")
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            repo = Path(tmp)
+            self.assertIn("outcome=ran_clean", _outcome(repo))
+            order = (repo / "ORDER").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(order[0], "rust")
+            self.assertIn("python", order)
+            self.assertLess(order.index("python"), order.index("crapper --threshold 10 --use-existing-coverage lib/a.py"))
+            self.assertIn("--use-existing-coverage", order[-1])
+            lcov = repo / "target" / "coverage" / "python" / "lcov.info"
+            self.assertGreater(lcov.stat().st_size, 0)
+            self.assertGreaterEqual(lcov.stat().st_mtime, (repo / "lib" / "a.py").stat().st_mtime)
+
+
 class WorkflowTextTests(unittest.TestCase):
     def test_shell_scripts_parse(self) -> None:
         for path in (CI_SH, CONTAINER_SH):
