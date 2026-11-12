@@ -54,6 +54,30 @@ _CFG_ITEMS = (
 _BLANK_ONLY_BEFORE = "fn other() -> i32 {\n    1\n}\n"
 _BLANK_ONLY_AFTER = "fn other() -> i32 {\n\n    1\n}\n"
 
+_STRING_BLANK_BEFORE = (
+    "fn prod() -> &'static str {\n"
+    '    r#"hello\n'
+    'world"#\n'
+    "}\n"
+    "\n"
+    "#[cfg(test)]\n"
+    "fn checks_production() -> i32 {\n"
+    "    2\n"
+    "}\n"
+)
+_STRING_BLANK_AFTER = (
+    "fn prod() -> &'static str {\n"
+    '    r#"hello\n'
+    "\n"
+    'world"#\n'
+    "}\n"
+    "\n"
+    "#[cfg(test)]\n"
+    "fn checks_production() -> i32 {\n"
+    "    3\n"
+    "}\n"
+)
+
 _DIFF_FAIL_GIT = """#!/usr/bin/env bash
 if [[ "$1" == "diff" ]]; then
   echo "diff failed" >&2
@@ -312,6 +336,23 @@ class MutatorNaTests(unittest.TestCase):
         edn = _edn([_form("other", 1, 3, 3)])
         with tempfile.TemporaryDirectory() as tmp:
             repo, bin_dir = self._repo(tmp, _BLANK_ONLY_BEFORE, _BLANK_ONLY_AFTER)
+            env = self._tools(repo, bin_dir, edn, "")
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            outcome = _outcome(repo)
+            self.assertIn("outcome=mutator_no_coverage", outcome)
+            self.assertIn("killed + survived == 0", text)
+            self.assertIn("blocking mode — mutator covered no sites", text)
+            self.assertNotIn("mutator N/A", text)
+            self.assertNotIn("mutator_na=1", outcome)
+
+    def test_blank_line_inside_string_is_not_na(self) -> None:
+        # The blank line is inside r#"..."#. It is production. The other
+        # changed line is inside #[cfg(test)]. That is not N/A.
+        edn = _edn([_form("prod", 1, 4, 3)])
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, bin_dir = self._repo(tmp, _STRING_BLANK_BEFORE, _STRING_BLANK_AFTER)
             env = self._tools(repo, bin_dir, edn, "")
             proc = _run_ci(repo, env)
             text = proc.stdout + proc.stderr
