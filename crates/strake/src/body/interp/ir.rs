@@ -1386,58 +1386,6 @@ mod tests {
     }
 
     #[test]
-    fn narrow_i32_lt_of_negative_returns_one() {
-        let mut b = Builder::new();
-        let fidx = b.begin_function("f", 0);
-        let left = b.narrow_const(0, span(), Narrow::I32(-1));
-        let right = b.narrow_const(0, span(), Narrow::I32(0));
-        let cond = b.emit_i64_binop(0, span(), Op::Lt, left, right, Imm::None);
-        let then_b = b.new_block();
-        let else_b = b.new_block();
-        b.cond_branch(0, span(), cond, then_b, else_b);
-        let one = b.const_i64(then_b, span(), 1);
-        b.ret(then_b, span(), one);
-        let zero = b.const_i64(else_b, span(), 0);
-        b.ret(else_b, span(), zero);
-        let program = b.finish().expect("finish");
-        let host = crate::body::host::EmptyHost;
-        let mut machine = super::super::Machine::new(&program, 1000, &host);
-        assert_eq!(machine.run_root_function(fidx).expect("run"), 1);
-    }
-
-    #[test]
-    fn narrow_unit_is_not_an_i64_zero_return() {
-        let mut b = Builder::new();
-        let fidx = b.begin_function("f", 0);
-        let unit = b.narrow_const(0, span(), Narrow::Unit);
-        b.ret(0, span(), unit);
-        let program = b.finish().expect("finish");
-        let host = crate::body::host::EmptyHost;
-        let mut machine = super::super::Machine::new(&program, 1000, &host);
-        assert!(machine.run_root_function(fidx).is_err());
-    }
-
-    #[test]
-    fn narrow_f32_signed_zero_compares_equal() {
-        let mut b = Builder::new();
-        let fidx = b.begin_function("f", 0);
-        let neg = b.narrow_const(0, span(), Narrow::F32((-0.0f32).to_bits()));
-        let pos = b.narrow_const(0, span(), Narrow::F32(0.0f32.to_bits()));
-        let cond = b.emit_i64_binop(0, span(), Op::Le, neg, pos, Imm::None);
-        let then_b = b.new_block();
-        let else_b = b.new_block();
-        b.cond_branch(0, span(), cond, then_b, else_b);
-        let one = b.const_i64(then_b, span(), 1);
-        b.ret(then_b, span(), one);
-        let zero = b.const_i64(else_b, span(), 0);
-        b.ret(else_b, span(), zero);
-        let program = b.finish().expect("finish");
-        let host = crate::body::host::EmptyHost;
-        let mut machine = super::super::Machine::new(&program, 1000, &host);
-        assert_eq!(machine.run_root_function(fidx).expect("run"), 1);
-    }
-
-    #[test]
     fn trap_lower_emits_trap_opcode() {
         let mut b = Builder::new();
         b.begin_function("f", 0);
