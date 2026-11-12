@@ -1,18 +1,19 @@
+#[cfg(test)]
+#[rustfmt::skip]
+mod checks {
 //! If check accepts a program, lowering must finish and SSA verify must pass.
+//! `add2_worked` and `if_join_s5_waiver` are checked with the other goldens.
 
 use std::fs;
 use std::path::PathBuf;
 
-use super::check::{self, CheckFailure};
-use super::compile_module;
-use super::diag::Code;
-use super::host::EmptyHost;
-use super::interp::{self, ir::verify_function_ssa_public};
-use super::lower;
-use super::syntax;
-
-/// Check-pass fixtures whose lower abort is locked (exit 70).
-const LOWER_ABORT_GOLDENS: &[&str] = &["add2_worked.strake", "if_join_s5_waiver.strake"];
+use super::super::check::{self, CheckFailure};
+use super::super::compile_module;
+use super::super::diag::Code;
+use super::super::host::EmptyHost;
+use super::super::interp::{self, ir::verify_function_ssa_public};
+use super::super::lower;
+use super::super::syntax;
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../golden")
@@ -136,9 +137,6 @@ fn golden_check_pass_lowers_and_verifies_ssa() {
     names.sort();
     assert!(!names.is_empty());
     for name in names {
-        if LOWER_ABORT_GOLDENS.contains(&name.as_str()) {
-            continue;
-        }
         let src = fs::read_to_string(dir.join(&name)).expect("read golden");
         assert_check_implies_verified(&name, &src);
     }
@@ -234,4 +232,5 @@ fn ordered_compare_range_and_forbidden_are_check_etype() {
         assert_eq!(expect, Code::EType, "{name}");
         assert_etype(name, src);
     }
+}
 }
