@@ -121,6 +121,7 @@ if [[ -d "$ROOT/golden" ]]; then
     "0:test golden/callee_77.strake"
     "0:test golden/match_join_shared.strake"
     "0:test golden/loop_bool_swap.strake"
+    "0:test golden/if_arm_forall.strake"
   )
   for entry in "${GOLDEN_SMOKE[@]}"; do
     want_exit="${entry%%:*}"

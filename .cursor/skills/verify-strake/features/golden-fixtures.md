@@ -18,6 +18,7 @@ strake test golden/add2_basic.strake
 strake check golden/priv.strake
 strake fmt golden/add2_worked.strake
 strake test golden/callee_77.strake
+strake test golden/if_arm_forall.strake
 ```
 
 ## Driving it with verify.sh
