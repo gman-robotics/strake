@@ -127,3 +127,41 @@ fn forall_module_list_body_sees_every_element() {
         assert!(stderr.contains(&format!("\"got\":\"{got}\"")), "{stderr}");
     }
 }
+
+fn run_src(name: &str, src: &str) -> (i32, String) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let path = dir.join(name);
+    std::fs::write(&path, src).expect("write");
+    let (status, _stdout, stderr) = run(&["test", path.to_str().unwrap()]);
+    (status.code().unwrap_or(-1), stderr)
+}
+
+/// Module list `[2, 3]`, same shape as `golden/forall_list_ok.strake`, driven with `for`.
+fn for_module_list_src(body_assert: &str) -> String {
+    format!(
+        "strake 1\n\nt0 = list.empty i64\n\nt1 = list.cons 3 t0\n\nxs = list.cons 2 t1\n\ntest each\n  for x in xs\n    {body_assert}\n  end\n  ret 0\nend\n"
+    )
+}
+
+#[test]
+fn for_over_module_list_runs() {
+    let (code, stderr) = run_src(
+        "for_mod_list.strake",
+        &for_module_list_src("assert.eq x x"),
+    );
+    assert_eq!(code, 0, "{stderr}");
+    assert!(stderr.is_empty(), "{stderr}");
+}
+
+#[test]
+fn for_over_module_list_sees_every_element() {
+    for (want, got) in [("2", "3"), ("3", "2")] {
+        let (code, stderr) = run_src(
+            &format!("for_mod_each_{want}.strake"),
+            &for_module_list_src(&format!("assert.eq x {want}")),
+        );
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("\"E_TEST\""), "{stderr}");
+        assert!(stderr.contains(&format!("\"got\":\"{got}\"")), "{stderr}");
+    }
+}
