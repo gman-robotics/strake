@@ -733,6 +733,32 @@ fn check_stmt_if(
     );
 }
 
+fn with_for_binder(
+    ctx: &mut Ctx,
+    state: &mut CheckState,
+    span: &Span,
+    binder: &str,
+    list: &str,
+    body: &[Stmt],
+    diags: &mut Vec<Diag>,
+    mut each: impl FnMut(&Stmt, &mut Ctx, &mut CheckState, &mut Vec<Diag>),
+) {
+    let ty = match ctx.types.get(list).cloned() {
+        Some(Type::List(elem, _)) => (*elem).clone(),
+        _ => {
+            diags.push(type_diag(span.clone()));
+            scalar("i64", span.clone())
+        }
+    };
+    let fresh = bind_for_body(ctx, binder, ty, span.clone(), diags);
+    state.ctrl.push(Ctrl::For);
+    for s in body {
+        each(s, ctx, state, diags);
+    }
+    state.ctrl.pop();
+    release_body_bind(ctx, binder, fresh);
+}
+
 fn check_stmt_for(
     ctx: &mut Ctx,
     state: &mut CheckState,
@@ -745,20 +771,16 @@ fn check_stmt_for(
     body: &[Stmt],
     diags: &mut Vec<Diag>,
 ) {
-    let ty = match ctx.types.get(list).cloned() {
-        Some(Type::List(elem, _)) => (*elem).clone(),
-        _ => {
-            diags.push(type_diag(span.clone()));
-            scalar("i64", span.clone())
-        }
-    };
-    let fresh = bind_for_body(ctx, binder, ty, span.clone(), diags);
-    state.ctrl.push(Ctrl::For);
-    for s in body {
-        check_stmt(s, ctx, state, fns, in_fn, fn_ret, diags);
-    }
-    state.ctrl.pop();
-    release_body_bind(ctx, binder, fresh);
+    with_for_binder(
+        ctx,
+        state,
+        span,
+        binder,
+        list,
+        body,
+        diags,
+        |s, ctx, state, diags| check_stmt(s, ctx, state, fns, in_fn, fn_ret, diags),
+    );
 }
 
 fn check_stmt_loop_block(
@@ -1369,20 +1391,18 @@ fn check_stmt_for_in_arm(
         diags.push(shadow_diag(span.clone()));
         return;
     }
-    let ty = match ctx.types.get(list).cloned() {
-        Some(Type::List(elem, _)) => (*elem).clone(),
-        _ => {
-            diags.push(type_diag(span.clone()));
-            scalar("i64", span.clone())
-        }
-    };
-    let fresh = bind_for_body(ctx, binder, ty, span.clone(), diags);
-    state.ctrl.push(Ctrl::For);
-    for s in body {
-        check_stmt_in_arm(s, ctx, pre, state, fns, in_fn, fn_ret, loop_params, diags);
-    }
-    state.ctrl.pop();
-    release_body_bind(ctx, binder, fresh);
+    with_for_binder(
+        ctx,
+        state,
+        span,
+        binder,
+        list,
+        body,
+        diags,
+        |s, ctx, state, diags| {
+            check_stmt_in_arm(s, ctx, pre, state, fns, in_fn, fn_ret, loop_params, diags);
+        },
+    );
 }
 
 fn check_stmt_forall_in_arm(
