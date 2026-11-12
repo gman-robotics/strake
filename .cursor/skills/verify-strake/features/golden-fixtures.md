@@ -8,6 +8,7 @@
 - Shared match join: `golden/match_join_shared.strake` (`strake test`, exit 0). Both arms bind `u` and `ret u` returns that join. `golden/match_join.strake` stays exit 3 when an arm does not bind the join.
 - Bool loop params: `golden/loop_bool_break.strake`, `golden/loop_bool_both_arms.strake`, and `golden/loop_bool_swap.strake` (`strake test`, exit 0). A bool parameter lowers and runs like an i64 parameter, including a cross-parameter `continue`. SPEC.md L191 and LOWERING.md L6 do not limit loop parameters to i64.
 - `golden/if_arm_forall.strake` (`strake test`, exit 0). The then-arm `forall` is `0..0` and `assert.eq n 0`, so exit 0 means the body saw the bound. The else arm is `trap`.
+- Ordered compares: `golden/cmp_ord_i64.strake`, `golden/cmp_ord_f64.strake` (NaN and `-0.0` vs `0.0`), `golden/cmp_ord_narrow.strake` (`i32`/`f32`), and `golden/cmp_ord_f32_nan.strake` (`strake test`, exit 0). `golden/cmp_ord_forbid.strake` and `golden/cmp_ord_range.strake` are check `E_TYPE` (exit 1), not a lower abort.
 - This feature is the **CLI smoke** slice in `verify.sh` (representative rows, not the full sweep).
 
 ## How to get to it (user POV)

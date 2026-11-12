@@ -302,6 +302,14 @@ fn verify_inst_targets(inst: &Inst, n: usize, bi: usize) -> Result<(), FinishErr
     }
 }
 
+/// `const.i32`, `const.f32`, and `const.unit` (LOWERING.md closed const list).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Narrow {
+    I32(i32),
+    F32(u32),
+    Unit,
+}
+
 pub(crate) struct Builder {
     functions: Vec<Function>,
     exports: Vec<Export>,
@@ -397,7 +405,7 @@ impl Builder {
         self.functions[fn_idx].blocks[block].insts.push(inst);
     }
 
-    fn emit_i64_binop(
+    pub(crate) fn emit_i64_binop(
         &mut self,
         block: usize,
         span: Span,
@@ -535,6 +543,31 @@ impl Builder {
                 dst: Some(dst),
                 args: Vec::new(),
                 imm: Imm::F64(bits),
+                span,
+            },
+        );
+        dst
+    }
+
+    pub(crate) fn narrow_const(&mut self, block: usize, span: Span, kind: Narrow) -> VReg {
+        // Unit has no payload. The other two kinds carry the bits.
+        let (op, imm) = if kind == Narrow::Unit {
+            (Op::ConstUnit, Imm::None)
+        } else if let Narrow::I32(n) = kind {
+            (Op::ConstI32, Imm::I32(n))
+        } else if let Narrow::F32(bits) = kind {
+            (Op::ConstF32, Imm::F32(bits))
+        } else {
+            (Op::ConstUnit, Imm::None)
+        };
+        let dst = self.alloc_vreg();
+        self.emit(
+            block,
+            Inst {
+                op,
+                dst: Some(dst),
+                args: Vec::new(),
+                imm,
                 span,
             },
         );

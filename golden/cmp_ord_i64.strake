@@ -1,0 +1,27 @@
+strake 1
+
+test t
+  lt_t = lt i64 1 2
+  lt_f = lt i64 2 1
+  lt_eq = lt i64 2 2
+  lt_neg = lt i64 -2 -1
+  le_eq = le i64 2 2
+  le_f = le i64 3 2
+  gt_t = gt i64 0 -1
+  gt_f = gt i64 -1 0
+  gt_eq = gt i64 -1 -1
+  ge_eq = ge i64 -1 -1
+  ge_t = ge i64 0 -1
+  assert.eq lt_t true
+  assert.eq lt_f false
+  assert.eq lt_eq false
+  assert.eq lt_neg true
+  assert.eq le_eq true
+  assert.eq le_f false
+  assert.eq gt_t true
+  assert.eq gt_f false
+  assert.eq gt_eq false
+  assert.eq ge_eq true
+  assert.eq ge_t true
+  ret 0
+end

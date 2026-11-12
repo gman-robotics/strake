@@ -1,0 +1,7 @@
+strake 1
+
+test t
+  c = lt i32 2147483648 0
+  assert.eq c false
+  ret 0
+end
