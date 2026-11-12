@@ -1,0 +1,4 @@
+args: test golden/loop_bool_break.strake
+exit: 0
+--- stdout
+--- stderr
