@@ -6,14 +6,15 @@
 # UB_GATES_ADVISORY defaults to 0 (blocking). UB_GATES_ADVISORY=1 reports and exits 0.
 # run_ub_gates_report.sh sets UB_GATES_ADVISORY=1. A direct call does not.
 # Blocking mode fails on skip (except skipped_no_scope), tool_error, findings in
-# changed scope, and skipped_mutator.
+# changed scope, a mutator budget timeout, and skipped_mutator.
 # UB_GATES_SKIP_MUTATOR=1 and the CURSOR_AGENT auto-skip are skipped_mutator.
 # They are never ran_clean. Blocking mode exits 1. Advisory mode records the
 # same outcome and exits 0.
 # A failed git diff --name-only is tool_error. A missing merge base is tool_error.
 # Base-ref fetch honors UB_GATES_BASE_REF, uses no depth limit, and unshallows
-# a shallow clone. Mutator budget timeout is non-blocking; the step summary's
-# first line states the timeout. .pyi and .d.ts are outside gate scope.
+# a shallow clone. A mutator budget timeout fails the job in blocking mode.
+# Advisory mode reports that timeout and still exits 0. The step summary's
+# first line states which of those happened. .pyi and .d.ts are outside gate scope.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,8 +65,11 @@ append_step_summary() {
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
   mkdir -p "$(dirname "${GITHUB_STEP_SUMMARY}")" 2>/dev/null || return 0
   {
-    if [[ "${MUTATOR_TIMEOUT:-0}" == "1" ]]; then
+    if [[ "${MUTATOR_TIMEOUT:-0}" == "1" && "${ADVISORY}" == "1" ]]; then
       echo "mutator timeout: budget exhausted; non-blocking"
+    fi
+    if [[ "${MUTATOR_TIMEOUT:-0}" == "1" && "${ADVISORY}" != "1" ]]; then
+      echo "mutator timeout: budget exhausted; blocking"
     fi
     echo "## ub-gates"
     echo ""
@@ -152,6 +156,10 @@ exit_for_outcome() {
         log "ub-gates: blocking mode — mutator skip is not ran_clean"
         code=1
       fi
+      ;;
+    mutator_timeout)
+      log "ub-gates: blocking mode — mutator budget timeout fails the job"
+      code=1
       ;;
     *)
       code=1
@@ -244,6 +252,9 @@ apply_scope_filter() {
   local out rc counts findings debt
   local -a flags
   flags=(--base "${MERGE_BASE}" --edn "${edn}" --threshold "${thresh}")
+  if [[ "${cmd}" == "crap" && -n "${BASE_EDN:-}" ]]; then
+    flags+=(--base-edn "${BASE_EDN}")
+  fi
   if [[ "${cmd}" == "crap" && ${#COVERAGE_PREFIX[@]} -gt 0 ]]; then
     flags+=(--coverage-expected)
   fi
@@ -257,6 +268,22 @@ apply_scope_filter() {
     rm -f "${out}"
     return "${rc}"
   fi
+  python3 - "${out}" "${cmd}" <<'PY'
+import json
+import sys
+
+payload = json.load(open(sys.argv[1], encoding="utf-8"))
+kind = sys.argv[2]
+for bucket in ("findings", "debt"):
+    for row in payload[bucket]:
+        if kind == "crap":
+            print(
+                "ub-gates: crapper %s %s %s crap=%s"
+                % (bucket, row["namespace"], row["name"], row["crap"])
+            )
+        else:
+            print("ub-gates: dryer %s score=%s" % (bucket, row["score"]))
+PY
   counts="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); print(len(d["findings"])); print(len(d["debt"]))' "${out}")"
   rm -f "${out}"
   findings="${counts%%$'\n'*}"
@@ -272,8 +299,47 @@ apply_scope_filter() {
   return 0
 }
 
+score_base_crapper() {
+  local base_root file dest rc
+  local -a base_files
+  BASE_EDN=""
+  base_root="$(mktemp -d "${TMPDIR:-/tmp}/ub-crap-base.XXXXXX")"
+  base_files=()
+  for file in "${SCOPE_FILES[@]}"; do
+    if git cat-file -e "${MERGE_BASE}:${file}" 2>/dev/null; then
+      dest="${base_root}/${file}"
+      mkdir -p "$(dirname "${dest}")"
+      git show "${MERGE_BASE}:${file}" >"${dest}"
+      base_files+=("${file}")
+    fi
+  done
+  if [[ "${#base_files[@]}" -eq 0 ]]; then
+    rm -rf "${base_root}"
+    return 0
+  fi
+  set +e
+  (
+    cd "${base_root}"
+    "${CRAPPER}" --no-coverage --threshold 10 "${base_files[@]}"
+  )
+  rc=$?
+  set -e
+  if [[ -f "${base_root}/.metrics/crap.edn" ]]; then
+    mkdir -p .metrics
+    cp "${base_root}/.metrics/crap.edn" .metrics/crap-base.edn
+    BASE_EDN=".metrics/crap-base.edn"
+  fi
+  rm -rf "${base_root}"
+  if [[ "${rc}" -ne 0 && "${rc}" -ne 2 ]]; then
+    return 1
+  fi
+  [[ -n "${BASE_EDN}" ]]
+}
+
 run_crapper() {
   local args=(--threshold 10)
+  BASE_EDN=""
+  BASE_SCORE_FAILED=0
   if [[ ${#COVERAGE_PREFIX[@]} -gt 0 ]]; then
     args+=("${COVERAGE_PREFIX[@]}")
   fi
@@ -282,6 +348,10 @@ run_crapper() {
   "${CRAPPER}" "${args[@]}"
   CRAPPER_RC=$?
   set -e
+  if ! score_base_crapper; then
+    BASE_SCORE_FAILED=1
+    emit_warning "tool_error — base crapper score failed"
+  fi
 }
 
 run_dryer() {
@@ -313,7 +383,11 @@ note_mutator_rc() {
 
 mark_mutator_timeout() {
   MUTATOR_TIMEOUT=1
-  emit_warning "mutator budget exhausted; remaining files skipped; non-blocking"
+  if [[ "${ADVISORY}" == "1" ]]; then
+    emit_warning "mutator budget exhausted; remaining files skipped; non-blocking"
+    return 0
+  fi
+  emit_warning "mutator budget exhausted; remaining files skipped; blocking"
 }
 
 run_mutator() {
@@ -542,6 +616,9 @@ fi
 if ! classify_dryer; then
   TOOL_ERROR=1
 fi
+if [[ "${BASE_SCORE_FAILED:-0}" -eq 1 ]]; then
+  TOOL_ERROR=1
+fi
 
 if [[ "${TOOL_ERROR}" -eq 0 ]]; then
   if [[ "${CRAPPER_FINDINGS}" -gt 0 ]]; then FINDING=1; fi
@@ -554,6 +631,9 @@ if [[ "${TOOL_ERROR}" -eq 1 ]]; then
   OUTCOME="tool_error"
   GATE_MISS=1
   emit_warning "tool_error — dryer/mutator tool failure or missing .metrics/dry.edn after dryer; not ran_clean."
+elif [[ "${MUTATOR_TIMEOUT:-0}" == "1" && "${ADVISORY}" != "1" ]]; then
+  OUTCOME="mutator_timeout"
+  GATE_MISS=1
 elif [[ "${FINDING}" -eq 1 ]]; then
   OUTCOME="ran_with_findings"
 elif [[ "${MUTATOR_SKIPPED}" == "1" ]]; then

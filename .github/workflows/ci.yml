@@ -57,7 +57,7 @@ jobs:
         run: .cursor/skills/verify-strake/scripts/verify.sh
 
   ub-gates:
-    name: ub-gates (advisory)
+    name: ub-gates
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -77,12 +77,26 @@ jobs:
       - name: Cache cargo
         uses: swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
 
-      - name: Run ub-gates (advisory)
+      - name: Run ub-gates
         uses: ./.github/actions/ub-gates
         with:
-          advisory: "1"
+          advisory: "0"
           base-ref: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || 'origin/main' }}
           coverage-command: mkdir -p target/coverage/rust && cargo llvm-cov --locked --lcov --output-path target/coverage/rust/lcov.info
           mutator-test-command: cargo test --locked
           rust: "true"
           hub-path: "."
+
+  pr-body:
+    name: pr-body
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Check pull request body
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: python3 scripts/check_pr_body.py

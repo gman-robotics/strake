@@ -140,5 +140,15 @@ fi
 SCRATCH="$(mktemp -d /tmp/strake-verify-XXXXXX)"
 echo "scratch=$SCRATCH (removed on EXIT)" >>"$SUMMARY"
 
+echo "== gate-scripts ==" | tee -a "$SUMMARY"
+set +e
+python3 -m unittest discover -s scripts/tests 2>&1 | tee "$EVID_DIR/gate-scripts.log"
+gate_code=${PIPESTATUS[0]}
+set -e
+if [[ "$gate_code" -ne 0 ]]; then
+  fail "gate scripts exited $gate_code"
+fi
+pass "gate scripts"
+
 echo "verify-strake: all checks passed" | tee -a "$SUMMARY"
 echo "evidence: $EVID_DIR"

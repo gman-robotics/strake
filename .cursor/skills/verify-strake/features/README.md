@@ -10,5 +10,6 @@ Index of user-facing surfaces to prove on the reference CLI. Each file is one fe
 | [fmt-test-run-usage](fmt-test-run-usage.md) | usage + `fmt`/`test` on goldens (smoke + `golden_sweep`) | real `run` execution ships |
 | [rust-test-suite](rust-test-suite.md) | yes (`golden_sweep`, T2–T6, S1–S4) | new integration test modules or sweep rules |
 | [golden-fixtures](golden-fixtures.md) | smoke (T2–T5) + fmt idempotence | new CLI goldens on `main` (`golden/expect/` + optional `GOLDEN_SMOKE` row) |
+| [gate-scripts](gate-scripts.md) | yes (`scripts/tests` via `verify.sh`) | ub-gates scope, mutator timeout, or `pr-body` contract changes |
 
 Run all mapped features that apply: `.cursor/skills/verify-strake/scripts/verify.sh`.

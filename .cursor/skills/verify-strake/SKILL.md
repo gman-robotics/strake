@@ -47,6 +47,10 @@ Golden pass (when `golden/` exists at repo root):
 
 - `GOLDEN_SMOKE` CLI rows plus fmt idempotence on `golden/add2_worked.strake` (see `features/golden-fixtures.md`).
 
+Gate scripts (ub-gates scope, mutator timeout, `pr-body`):
+
+- `python3 -m unittest discover -s scripts/tests` (see `features/gate-scripts.md`).
+
 ## Evidence
 
 Proof artifacts go under:

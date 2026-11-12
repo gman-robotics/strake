@@ -388,6 +388,179 @@ class AdvisoryGateTests(unittest.TestCase):
             self.assertIn("--lines", logged[0])
             self.assertNotIn("lib/b.py", logged[0])
 
+    def test_blocking_mutator_timeout_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, bin_dir = self._repo(tmp)
+            lib = repo / "lib"
+            (lib / "b.py").write_text("def other():\n    return 1\n", encoding="utf-8")
+            _git(repo, "add", "lib/b.py")
+            _git(repo, "commit", "-m", "second")
+            env = self._tools(
+                repo,
+                bin_dir,
+                dry="{:candidates []}\n",
+                mutator="#!/usr/bin/env bash\necho \"$@\" >> LOG\nsleep 30\nexit 0\n",
+            )
+            _write_exe(
+                bin_dir / "timeout",
+                _TIMEOUT_AFTER_LOG.replace("LOG_PATH", repr(str(repo / "mutator.log"))),
+            )
+            env["UB_GATES_ADVISORY"] = "0"
+            env["UB_GATES_MUTATOR_BUDGET_SECS"] = "60"
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("blocking", text)
+            self.assertNotIn("non-blocking", text)
+            outcome = _outcome(repo)
+            self.assertIn("outcome=mutator_timeout", outcome)
+            self.assertNotIn("outcome=ran_clean", outcome)
+            self.assertIn("mutator_timeout=1", outcome)
+            self.assertIn("advisory=0", outcome)
+
+
+def _edn(rows: list[tuple[str, object, int | None]]) -> str:
+    lines = ["{:entries ["]
+    for name, crap, complexity in rows:
+        token = "nil" if crap is None else str(crap)
+        extra = ""
+        if complexity is not None:
+            extra = f", :complexity {complexity}"
+        lines.append(
+            f'  {{:name "{name}", :namespace "pkg"{extra}, :coverage 0.0, :crap {token}}}'
+        )
+    lines.append("]}")
+    return "\n".join(lines) + "\n"
+
+
+_SCOPE_SPANS = [
+    {"namespace": "pkg", "name": "hot", "start_line": 1, "end_line": 2, "path": "lib/a.py"},
+    {"namespace": "pkg", "name": "old", "start_line": 4, "end_line": 5, "path": "lib/a.py"},
+]
+
+
+class CrapperChangedScopeTests(unittest.TestCase):
+    def _run(
+        self,
+        tmp: str,
+        head_rows: list[tuple[str, object, int | None]],
+        base_rows: list[tuple[str, object, int | None]],
+    ) -> subprocess.CompletedProcess[str]:
+        repo = Path(tmp)
+        _init_repo(repo)
+        lib = repo / "lib"
+        lib.mkdir()
+        before = "def hot():\n    return 1\n\ndef old():\n    return 0\n"
+        after = "def hot():\n    return 2\n\ndef old():\n    return 0\n"
+        (lib / "a.py").write_text(before, encoding="utf-8")
+        _git(repo, "add", "lib/a.py")
+        _git(repo, "commit", "-m", "base")
+        _git(repo, "checkout", "-b", "feat")
+        (lib / "a.py").write_text(after, encoding="utf-8")
+        _git(repo, "add", "lib/a.py")
+        _git(repo, "commit", "-m", "change")
+        bin_dir = repo / "bin"
+        bin_dir.mkdir()
+        head_path = repo / "head.edn"
+        base_path = repo / "base.edn"
+        head_path.write_text(_edn(head_rows), encoding="utf-8")
+        base_path.write_text(_edn(base_rows), encoding="utf-8")
+        _write_exe(
+            bin_dir / "crapper",
+            "#!/usr/bin/env bash\n"
+            "mkdir -p .metrics\n"
+            f"src={str(head_path)!r}\n"
+            'if [[ " $* " == *" --no-coverage "* ]]; then\n'
+            f"  src={str(base_path)!r}\n"
+            "fi\n"
+            'cp "$src" .metrics/crap.edn\n'
+            "exit 0\n",
+        )
+        _write_exe(
+            bin_dir / "dryer",
+            "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+        )
+        _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+        span_path = repo / "spans.json"
+        span_path.write_text(json.dumps(_SCOPE_SPANS), encoding="utf-8")
+        env = _env(
+            bin_dir,
+            UB_GATES_ADVISORY="0",
+            UB_GATES_BASE_REF="main",
+            UB_GATES_MUTATOR_BUDGET_SECS="30",
+            UB_SCOPE_FUNCTIONS_JSON=str(span_path),
+            UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+        )
+        return _run_ci(repo, env)
+
+    def test_changed_function_over_threshold_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                [("hot", 30.0, 4), ("old", 213.0, 20)],
+                [("old", 213.0, 20)],
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=ran_with_findings", _outcome(Path(tmp)))
+            self.assertIn("crapper findings pkg hot crap=30.0", text)
+            self.assertIn("crapper debt pkg old crap=213.0", text)
+
+    def test_untouched_preexisting_debt_passes_and_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                [("hot", 2.0, 1), ("old", 213.0, 20)],
+                [("hot", 2.0, 1), ("old", 213.0, 20)],
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            outcome = _outcome(Path(tmp))
+            self.assertIn("outcome=ran_clean", outcome)
+            self.assertIn("crapper_findings=0", outcome)
+            self.assertIn("crapper_debt=1", outcome)
+            self.assertIn("crapper debt pkg old crap=213.0", text)
+            self.assertNotIn("crapper findings pkg old", text)
+
+    def test_worsened_preexisting_debt_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                [("hot", 40.0, 8), ("old", 213.0, 20)],
+                [("hot", None, 6), ("old", 213.0, 20)],
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("outcome=ran_with_findings", _outcome(Path(tmp)))
+            self.assertIn("crapper findings pkg hot crap=40.0", text)
+            self.assertIn("crapper debt pkg old crap=213.0", text)
+
+    def test_touched_preexisting_debt_that_did_not_rise_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                [("hot", 40.0, 8), ("old", 213.0, 20)],
+                [("hot", None, 8), ("old", 213.0, 20)],
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            outcome = _outcome(Path(tmp))
+            self.assertIn("outcome=ran_clean", outcome)
+            self.assertIn("crapper_findings=0", outcome)
+            self.assertIn("crapper debt pkg hot crap=40.0", text)
+            self.assertIn("crapper debt pkg old crap=213.0", text)
+
+    def test_missing_base_complexity_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = self._run(
+                tmp,
+                [("hot", 30.0, 4), ("old", 213.0, 20)],
+                [("hot", None, None), ("old", 213.0, 20)],
+            )
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 1, text)
+            self.assertIn("crapper findings pkg hot crap=30.0", text)
+
 
 class WorkflowTextTests(unittest.TestCase):
     def test_shell_scripts_parse(self) -> None:
@@ -404,6 +577,13 @@ class WorkflowTextTests(unittest.TestCase):
             script = part.split("\n    - ")[0]
             self.assertNotIn("inputs.hub-path", script)
 
+    def test_ub_gates_job_blocks(self) -> None:
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("\n    name: ub-gates\n", workflow)
+        self.assertNotIn("ub-gates (advisory)", workflow)
+        self.assertIn('advisory: "0"', workflow)
+        self.assertNotIn("continue-on-error", workflow)
+
     def test_locked_coverage_budget_and_unittest_step(self) -> None:
         workflow = WORKFLOW.read_text(encoding="utf-8")
         container = CONTAINER_SH.read_text(encoding="utf-8")
@@ -419,6 +599,9 @@ class WorkflowTextTests(unittest.TestCase):
         )
         self.assertIn("python3 -m unittest discover -s scripts/tests", workflow)
         self.assertIn("UB_GATES_MUTATOR_BUDGET_SECS=1200", readme)
+        self.assertNotIn("Eng is gated until a written re-review", readme)
+        self.assertNotIn("sets advisory mode", readme)
+        self.assertIn('blocking (`advisory: "0"`)', readme)
         self.assertIn("rustup component add llvm-tools-preview", readme)
         self.assertIn("`uv`", readme)
         self.assertIn("`cargo install`", readme)
