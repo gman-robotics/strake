@@ -333,6 +333,18 @@ impl Ctx {
     }
 }
 
+fn bind_for_body(ctx: &mut Ctx, name: &str, ty: Type, span: Span, diags: &mut Vec<Diag>) -> bool {
+    let fresh = !ctx.types.contains_key(name);
+    ctx.bind(name, ty, span, diags);
+    fresh
+}
+
+fn release_body_bind(ctx: &mut Ctx, name: &str, fresh: bool) {
+    if fresh {
+        ctx.types.remove(name);
+    }
+}
+
 fn module_int_bindings(module: &Module) -> HashMap<String, i128> {
     let mut out = HashMap::new();
     for item in &module.items {
@@ -502,10 +514,11 @@ fn check_stmt_property(
         } => {
             check_forall_bound(bound, state, diags);
             let ty = forall_binder_ty(bound, ctx, diags);
-            ctx.bind(binder, ty, span.clone(), diags);
+            let fresh = bind_for_body(ctx, binder, ty, span.clone(), diags);
             for s in body {
                 check_stmt_forall(s, &mut *ctx, state, binder, fns, false, None, diags);
             }
+            release_body_bind(ctx, binder, fresh);
         }
         _ => check_stmt(stmt, ctx, state, fns, false, None, diags),
     }
@@ -689,19 +702,18 @@ fn check_stmt_for(
     body: &[Stmt],
     diags: &mut Vec<Diag>,
 ) {
-    let list_ty = ctx.types.get(list).cloned();
-    match list_ty {
-        Some(Type::List(elem, _)) => {
-            ctx.bind(binder, (*elem).clone(), span.clone(), diags);
-        }
+    let ty = match ctx.types.get(list).cloned() {
+        Some(Type::List(elem, _)) => (*elem).clone(),
         _ => {
             diags.push(type_diag(span.clone()));
-            ctx.bind(binder, scalar("i64", span.clone()), span.clone(), diags);
+            scalar("i64", span.clone())
         }
-    }
+    };
+    let fresh = bind_for_body(ctx, binder, ty, span.clone(), diags);
     for s in body {
         check_stmt(s, ctx, state, fns, in_fn, fn_ret, diags);
     }
+    release_body_bind(ctx, binder, fresh);
 }
 
 fn check_stmt_loop_block(
@@ -1322,25 +1334,18 @@ fn check_stmt_for_in_arm(
         diags.push(shadow_diag(span.clone()));
         return;
     }
-    let list_ty = ctx.types.get(list).cloned();
-    match list_ty {
-        Some(Type::List(elem, _)) => {
-            if ctx.types.contains_key(binder) {
-                diags.push(shadow_diag(span.clone()));
-            } else {
-                ctx.bind(binder, (*elem).clone(), span.clone(), diags);
-            }
-        }
+    let ty = match ctx.types.get(list).cloned() {
+        Some(Type::List(elem, _)) => (*elem).clone(),
         _ => {
             diags.push(type_diag(span.clone()));
-            if !ctx.types.contains_key(binder) {
-                ctx.bind(binder, scalar("i64", span.clone()), span.clone(), diags);
-            }
+            scalar("i64", span.clone())
         }
-    }
+    };
+    let fresh = bind_for_body(ctx, binder, ty, span.clone(), diags);
     for s in body {
         check_stmt_in_arm(s, ctx, pre, state, fns, in_fn, fn_ret, loop_params, diags);
     }
+    release_body_bind(ctx, binder, fresh);
 }
 
 fn check_stmt_forall_in_arm(
@@ -1502,7 +1507,7 @@ fn check_stmt_forall_ctx(
 ) {
     check_forall_bound(bound, state, diags);
     let ty = forall_binder_ty(bound, ctx, diags);
-    ctx.bind(binder, ty, span.clone(), diags);
+    let fresh = bind_for_body(ctx, binder, ty, span.clone(), diags);
     let mut inner = Ctx {
         types: ctx.types.clone(),
         phi_gaps: ctx.phi_gaps.clone(),
@@ -1521,6 +1526,7 @@ fn check_stmt_forall_ctx(
             diags,
         );
     }
+    release_body_bind(ctx, binder, fresh);
 }
 
 fn check_rhs(
