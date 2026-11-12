@@ -754,17 +754,26 @@ impl Builder {
         self.emit_i64_binop(block, span, Op::Ge, lhs, rhs, Imm::None)
     }
 
+    /// `break` leaves the `for` at `exit`, not at the index header.
+    fn for_break_block(header: usize, exit: usize) -> usize {
+        if exit != header {
+            exit
+        } else {
+            header
+        }
+    }
+
     /// Normative `for x in xs` index loop (Phase 2 §3, T3). Owns the index phi,
     /// the `list.get` sum split, and the `trap Lower` err arm: `list.get` cannot
     /// give err while `i < len`, so reaching that arm is `E_LOWER`.
-    /// `body` gets the ok-arm block and the element vreg, and returns its last block.
+    /// `body` gets the ok-arm block, the element vreg, and the loop exit block.
     /// Returns the loop exit block.
     pub(crate) fn for_<E>(
         &mut self,
         entry: usize,
         span: Span,
         xs: VReg,
-        body: impl FnOnce(&mut Self, usize, VReg) -> Result<usize, E>,
+        body: impl FnOnce(&mut Self, usize, VReg, usize) -> Result<usize, E>,
     ) -> Result<usize, E> {
         let n = self.list_len(entry, span.clone(), xs);
         let i_init = self.const_i64(entry, span.clone(), 0);
@@ -785,7 +794,7 @@ impl Builder {
         let tag = self.sum_tag(body_block, span.clone(), slot);
         self.br_table(body_block, span.clone(), tag, &[ok_arm, err_arm]);
         let elt = self.sum_payload(ok_arm, span.clone(), slot);
-        let last = body(self, ok_arm, elt)?;
+        let last = body(self, ok_arm, elt, Self::for_break_block(header, exit))?;
         if !self.block_terminates(last) {
             self.jump(last, span.clone(), after_ok);
         }

@@ -1081,6 +1081,43 @@ pub(crate) fn call_function_i64(
         .ok_or_else(|| ExecFault::Codeless("function returned no value".into()))
 }
 
+/// One-element `for` whose body jumps to the exit block `for_` passes in.
+/// The result is the value returned from that block.
+#[cfg(test)]
+fn for_body_leaves_through_exit(
+    entry: usize,
+    span_at: u32,
+    fuel: i64,
+    result: i64,
+) -> Result<i64, ExecFault> {
+    use crate::body::host::EmptyHost;
+
+    let span = Span {
+        file: String::new(),
+        start: span_at,
+        end: span_at,
+    };
+    let mut b = Builder::new();
+    let fidx = b.begin_function("f", entry);
+    let empty = b.list_empty(entry, span.clone());
+    let seven = b.const_i64(entry, span.clone(), 7);
+    let xs = b.list_cons(entry, span.clone(), seven, empty);
+    let exit = b
+        .for_(entry, span.clone(), xs, |b, ok_arm, _elt, exit| {
+            if exit != entry {
+                b.jump(ok_arm, span.clone(), exit);
+            } else {
+                b.trap_user(ok_arm, span.clone());
+            }
+            Ok::<usize, ()>(ok_arm)
+        })
+        .expect("for_");
+    b.ret_i64(exit, span, result);
+    let program = b.finish().expect("finish");
+    let mut machine = Machine::new(&program, fuel, &EmptyHost);
+    machine.run_root_function(fidx)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1522,6 +1559,12 @@ end
     }
 
     #[test]
+    fn for_body_jump_to_exit_returns_that_value() {
+        let got = super::for_body_leaves_through_exit(0, 0, 1000, 1).expect("run");
+        assert_eq!(got, 1);
+    }
+
+    #[test]
     fn t3_builder_for_runs_and_its_err_arm_traps_lower() {
         let span = t3_span();
         let mut b = Builder::new();
@@ -1531,7 +1574,7 @@ end
         let xs = b.list_cons(0, span.clone(), seven, empty);
         let mut seen = None;
         let exit = b
-            .for_(0, span.clone(), xs, |_, ok_arm, elt| {
+            .for_(0, span.clone(), xs, |_, ok_arm, elt, _exit| {
                 seen = Some(elt);
                 Ok::<usize, ()>(ok_arm)
             })
@@ -1569,7 +1612,7 @@ end
         let t1 = b.list_cons(0, span.clone(), three, empty);
         let xs = b.list_cons(0, span.clone(), four, t1);
         let exit = b
-            .for_(0, span.clone(), xs, |b, ok_arm, elt| {
+            .for_(0, span.clone(), xs, |b, ok_arm, elt, _exit| {
                 let hit = b.new_block();
                 let next = b.new_block();
                 let want = b.const_i64(ok_arm, span.clone(), target);

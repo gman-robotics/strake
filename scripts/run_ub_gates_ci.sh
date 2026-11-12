@@ -16,7 +16,9 @@
 # Advisory mode reports that timeout and still exits 0. The step summary's
 # first line states which of those happened. Changed Python is measured with
 # coverage.py before the mutator. Blocking mode fails when a changed file has
-# mutation sites and none of them are covered. .pyi and .d.ts are outside gate scope.
+# mutation sites and none were killed or survived. Kills in another file do not
+# cover it. An uncovered site on a changed line is that miss when no
+# changed-line site was killed or survived. .pyi and .d.ts are outside gate scope.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,6 +55,7 @@ write_outcome() {
     if [[ -n "${MUTATOR_KILLED:-}" ]]; then printf 'mutator_killed=%s\n' "${MUTATOR_KILLED}"; fi
     if [[ -n "${MUTATOR_SURVIVED:-}" ]]; then printf 'mutator_survived=%s\n' "${MUTATOR_SURVIVED}"; fi
     if [[ -n "${MUTATOR_UNCOVERED:-}" ]]; then printf 'mutator_uncovered=%s\n' "${MUTATOR_UNCOVERED}"; fi
+    if [[ -n "${MUTATOR_NOT_RUN:-}" ]]; then printf 'mutator_not_run=%s\n' "${MUTATOR_NOT_RUN}"; fi
     if [[ -n "${TOOL_ERROR:-}" ]]; then printf 'tool_error=%s\n' "${TOOL_ERROR}"; fi
   } >"${OUTCOME_FILE}"
 }
@@ -124,6 +127,7 @@ append_step_summary() {
     if [[ -n "${MUTATOR_KILLED:-}" ]]; then echo "| mutator_killed | ${MUTATOR_KILLED} |"; fi
     if [[ -n "${MUTATOR_SURVIVED:-}" ]]; then echo "| mutator_survived | ${MUTATOR_SURVIVED} |"; fi
     if [[ -n "${MUTATOR_UNCOVERED:-}" ]]; then echo "| mutator_uncovered | ${MUTATOR_UNCOVERED} |"; fi
+    if [[ -n "${MUTATOR_NOT_RUN:-}" ]]; then echo "| mutator_not_run | ${MUTATOR_NOT_RUN} |"; fi
     echo ""
     echo "Outcome file: \`${OUTCOME_FILE}\`"
   } >>"${GITHUB_STEP_SUMMARY}"
@@ -485,36 +489,112 @@ read_mutator_counts() {
   MUTATOR_SURVIVED=0
   MUTATOR_UNCOVERED=0
   MUTATOR_COVERED=0
+  MUTATOR_NOT_RUN=0
   MUTATOR_NO_COVERAGE=0
   if [[ -d .metrics/mutate ]]; then
-    counts="$(python3 - <<'PY'
+    set +e
+    changed_json="$(python3 "${SCOPE_PY}" lines --base "${MERGE_BASE}" 2>/dev/null)"
+    diff_rc=$?
+    set -e
+    if [[ "${diff_rc}" -ne 0 ]]; then
+      changed_json=""
+      log "ub-gates: mutator changed-line diff failed; failing closed"
+    fi
+    counts="$(
+      UB_CHANGED_JSON="${changed_json}" \
+      UB_DIFF_OK="$([[ "${diff_rc}" -eq 0 ]] && printf 1 || printf 0)" \
+      UB_MUTATOR_STATUS="${MUTATOR_STATUS_LOG:-.metrics/mutator-status.txt}" \
+      python3 - <<'PY'
+import json
+import os
 import re
+import sys
 from pathlib import Path
+
+def totals(text: str) -> tuple[int, int, int, int]:
+    def total(name: str) -> int:
+        return sum(int(item) for item in re.findall(rf":{name}\s+(\d+)", text))
+    return total("sites"), total("killed"), total("survived"), total("uncovered")
+
+def status_lines(path: Path) -> dict[str, dict[str, set[int]]]:
+    found = {"UNCOVERED": {}, "KILLED": {}, "SURVIVED": {}}
+    if not path.is_file():
+        return found
+    pattern = re.compile(r"^(UNCOVERED|KILLED|SURVIVED)\s+(\S+):(\d+)\b")
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        match = pattern.match(line.strip())
+        if match is None:
+            continue
+        kind, source, number = match.group(1), match.group(2), int(match.group(3))
+        found[kind].setdefault(source, set()).add(number)
+    return found
+
+def hits(bucket: dict[str, set[int]], source: str, lines: list[int]) -> bool:
+    return bool(bucket.get(source, set()) & set(lines))
+
+def source_of(text: str) -> str:
+    match = re.search(r':source\s+"((?:\\.|[^"\\])*)"', text)
+    if match is None:
+        return ""
+    return match.group(1).replace('\\"', '"').replace("\\\\", "\\")
 
 sites = killed = survived = uncovered = 0
 bare = False
+reason = ""
 root = Path(".metrics/mutate")
-for path in root.rglob("*.edn"):
+by_source: dict[str, list[int]] = {}
+for path in sorted(root.rglob("*.edn")):
     text = path.read_text(encoding="utf-8", errors="replace")
-    def total(name: str) -> int:
-        return sum(int(item) for item in re.findall(rf":{name}\s+(\d+)", text))
-    file_sites = total("sites")
-    file_killed = total("killed")
-    file_survived = total("survived")
+    file_sites, file_killed, file_survived, file_uncovered = totals(text)
+    src = source_of(text) or path.as_posix()
+    bucket = by_source.setdefault(src, [0, 0, 0])
+    bucket[0] += file_sites
+    bucket[1] += file_killed
+    bucket[2] += file_survived
     sites += file_sites
     killed += file_killed
     survived += file_survived
-    uncovered += total("uncovered")
-    if file_sites > 0 and file_killed + file_survived == 0:
-        bare = True
+    uncovered += file_uncovered
+
+def mark_uncovered_files(suffix: str) -> None:
+    global bare, reason
+    for src, (file_sites, file_killed, file_survived) in by_source.items():
+        if file_sites > 0 and file_killed + file_survived == 0:
+            bare = True
+            reason = f"{src} has mutation sites and killed + survived == 0{suffix}"
+
+if os.environ.get("UB_DIFF_OK") != "1":
+    mark_uncovered_files(" and the diff was unavailable")
+else:
+    try:
+        changed = json.loads(os.environ.get("UB_CHANGED_JSON") or "{}")
+    except json.JSONDecodeError as exc:
+        print(f"ub-gates: mutator changed-line json failed ({exc}); failing closed", file=sys.stderr)
+        changed = None
+    if not isinstance(changed, dict):
+        mark_uncovered_files(" and the diff was unreadable")
+    else:
+        mark_uncovered_files("")
+        reported = status_lines(Path(os.environ["UB_MUTATOR_STATUS"]))
+        for source, lines in changed.items():
+            if not isinstance(lines, list):
+                continue
+            numbers = [int(number) for number in lines]
+            uncovered_hit = hits(reported["UNCOVERED"], source, numbers)
+            ran = hits(reported["KILLED"], source, numbers) or hits(reported["SURVIVED"], source, numbers)
+            if uncovered_hit and not ran:
+                bare = True
+                reason = f"{source} uncovered on a changed line and no changed-line mutant ran"
 if bare:
     print("bare")
+    if reason:
+        print(f"ub-gates: mutator no-coverage: {reason}", file=sys.stderr)
 print(sites)
 print(killed)
 print(survived)
 print(uncovered)
 PY
-)"
+    )"
     if [[ "${counts%%$'\n'*}" == "bare" ]]; then
       MUTATOR_NO_COVERAGE=1
       counts="${counts#*$'\n'}"
@@ -526,8 +606,9 @@ PY
     MUTATOR_SURVIVED="${counts%%$'\n'*}"
     MUTATOR_UNCOVERED="${counts##*$'\n'}"
     MUTATOR_COVERED=$((MUTATOR_KILLED + MUTATOR_SURVIVED))
+    MUTATOR_NOT_RUN=$((MUTATOR_SITES - MUTATOR_COVERED - MUTATOR_UNCOVERED))
   fi
-  log "ub-gates: mutator sites=${MUTATOR_SITES} covered=${MUTATOR_COVERED} killed=${MUTATOR_KILLED} survived=${MUTATOR_SURVIVED} uncovered=${MUTATOR_UNCOVERED}"
+  log "ub-gates: mutator sites=${MUTATOR_SITES} covered=${MUTATOR_COVERED} killed=${MUTATOR_KILLED} survived=${MUTATOR_SURVIVED} uncovered=${MUTATOR_UNCOVERED} not_run=${MUTATOR_NOT_RUN}"
 }
 
 run_mutator() {
@@ -535,6 +616,9 @@ run_mutator() {
   MUTATOR_RC=0
   MUTATOR_TIMEOUT=0
   MUTATOR_BUDGET_USED="${MUTATOR_BUDGET}"
+  MUTATOR_STATUS_LOG=".metrics/mutator-status.txt"
+  mkdir -p .metrics
+  : > "${MUTATOR_STATUS_LOG}"
   log "ub-gates: mutator budget ${MUTATOR_BUDGET}s"
   deadline=$((SECONDS + MUTATOR_BUDGET))
   for file in "${SCOPE_FILES[@]}"; do
@@ -561,9 +645,17 @@ run_mutator() {
     fi
     args+=("${file}")
     set +e
-    timeout "${left}" "${MUTATOR}" "${args[@]}"
+    timeout "${left}" "${MUTATOR}" "${args[@]}" >"${MUTATOR_STATUS_LOG}.part" 2>"${MUTATOR_STATUS_LOG}.err"
     rc=$?
     set -e
+    if [[ -f "${MUTATOR_STATUS_LOG}.part" ]]; then
+      cat "${MUTATOR_STATUS_LOG}.part"
+      cat "${MUTATOR_STATUS_LOG}.part" >> "${MUTATOR_STATUS_LOG}"
+    fi
+    if [[ -f "${MUTATOR_STATUS_LOG}.err" ]]; then
+      cat "${MUTATOR_STATUS_LOG}.err" >&2
+    fi
+    rm -f "${MUTATOR_STATUS_LOG}.part" "${MUTATOR_STATUS_LOG}.err"
     if [[ "${rc}" -eq 124 || "${rc}" -eq 137 ]]; then
       mark_mutator_timeout
       return 0
