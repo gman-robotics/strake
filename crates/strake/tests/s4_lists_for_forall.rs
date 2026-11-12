@@ -165,3 +165,48 @@ fn for_over_module_list_sees_every_element() {
         assert!(stderr.contains(&format!("\"got\":\"{got}\"")), "{stderr}");
     }
 }
+
+fn forall_list_binder_src(ty: &str) -> String {
+    format!(
+        "strake 1\n\nxs = list.empty i64\n\nproperty p\n  forall n: {ty} in xs\n  end\nend\n"
+    )
+}
+
+fn forall_range_binder_src(ty: &str) -> String {
+    format!("strake 1\n\nproperty p\n  forall n: {ty} in 0..1\n  end\nend\n")
+}
+
+fn assert_binder_rejected(name: &str, src: &str) {
+    let (code, stderr) = run_src(name, src);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("\"E_TYPE\""), "{stderr}");
+    assert!(!stderr.contains("\"E_TEST\""), "{stderr}");
+}
+
+#[test]
+fn forall_bool_binder_on_i64_list_is_etype() {
+    assert_binder_rejected(
+        "forall_bool_list.strake",
+        &forall_list_binder_src("bool"),
+    );
+}
+
+#[test]
+fn forall_bool_binder_on_range_is_etype() {
+    assert_binder_rejected(
+        "forall_bool_range.strake",
+        &forall_range_binder_src("bool"),
+    );
+}
+
+#[test]
+fn forall_i64_binder_on_list_and_range_runs() {
+    for (name, src) in [
+        ("forall_i64_list.strake", forall_list_binder_src("i64")),
+        ("forall_i64_range.strake", forall_range_binder_src("i64")),
+    ] {
+        let (code, stderr) = run_src(name, &src);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(stderr.is_empty(), "{stderr}");
+    }
+}
