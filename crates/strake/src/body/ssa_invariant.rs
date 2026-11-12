@@ -12,7 +12,7 @@ use super::lower;
 use super::syntax;
 
 /// Check-pass fixtures whose lower abort is locked (exit 70).
-const LOWER_ABORT_GOLDENS: &[&str] = &["add2_worked.strake", "if_join_s5_waiver.strake"];
+const LOWER_ABORT_GOLDENS: &[&str] = &["add2_worked.strake"];
 
 fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../golden")

@@ -106,3 +106,29 @@ end
     assert_eq!(exit.code, 0, "stderr={}", exit.stderr);
     assert!(exit.stderr.is_empty(), "stderr={}", exit.stderr);
 }
+
+#[test]
+fn if_join_name_on_one_arm_stays_rejected() {
+    let src = "\
+strake 1
+
+fn pick(c: bool) -> i64
+  if c
+    x = add i64 1 0
+    y = add i64 2 0
+  else
+    x = add i64 3 0
+  end
+  ret y
+end
+
+test t
+  ret 0
+end
+";
+    let path = std::env::temp_dir().join("strake_gma612_one_arm.strake");
+    std::fs::write(&path, src).expect("write");
+    let exit = strake::test(path.to_str().unwrap(), strake::Opts::default());
+    assert_eq!(exit.code, 1, "stderr={}", exit.stderr);
+    assert!(exit.stderr.contains("E_IF_PHI"), "stderr={}", exit.stderr);
+}
