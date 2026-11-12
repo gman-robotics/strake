@@ -127,6 +127,16 @@ if [[ -d "$ROOT/golden" ]]; then
     "1:test golden/cmp_ord_forbid.strake"
     "0:test golden/f32_arith.strake"
     "0:test golden/f32_div.strake"
+    "1:check golden/dup_record.strake"
+    "0:test golden/record_project.strake"
+    "1:check golden/result_unit_join.strake"
+    "0:test golden/result_i64_join.strake"
+    "1:check golden/loop_exit_record.strake"
+    "1:check golden/loop_exit_bytes.strake"
+    "0:test golden/loop_arm_join_true.strake"
+    "1:check golden/match_arm_records.strake"
+    "1:check golden/match_arm_project.strake"
+    "0:test golden/match_arm_agree.strake"
   )
   for entry in "${GOLDEN_SMOKE[@]}"; do
     want_exit="${entry%%:*}"

@@ -1,0 +1,5 @@
+args: check golden/result_unit_join.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/result_unit_join.strake","start":33,"end":96}}

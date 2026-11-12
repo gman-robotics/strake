@@ -1,0 +1,18 @@
+strake 1
+
+fn f(c: bool) -> i64
+  if c
+    r = bytes.new x"ff"
+  else
+    loop r = 0
+      break
+    end
+  end
+  ret 0
+end
+
+test t
+  n = call f(true)
+  assert.eq n 0
+  ret 0
+end

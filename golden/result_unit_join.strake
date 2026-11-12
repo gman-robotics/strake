@@ -1,0 +1,21 @@
+strake 1
+
+fn f(c: bool) -> i64
+  if c
+    r = ok i64 4
+  else
+    r = ok unit unit
+  end
+  match r
+    ok v ->
+      ret v
+    err _ ->
+      ret 0
+  end
+end
+
+test t
+  c = false
+  n = call f(c)
+  ret n
+end

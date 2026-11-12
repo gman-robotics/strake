@@ -1,0 +1,31 @@
+strake 1
+
+type A { x: i64, y: i64 }
+
+fn f(c: bool) -> i64
+  if c
+    r = ok unit unit
+  else
+    r = err unit unit
+  end
+  match r
+    ok _ ->
+      p = { x: 1, y: 2 }
+    err _ ->
+      p = { x: 3, y: 4 }
+  end
+  v = p.x
+  ret v
+end
+
+test ok_arm
+  n = call f(true)
+  assert.eq n 1
+  ret 0
+end
+
+test err_arm
+  n = call f(false)
+  assert.eq n 3
+  ret 0
+end

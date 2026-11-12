@@ -1,0 +1,19 @@
+strake 1
+
+type Rec { n: i64 }
+
+fn f(c: bool) -> i64
+  if c
+    r = { n: 1 }
+  else
+    loop r = 0
+      break
+    end
+  end
+  ret r
+end
+
+test t
+  n = call f(true)
+  ret n
+end

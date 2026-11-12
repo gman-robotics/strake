@@ -1,0 +1,27 @@
+strake 1
+
+fn f(c: bool) -> i64
+  if c
+    r = ok i64 4
+  else
+    r = ok i64 5
+  end
+  match r
+    ok v ->
+      ret v
+    err _ ->
+      ret 0
+  end
+end
+
+test arm4
+  n = call f(true)
+  assert.eq n 4
+  ret 0
+end
+
+test arm5
+  n = call f(false)
+  assert.eq n 5
+  ret 0
+end
