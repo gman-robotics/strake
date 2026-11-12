@@ -220,11 +220,7 @@ impl<'a> Machine<'a> {
             }
             let inst = func.blocks[block].insts[ip].clone();
             self.frames[frame_top].ip += 1;
-            if !self.exec_float_arith(&inst)?
-                && !self.exec_card_ext(&inst)?
-                && !self.exec_region(&inst)?
-                && self.exec_inst(&inst)?
-            {
+            if !self.exec_card_ext(&inst)? && !self.exec_region(&inst)? && self.exec_inst(&inst)? {
                 break;
             }
         }
@@ -245,30 +241,16 @@ impl<'a> Machine<'a> {
     /// One step as `run_loop` dispatches it, without the root-return check.
     #[cfg(test)]
     pub(crate) fn test_step(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
-        Ok(!self.exec_float_arith(inst)?
-            && !self.exec_card_ext(inst)?
-            && !self.exec_region(inst)?
-            && self.exec_inst(inst)?)
+        Ok(!self.exec_card_ext(inst)? && !self.exec_region(inst)? && self.exec_inst(inst)?)
     }
 
     fn exec_float_arith(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
-        if !matches!(inst.imm, Imm::F32(0)) {
+        if !f32_arith_inst(inst) {
             return Ok(false);
         }
-        let (x, y) = match inst.op {
-            Op::Add | Op::Sub | Op::Mul | Op::Div => {
-                self.charge(1, inst.span.clone())?;
-                let (a, b) = self.two_f64(inst)?;
-                (a as f32, b as f32)
-            }
-            _ => return Ok(false),
-        };
-        let z = match inst.op {
-            Op::Sub => x - y,
-            Op::Mul => x * y,
-            Op::Div => x / y,
-            _ => x + y,
-        };
+        self.charge(1, inst.span.clone())?;
+        let (a, b) = self.two_f64(inst)?;
+        let z = f32_binop(inst.op, a as f32, b as f32);
         self.write_reg(inst.dst, Value::F64(f32_bits_to_f64(z.to_bits())))?;
         Ok(true)
     }
@@ -617,6 +599,13 @@ impl<'a> Machine<'a> {
     }
 
     fn exec_card_ext(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
+        if self.exec_float_arith(inst)? {
+            return Ok(true);
+        }
+        self.exec_cmp_or_const(inst)
+    }
+
+    fn exec_cmp_or_const(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
         let is_const = matches!(inst.op, Op::ConstI32 | Op::ConstF32 | Op::ConstUnit);
         let is_cmp = matches!(inst.op, Op::Ne | Op::Lt | Op::Le | Op::Gt | Op::Ge)
             || self.is_float_eq(inst)?;
@@ -857,6 +846,19 @@ macro_rules! imm_or_err {
             _ => Err(exec_codeless($msg)),
         }
     };
+}
+
+fn f32_arith_inst(inst: &Inst) -> bool {
+    matches!(inst.imm, Imm::F32(0)) && matches!(inst.op, Op::Add | Op::Sub | Op::Mul | Op::Div)
+}
+
+fn f32_binop(op: Op, x: f32, y: f32) -> f32 {
+    match op {
+        Op::Sub => x - y,
+        Op::Mul => x * y,
+        Op::Div => x / y,
+        _ => x + y,
+    }
 }
 
 fn value_as_i64(v: &Value) -> Result<i64, ExecFault> {
@@ -1622,6 +1624,13 @@ end
             Some(Value::F64(z)) => assert!(z.is_infinite() && z.is_sign_positive()),
             other => panic!("div0 {other:?}"),
         }
+        let mut zero = t3_machine_with_regs(&program, vec![None, None, None]);
+        let before = zero.fuel;
+        assert!(!zero
+            .test_step(&t3_inst(Op::ConstF32, Imm::F32(0)))
+            .expect("const +0"));
+        assert_eq!(zero.fuel, before - 1);
+        assert_eq!(zero.frames.last().unwrap().regs[2], Some(Value::F64(0.0)));
     }
 
     #[test]
