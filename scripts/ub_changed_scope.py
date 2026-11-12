@@ -491,10 +491,9 @@ def _lookup_base(index: dict[tuple[str, str], CrapRow], row: CrapRow) -> CrapRow
     return index.get((row.namespace, row.name))
 
 
-def _crap_pair_missing(row: CrapRow, base: CrapRow) -> bool:
-    if row.crap is None:
-        return True
-    return base.crap is None
+def _both_scores(left: object, right: object) -> bool:
+    pair = (left, right)
+    return pair[0] is not None and pair[1] is not None
 
 
 def _row_crap(row: CrapRow) -> float:
@@ -502,15 +501,9 @@ def _row_crap(row: CrapRow) -> float:
 
 
 def _score_rose(row: CrapRow, base: CrapRow) -> bool | None:
-    if _crap_pair_missing(row, base):
+    if not _both_scores(row.crap, base.crap):
         return None
     return _row_crap(row) > _row_crap(base)
-
-
-def _complexity_known(row: CrapRow, base: CrapRow) -> bool:
-    if row.complexity is None:
-        return False
-    return base.complexity is not None
 
 
 def _complexity_number(row: CrapRow) -> int:
@@ -522,9 +515,10 @@ def _complexity_rose(row: CrapRow, base: CrapRow) -> bool:
 
 
 def _worse_by_complexity(row: CrapRow, base: CrapRow) -> bool:
-    if not _complexity_known(row, base):
-        return True
-    return _complexity_rose(row, base)
+    present = _both_scores(row.complexity, base.complexity)
+    if present:
+        return _complexity_rose(row, base)
+    return True
 
 
 def _worse_known(row: CrapRow, base: CrapRow, rose: bool | None) -> bool:
