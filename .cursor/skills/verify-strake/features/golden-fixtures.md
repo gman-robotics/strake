@@ -6,6 +6,7 @@
 - Full matrix: `crates/strake/tests/golden_sweep.rs` runs every golden with a checked-in `golden/expect/<stem>.txt` (Phase 2 T1 harness).
 - Targeted suites: `t2_golden.rs` … `t6_golden.rs`, plus S1–S5 modules (`s1_ssa_golden`, `s2_loop_golden`, `s3_match`, `s4_lists_for_forall`, `s5_join_bool`, …).
 - Shared match join: `golden/match_join_shared.strake` (`strake test`, exit 0). Both arms bind `u` and `ret u` returns that join. `golden/match_join.strake` stays exit 3 when an arm does not bind the join.
+- Bool loop params: `golden/loop_bool_break.strake`, `golden/loop_bool_both_arms.strake`, and `golden/loop_bool_swap.strake` (`strake test`, exit 0). A bool parameter lowers and runs like an i64 parameter, including a cross-parameter `continue`. SPEC.md L191 and LOWERING.md L6 do not limit loop parameters to i64.
 - This feature is the **CLI smoke** slice in `verify.sh` (representative rows, not the full sweep).
 
 ## How to get to it (user POV)

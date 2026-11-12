@@ -7,7 +7,7 @@
 - Golden CLI sweep (T1): `golden_sweep` — every `golden/*.strake` with `golden/expect/<stem>.txt` or `UNIT_ONLY`.
 - Tier goldens: `t2_golden`, `t3_golden`, `t4_golden`, `t5_golden` (test channel), `t6_golden` (wrap/div0/fuel/stack/not).
 - Carry-plan / lowering: `s1_ssa_golden`, `s2_carry_plan_smoke`, `s2_loop_golden`, `s3_match`, `s4_lists_for_forall`, `s5_join_bool`.
-- `s5_join_bool` drives GMA-423 in process: shared match join `ret u` (exit 0) and `match_join.strake` still exit 3.
+- `s5_join_bool` drives GMA-423 in process: shared match join `ret u` (exit 0), `match_join.strake` still exit 3, and bool loop `break`, both-arms join, and swap `continue`.
 - `s4_lists_for_forall` also drives the GMA-534 CLI rows: `for` over a module list, `forall` binder type, binder scope, `break`/`continue` inside `for`, and an out-of-range module `i64` bind. `for_body_jump_to_exit_returns_that_value` runs a `for` through the builder and interpreter and checks the returned value.
 
 ## How to get to it (user POV)

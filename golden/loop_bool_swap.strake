@@ -1,0 +1,14 @@
+strake 1
+
+test loop_bool_swap
+  loop a = false b = true
+    stop = eq bool a true
+    if stop
+      break
+    end
+    continue a = b b = a
+  end
+  assert.eq a true
+  assert.eq b false
+  ret 0
+end

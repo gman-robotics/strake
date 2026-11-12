@@ -1,4 +1,4 @@
-//! GMA-423: shared match join name.
+//! GMA-423: shared match join name, and bool loop parameters.
 
 use std::path::PathBuf;
 
@@ -33,4 +33,32 @@ fn match_join_missing_arm_stays_codeless() {
         "stderr={}",
         exit.stderr
     );
+}
+
+#[test]
+fn loop_bool_break_exits_0() {
+    let (code, stderr) = run_test("loop_bool_break.strake");
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
+}
+
+#[test]
+fn loop_bool_both_arms_exits_0() {
+    let (code, stderr) = run_test("loop_bool_both_arms.strake");
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
+}
+
+#[test]
+fn loop_bool_swap_exits_0() {
+    let (code, stderr) = run_test("loop_bool_swap.strake");
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
+}
+
+#[test]
+fn loop_i64_swap_still_exits_0() {
+    let (code, stderr) = run_test("loop_swap.strake");
+    assert_eq!(code, 0, "stderr={stderr}");
+    assert!(stderr.is_empty(), "stderr={stderr}");
 }

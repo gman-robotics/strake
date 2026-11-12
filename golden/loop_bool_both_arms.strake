@@ -1,0 +1,31 @@
+strake 1
+
+test loop_bool_both.true
+  c = true
+  if c
+    loop a = true
+      break
+    end
+  else
+    loop a = false
+      break
+    end
+  end
+  assert.eq a true
+  ret 0
+end
+
+test loop_bool_both.false
+  c = false
+  if c
+    loop a = true
+      break
+    end
+  else
+    loop a = false
+      break
+    end
+  end
+  assert.eq a false
+  ret 0
+end

@@ -1,0 +1,9 @@
+strake 1
+
+test loop_bool_break
+  loop a = false
+    break
+  end
+  assert.eq a false
+  ret 0
+end
