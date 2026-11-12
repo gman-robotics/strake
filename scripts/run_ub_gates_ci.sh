@@ -21,7 +21,8 @@
 # changed-line site was killed or survived. The mutator reports N/A and passes
 # only when every changed line in every gate-relevant file is test code: an
 # is_test_path (tests/ and the other test paths) or a line inside a #[cfg(test)]
-# item. Any other diff uses the per-file and uncovered-line checks above,
+# item. An empty or whitespace-only line is neither test nor production, and
+# N/A still needs one real test line. Any other diff uses the per-file and uncovered-line checks above,
 # unchanged. A scan that cannot classify a line fails closed. A diff failure
 # still fails. .pyi and .d.ts are outside gate scope.
 set -euo pipefail
@@ -709,9 +710,17 @@ def _cfg_test_lines(text: str):
         found.update(range(first, last + 1))
     return found
 
+def _neutral_line(source: str, number: int) -> bool:
+    # Empty or whitespace-only in the new file. Neither test nor production.
+    rows = source.splitlines()
+    if number < 1 or number > len(rows):
+        return False
+    return rows[number - 1].strip() == ""
+
 def _changed_lines_are_test(changed: dict) -> bool:
     # True only when every changed line of every gate-relevant file is test
-    # code. One production line, or a scan we cannot finish, is false.
+    # code or a neutral blank. One production line, or a scan we cannot
+    # finish, is false. At least one real test line is required.
     saw = False
     for path, lines in changed.items():
         if not isinstance(path, str) or not _gate_relevant(path):
@@ -734,7 +743,11 @@ def _changed_lines_are_test(changed: dict) -> bool:
         if spans is None:
             return False
         for number in lines:
-            if not isinstance(number, int) or number not in spans:
+            if not isinstance(number, int):
+                return False
+            if _neutral_line(source, number):
+                continue
+            if number not in spans:
                 return False
             saw = True
     return saw
