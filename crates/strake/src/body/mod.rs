@@ -46,7 +46,8 @@ pub(crate) fn exec_entered_count() -> usize {
 
 #[cfg(test)]
 pub(crate) fn reset_exec_entered() {
-    EXEC_ENTERED.store(0, std::sync::atomic::Ordering::SeqCst);
+    let cleared = 0;
+    EXEC_ENTERED.store(cleared, std::sync::atomic::Ordering::SeqCst);
 }
 
 pub(crate) fn lower_abort_message(err: &LowerError) -> String {

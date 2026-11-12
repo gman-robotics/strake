@@ -82,8 +82,9 @@ fn match_arm_for_exits_0() {
     assert!(stderr.is_empty());
 }
 
-/// The golden asserts `n == 0`. The same body with `n == 1` is `E_TEST` got `0`,
-/// so exit 0 is the bound the body saw, not an empty then-arm.
+/// SPEC.md "Forall span": `LO..HI` is inclusive, and
+/// `span = i128(HI) - i128(LO) + 1`. `0..0` has span 1, so the body runs once
+/// with `n == 0`. The same golden with `assert.eq n 1` is `E_TEST` got `0`.
 #[test]
 fn if_arm_forall_body_sees_the_bound() {
     let src = std::fs::read_to_string(golden("if_arm_forall.strake"))
