@@ -43,6 +43,7 @@ struct CheckState {
     sum_types: HashMap<String, SumTypeInfo>,
     record_types: HashMap<String, Vec<(String, Type)>>,
     module_int_binds: HashMap<String, i128>,
+    module_list_binds: HashMap<String, Type>,
     /// `import region mem : region` is present (`load`/`store` allowed).
     has_region: bool,
 }
@@ -62,6 +63,7 @@ impl CheckState {
             sum_types,
             record_types,
             module_int_binds,
+            module_list_binds: HashMap::new(),
             has_region,
         }
     }
@@ -80,6 +82,7 @@ pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure
     let module_int_binds = module_int_bindings(module);
     let has_region = super::syntax::region_pages(module).is_some();
     let mut state = CheckState::new(sum_types, record_types, module_int_binds, has_region);
+    seed_module_list_binds(module, &mut state, &mut diags);
     let fn_table: Vec<&FnItem> = module
         .items
         .iter()
@@ -340,19 +343,37 @@ fn module_int_bindings(module: &Module) -> HashMap<String, i128> {
     out
 }
 
-fn apply_module_binds(ctx: &mut Ctx, module_int_binds: &HashMap<String, i128>, span: Span) {
-    for name in module_int_binds.keys() {
+fn apply_module_binds(ctx: &mut Ctx, state: &CheckState, span: Span) {
+    for name in state.module_int_binds.keys() {
         let ty = scalar("i64", span.clone());
         if !ctx.types.contains_key(name) {
             ctx.types.insert(name.clone(), ty);
         }
+    }
+    for (name, ty) in &state.module_list_binds {
+        if !ctx.types.contains_key(name) {
+            ctx.types.insert(name.clone(), ty.clone());
+        }
+    }
+}
+
+fn seed_module_list_binds(module: &Module, state: &mut CheckState, diags: &mut Vec<Diag>) {
+    let mut ctx = Ctx::new();
+    for item in &module.items {
+        let Item::ListBind { name, rhs, .. } = item else {
+            continue;
+        };
+        let fns: &[&FnItem] = &[];
+        let ty = check_rhs(rhs, &ctx, state, fns, diags);
+        ctx.types.insert(name.clone(), ty.clone());
+        state.module_list_binds.insert(name.clone(), ty);
     }
 }
 
 fn check_fn(f: &FnItem, fns: &[&FnItem], state: &mut CheckState, diags: &mut Vec<Diag>) {
     check_no_stmt_after_terminator(&f.body, diags);
     let mut ctx = Ctx::new();
-    apply_module_binds(&mut ctx, &state.module_int_binds, f.span.clone());
+    apply_module_binds(&mut ctx, state, f.span.clone());
     for p in &f.params {
         ctx.bind(&p.name, p.ty.clone(), p.span.clone(), diags);
     }
@@ -364,7 +385,7 @@ fn check_fn(f: &FnItem, fns: &[&FnItem], state: &mut CheckState, diags: &mut Vec
 fn check_test(t: &TestItem, fns: &[&FnItem], state: &mut CheckState, diags: &mut Vec<Diag>) {
     check_no_stmt_after_terminator(&t.body, diags);
     let mut ctx = Ctx::new();
-    apply_module_binds(&mut ctx, &state.module_int_binds, t.span.clone());
+    apply_module_binds(&mut ctx, state, t.span.clone());
     for stmt in &t.body {
         check_stmt(stmt, &mut ctx, state, fns, false, None, diags);
     }
@@ -378,7 +399,7 @@ fn check_property(
 ) {
     check_no_stmt_after_terminator(&p.body, diags);
     let mut ctx = Ctx::new();
-    apply_module_binds(&mut ctx, &state.module_int_binds, p.span.clone());
+    apply_module_binds(&mut ctx, state, p.span.clone());
     for stmt in &p.body {
         check_stmt_property(stmt, &mut ctx, state, fns, diags);
     }
