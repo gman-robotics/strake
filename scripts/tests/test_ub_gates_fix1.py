@@ -888,8 +888,7 @@ class CrapperBaseJoinTests(unittest.TestCase):
             "  exit 0\n"
             "fi\n"
             'if [[ "$PWD" == *ub-crap-base* && "${mode}" == unreadable ]]; then\n'
-            "  printf '%s\\n' '{:entries []}' > \"${root}/.metrics/crap.edn\"\n"
-            "  chmod 000 \"${root}/.metrics/crap.edn\"\n"
+            "  printf '%s\\n' 'not edn' > \"${root}/.metrics/crap.edn\"\n"
             "  exit 0\n"
             "fi\n"
             'cp "${src}" "${root}/.metrics/crap.edn"\n'
@@ -1191,6 +1190,8 @@ class CrapperBaseJoinTests(unittest.TestCase):
             self.assertNotIn("outcome=skipped", outcome)
             self.assertNotIn("skipped_no_scope", text)
             self.assertNotIn("skipped_tools_missing", text)
+            self.assertIn("align-base failed", text)
+            self.assertIn("unreadable ", text)
 
 
 _COVERAGE_SH = """#!/usr/bin/env bash
@@ -1464,6 +1465,72 @@ class SeparateCoverageTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, text)
             self.assertIn("outcome=ran_clean", _outcome(repo))
             self.assertNotIn("base lcov missing", text)
+
+
+class GateCommandTests(unittest.TestCase):
+    """align-base and lcov-covers, invoked the way the gate invokes them."""
+
+    def test_missing_args_fail(self) -> None:
+        align = subprocess.run(
+            ["python3", str(SCOPE_PY), "align-base"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(align.returncode, 1, align.stderr)
+        self.assertIn("align-base requires --manifest and --dest", align.stderr)
+        lcov = subprocess.run(
+            ["python3", str(SCOPE_PY), "lcov-covers"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(lcov.returncode, 1, lcov.stderr)
+        self.assertIn("lcov-covers requires --root and --list", lcov.stderr)
+
+    def test_align_base_without_entries_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "base.edn"
+            head = root / "head.edn"
+            dest = root / "out.edn"
+            manifest = root / "manifest"
+            base.write_text("not edn\n", encoding="utf-8")
+            head.write_text("{:entries [\n]}\n", encoding="utf-8")
+            manifest.write_text(f"lib/a.py\t{base}\t{head}\n", encoding="utf-8")
+            proc = subprocess.run(
+                [
+                    "python3",
+                    str(SCOPE_PY),
+                    "align-base",
+                    "--manifest",
+                    str(manifest),
+                    "--dest",
+                    str(dest),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertIn("unreadable " + str(base), proc.stderr)
+            self.assertFalse(dest.exists())
+
+    def test_lcov_covers_missing_list_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "no-such-list"
+            proc = subprocess.run(
+                [
+                    "python3",
+                    str(SCOPE_PY),
+                    "lcov-covers",
+                    "--root",
+                    tmp,
+                    "--list",
+                    str(missing),
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertEqual(proc.stderr, "")
 
 
 if __name__ == "__main__":

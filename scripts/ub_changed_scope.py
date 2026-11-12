@@ -1116,14 +1116,7 @@ def _note_join(path: str, row: CrapRow, chosen: str) -> str:
     if chosen == row.namespace:
         return row.namespace
     print(
-        "ub-gates: crapper join file="
-        + path
-        + " name="
-        + row.name
-        + " namespace "
-        + row.namespace
-        + " -> "
-        + chosen
+        f"ub-gates: crapper join file={path} name={row.name} namespace {row.namespace} -> {chosen}"
     )
     return chosen
 
@@ -1176,7 +1169,8 @@ def _align_text(manifest: Path) -> str:
 def _write_align(manifest: str, dest: str) -> int:
     try:
         Path(dest).write_text(_align_text(Path(manifest)), encoding="utf-8")
-    except (OSError, ValueError, UnicodeError):
+    except (OSError, ValueError, UnicodeError) as exc:
+        print(f"ub-gates: align-base failed: {exc}", file=sys.stderr)
         return 1
     return 0
 
@@ -1210,8 +1204,6 @@ def _sf_path(line: str) -> str:
 
 
 def _path_ends(path: str, needle: str) -> bool:
-    if not path:
-        return False
     return path.endswith(needle)
 
 

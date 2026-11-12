@@ -16,7 +16,8 @@
 # reads that lcov, never the head lcov. A failed base coverage command, or
 # lcov that misses a base file, is tool_error. --no-coverage is not used.
 # Base and head rows join on file path plus function name. A missing or
-# unreadable base score is tool_error and blocks. Pass is CRAP under 10.
+# unreadable base score is tool_error and blocks, including a readable file
+# that is not crapper entries. Pass is CRAP under 10.
 # --lines and blocking mode are unchanged.
 # Base-ref fetch honors UB_GATES_BASE_REF, uses no depth limit, and unshallows
 # a shallow clone. A mutator budget timeout fails the job in blocking mode.
