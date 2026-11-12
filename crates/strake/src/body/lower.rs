@@ -37,6 +37,8 @@ struct LowerPlan<'a> {
     rec_ty: std::collections::HashMap<String, String>,
     /// SSA name → type, for record disambiguation and scrutinee payloads.
     known_ty: std::collections::HashMap<String, Type>,
+    /// Types check recorded for the item currently being lowered.
+    item_types: std::collections::HashMap<String, Type>,
 }
 
 struct BoundSnap {
@@ -260,6 +262,7 @@ pub(crate) fn lower(sketch: &Sketch) -> Result<Program, LowerError> {
         visited_matches: std::collections::HashSet::new(),
         rec_ty: std::collections::HashMap::new(),
         known_ty: std::collections::HashMap::new(),
+        item_types: std::collections::HashMap::new(),
     };
     for item in &sketch.module.items {
         if let Item::Fn(f) = item {
@@ -351,6 +354,7 @@ fn lower_fn_body(
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     reset_type_env(plan);
+    install_item_types(plan, &f.name);
     for (i, p) in f.params.iter().enumerate() {
         env.insert(p.name.clone(), i as u32);
         bind_type(plan, &p.name, p.ty.clone());
@@ -378,8 +382,9 @@ fn lower_test(
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
 ) -> Result<usize, LowerError> {
-    let idx = b.begin_function(&format!("test.{}", t.name), 0);
-    lower_test_or_property_body(b, &t.body, t.span.clone(), plan, maps, "test body")?;
+    let name = format!("test.{}", t.name);
+    let idx = b.begin_function(&name, 0);
+    lower_test_or_property_body(b, &name, &t.body, t.span.clone(), plan, maps, "test body")?;
     Ok(idx)
 }
 
@@ -389,13 +394,23 @@ fn lower_property(
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
 ) -> Result<usize, LowerError> {
-    let idx = b.begin_function(&format!("property.{}", p.name), 0);
-    lower_test_or_property_body(b, &p.body, p.span.clone(), plan, maps, "property body")?;
+    let name = format!("property.{}", p.name);
+    let idx = b.begin_function(&name, 0);
+    lower_test_or_property_body(
+        b,
+        &name,
+        &p.body,
+        p.span.clone(),
+        plan,
+        maps,
+        "property body",
+    )?;
     Ok(idx)
 }
 
 fn lower_test_or_property_body(
     b: &mut Builder,
+    key: &str,
     body: &[Stmt],
     default_span: Span,
     plan: &mut LowerPlan<'_>,
@@ -403,6 +418,7 @@ fn lower_test_or_property_body(
     body_label: &str,
 ) -> Result<(), LowerError> {
     reset_type_env(plan);
+    install_item_types(plan, key);
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     let mut cur = entry;
@@ -1188,13 +1204,9 @@ fn lower_rhs_project(
     Ok(b.rec_get(block, span.clone(), base_v, idx))
 }
 
-fn note_record(plan: &mut LowerPlan<'_>, name: &str, rhs: &Rhs) {
-    match infer_rhs_type(&plan.sketch.module, rhs, &plan.known_ty) {
-        Some(ty) => bind_type(plan, name, ty),
-        None => {
-            plan.rec_ty.remove(name);
-            plan.known_ty.remove(name);
-        }
+fn note_record(plan: &mut LowerPlan<'_>, name: &str, _rhs: &Rhs) {
+    if let Some(ty) = plan.item_types.get(name).cloned() {
+        bind_type(plan, name, ty);
     }
 }
 
@@ -1221,7 +1233,16 @@ thread_local! {
 fn reset_type_env(plan: &mut LowerPlan<'_>) {
     plan.rec_ty.clear();
     plan.known_ty.clear();
+    plan.item_types.clear();
     clear_bool_names();
+}
+
+fn install_item_types(plan: &mut LowerPlan<'_>, key: &str) {
+    plan.item_types = item_type_map(plan, key);
+}
+
+fn item_type_map(plan: &LowerPlan<'_>, key: &str) -> std::collections::HashMap<String, Type> {
+    plan.sketch.types.get(key).cloned().unwrap_or_default()
 }
 
 fn clear_bool_names() {
@@ -1307,14 +1328,6 @@ fn named_record(module: &Module, ty: &Type) -> Option<String> {
     }
 }
 
-fn ty_span() -> Span {
-    Span {
-        file: String::new(),
-        start: 0,
-        end: 0,
-    }
-}
-
 fn lower_rhs_op(
     b: &mut Builder,
     block: usize,
@@ -1392,110 +1405,6 @@ fn lower_rhs_region(
     }
 }
 
-fn infer_rhs_type(
-    module: &Module,
-    rhs: &Rhs,
-    known: &std::collections::HashMap<String, Type>,
-) -> Option<Type> {
-    match rhs {
-        Rhs::Record { .. } | Rhs::Project { .. } => infer_record_rhs_type(module, rhs, known),
-        Rhs::ListEmpty { .. } | Rhs::ListCons { .. } | Rhs::ListGet { .. } => {
-            infer_list_rhs_type(rhs, known)
-        }
-        Rhs::Operand(op) => infer_operand_type(op, known),
-        Rhs::Call { callee, .. } => callee_return_type(module, callee),
-        Rhs::Ok { .. } | Rhs::Err { .. } | Rhs::BinOp { .. } | Rhs::Not { .. } => {
-            infer_op_rhs_type(rhs)
-        }
-        _ => infer_leaf_rhs_type(rhs),
-    }
-}
-
-fn infer_leaf_rhs_type(rhs: &Rhs) -> Option<Type> {
-    match rhs {
-        Rhs::Hole { ty, .. } | Rhs::Load { ty, .. } => Some(ty.clone()),
-        Rhs::ListLen { span, .. } | Rhs::BytesLen { span, .. } => {
-            Some(Type::Named("i64".into(), span.clone()))
-        }
-        Rhs::BytesNew { span, .. } => Some(Type::Named("bytes".into(), span.clone())),
-        Rhs::Store { span, .. } => Some(unit_ty(span)),
-        Rhs::BytesGet { span, .. } => Some(result_ty(
-            Type::Named("i64".into(), span.clone()),
-            unit_ty(span),
-            span,
-        )),
-        _ => None,
-    }
-}
-
-fn infer_op_rhs_type(rhs: &Rhs) -> Option<Type> {
-    match rhs {
-        Rhs::Ok { ty, span, .. } => Some(result_ty(ty.clone(), unit_ty(span), span)),
-        Rhs::Err { ty, span, .. } => Some(result_ty(unit_ty(span), ty.clone(), span)),
-        Rhs::BinOp { op, ty, span, .. } => Some(binop_type(op, ty, span)),
-        Rhs::Not { span, .. } => Some(Type::Named("bool".into(), span.clone())),
-        _ => None,
-    }
-}
-
-fn unit_ty(span: &Span) -> Type {
-    Type::Named("unit".into(), span.clone())
-}
-
-fn result_ty(ok: Type, err: Type, span: &Span) -> Type {
-    Type::Result(Box::new(ok), Box::new(err), span.clone())
-}
-
-/// Compares are `bool`; arithmetic is the operand type.
-fn binop_type(op: &BinOp, ty: &Type, span: &Span) -> Type {
-    if matches!(
-        op,
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-    ) {
-        Type::Named("bool".into(), span.clone())
-    } else {
-        ty.clone()
-    }
-}
-
-fn infer_record_rhs_type(
-    module: &Module,
-    rhs: &Rhs,
-    known: &std::collections::HashMap<String, Type>,
-) -> Option<Type> {
-    match rhs {
-        Rhs::Record { fields, .. } => {
-            let name = match_record_name(module, fields, known).ok()?;
-            Some(Type::Named(name, ty_span()))
-        }
-        Rhs::Project { base, field, .. } => {
-            let Type::Named(tn, _) = known.get(base)? else {
-                return None;
-            };
-            let decls = record_decls(module, tn)?;
-            Some(decls.iter().find(|f| f.name == *field)?.ty.clone())
-        }
-        _ => None,
-    }
-}
-
-fn infer_list_rhs_type(rhs: &Rhs, known: &std::collections::HashMap<String, Type>) -> Option<Type> {
-    match rhs {
-        Rhs::ListEmpty { span, elem } => Some(Type::List(Box::new(elem.clone()), span.clone())),
-        Rhs::ListCons { tail, .. } => match infer_operand_type(tail, known) {
-            Some(Type::List(inner, span)) => Some(Type::List(inner, span)),
-            _ => None,
-        },
-        Rhs::ListGet { span, list, .. } => {
-            let Type::List(elem, _) = infer_operand_type(list, known)? else {
-                return None;
-            };
-            Some(result_ty(*elem, unit_ty(span), span))
-        }
-        _ => None,
-    }
-}
-
 fn infer_operand_type(
     op: &Operand,
     known: &std::collections::HashMap<String, Type>,
@@ -1509,21 +1418,6 @@ fn infer_operand_type(
         Operand::Float(_, span) => Some(Type::Named("f64".into(), span.clone())),
         Operand::Int(_, _) => None,
     }
-}
-
-fn callee_return_type(module: &Module, callee: &str) -> Option<Type> {
-    for item in &module.items {
-        match item {
-            Item::Fn(f) if f.name == callee => return Some(f.ret.clone()),
-            Item::Import(im) if im.path == callee => {
-                if let ImportSig::Fn { ret, .. } = &im.sig {
-                    return Some(ret.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 fn record_decls<'a>(module: &'a Module, name: &str) -> Option<&'a [FieldDecl]> {
@@ -2451,5 +2345,15 @@ end
             .unwrap_or_else(|err| panic!("{file}: {err:?}"));
             assert_eq!(got, 0, "{file}");
         }
+    }
+
+    #[test]
+    fn missing_item_type_aborts_record_lower() {
+        let src = include_str!("../../../../golden/record_project.strake");
+        let module = syntax::parse(src, "golden/record_project.strake").expect("parse");
+        let mut sketch = crate::body::check::check(&module, false).expect("check");
+        sketch.types.get_mut("f").expect("fn f").remove("p");
+        let err = lower(&sketch).expect_err("lower");
+        assert_eq!(err, LowerError::unsupported("record type"));
     }
 }
