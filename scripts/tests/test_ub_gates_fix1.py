@@ -1421,6 +1421,50 @@ class SeparateCoverageTests(unittest.TestCase):
             self.assertIn("outcome=tool_error", _outcome(repo))
             self.assertIn("base lcov missing lib/hot.py", text)
 
+    def test_suffix_dot_at_zero_is_that_extension(self) -> None:
+        # A path whose only dot is the first character still has that suffix.
+        # It is not the empty suffix, which would match every lcov record.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            _init_repo(repo)
+            source = repo / ".rs"
+            source.write_text("fn hot() {\n    return 1;\n}\n", encoding="utf-8")
+            _git(repo, "add", "-f", ".rs")
+            _git(repo, "commit", "-m", "base")
+            _git(repo, "checkout", "-b", "feat")
+            source.write_text("fn hot() {\n    return 2;\n}\n", encoding="utf-8")
+            _git(repo, "add", "-f", ".rs")
+            _git(repo, "commit", "-m", "change")
+            bin_dir = repo / "bin"
+            bin_dir.mkdir()
+            _write_exe(
+                bin_dir / "crapper",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:entries []}' > .metrics/crap.edn\nexit 0\n",
+            )
+            _write_exe(
+                bin_dir / "dryer",
+                "#!/usr/bin/env bash\nmkdir -p .metrics\nprintf '%s\\n' '{:candidates []}' > .metrics/dry.edn\nexit 0\n",
+            )
+            _write_exe(bin_dir / "mutator", "#!/usr/bin/env bash\nexit 0\n")
+            (repo / "spans.json").write_text("[]", encoding="utf-8")
+            env = _env(
+                bin_dir,
+                UB_GATES_ADVISORY="0",
+                UB_GATES_BASE_REF="main",
+                UB_GATES_MUTATOR_BUDGET_SECS="30",
+                UB_SCOPE_FUNCTIONS_JSON=str(repo / "spans.json"),
+                UB_GATES_OUTCOME_FILE=str(repo / ".metrics" / "ub-gates-outcome.txt"),
+                UB_GATES_COVERAGE_CMD=(
+                    "mkdir -p target/coverage/rust; "
+                    "printf '%s\\n' 'SF:lib/other.py' 'DA:1,1' end_of_record > target/coverage/rust/lcov.info"
+                ),
+            )
+            proc = _run_ci(repo, env)
+            text = proc.stdout + proc.stderr
+            self.assertEqual(proc.returncode, 0, text)
+            self.assertIn("outcome=ran_clean", _outcome(repo))
+            self.assertNotIn("base lcov missing", text)
+
 
 if __name__ == "__main__":
     unittest.main()
