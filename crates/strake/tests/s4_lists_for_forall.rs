@@ -145,10 +145,7 @@ fn for_module_list_src(body_assert: &str) -> String {
 
 #[test]
 fn for_over_module_list_runs() {
-    let (code, stderr) = run_src(
-        "for_mod_list.strake",
-        &for_module_list_src("assert.eq x x"),
-    );
+    let (code, stderr) = run_src("for_mod_list.strake", &for_module_list_src("assert.eq x x"));
     assert_eq!(code, 0, "{stderr}");
     assert!(stderr.is_empty(), "{stderr}");
 }
@@ -167,9 +164,7 @@ fn for_over_module_list_sees_every_element() {
 }
 
 fn forall_list_binder_src(ty: &str) -> String {
-    format!(
-        "strake 1\n\nxs = list.empty i64\n\nproperty p\n  forall n: {ty} in xs\n  end\nend\n"
-    )
+    format!("strake 1\n\nxs = list.empty i64\n\nproperty p\n  forall n: {ty} in xs\n  end\nend\n")
 }
 
 fn forall_range_binder_src(ty: &str) -> String {
@@ -185,18 +180,12 @@ fn assert_binder_rejected(name: &str, src: &str) {
 
 #[test]
 fn forall_bool_binder_on_i64_list_is_etype() {
-    assert_binder_rejected(
-        "forall_bool_list.strake",
-        &forall_list_binder_src("bool"),
-    );
+    assert_binder_rejected("forall_bool_list.strake", &forall_list_binder_src("bool"));
 }
 
 #[test]
 fn forall_bool_binder_on_range_is_etype() {
-    assert_binder_rejected(
-        "forall_bool_range.strake",
-        &forall_range_binder_src("bool"),
-    );
+    assert_binder_rejected("forall_bool_range.strake", &forall_range_binder_src("bool"));
 }
 
 #[test]
@@ -294,8 +283,10 @@ fn continue_in_for_src(under_if: bool) -> String {
 
 #[test]
 fn continue_in_for_is_etype() {
-    for (name, under_if) in [("continue_for_direct.strake", false), ("continue_for_if.strake", true)]
-    {
+    for (name, under_if) in [
+        ("continue_for_direct.strake", false),
+        ("continue_for_if.strake", true),
+    ] {
         let (code, stderr) = run_src(name, &continue_in_for_src(under_if));
         assert_eq!(code, 1, "{name} {stderr}");
         assert!(stderr.contains("\"E_TYPE\""), "{name} {stderr}");

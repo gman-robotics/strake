@@ -35,9 +35,16 @@ pub struct Sketch {
     pub carry: CarryPlan,
 }
 
+enum Ctrl {
+    Loop,
+    For,
+}
+
 struct CheckState {
     carry: CarryPlan,
     loop_stack: Vec<usize>,
+    /// Innermost `loop` or `for`. `break` targets the top.
+    ctrl: Vec<Ctrl>,
     next_site_id: u32,
     partial_used: bool,
     sum_types: HashMap<String, SumTypeInfo>,
@@ -58,6 +65,7 @@ impl CheckState {
         Self {
             carry: CarryPlan::default(),
             loop_stack: Vec::new(),
+            ctrl: Vec::new(),
             next_site_id: 0,
             partial_used: false,
             sum_types,
@@ -345,6 +353,29 @@ fn release_body_bind(ctx: &mut Ctx, name: &str, fresh: bool) {
     }
 }
 
+fn note_break(state: &mut CheckState, span: &Span, diags: &mut Vec<Diag>) {
+    match state.ctrl.last() {
+        Some(Ctrl::For) => {}
+        Some(Ctrl::Loop) => {
+            if let Some(&idx) = state.loop_stack.last() {
+                state.carry.loops[idx]
+                    .breaks
+                    .push(BreakEdge { span: span.clone() });
+            }
+        }
+        None => diags.push(type_diag(span.clone())),
+    }
+}
+
+fn for_blocks_continue(state: &CheckState, span: &Span, diags: &mut Vec<Diag>) -> bool {
+    if matches!(state.ctrl.last(), Some(Ctrl::For)) {
+        diags.push(type_diag(span.clone()));
+        true
+    } else {
+        false
+    }
+}
+
 fn module_int_bindings(module: &Module) -> HashMap<String, i128> {
     let mut out = HashMap::new();
     for item in &module.items {
@@ -547,7 +578,8 @@ fn check_stmt(
         } => check_stmt_if(
             ctx, state, fns, in_fn, fn_ret, span, cond, then_body, else_body, diags,
         ),
-        Stmt::Break { span } | Stmt::Continue { span, .. } => {
+        Stmt::Break { span } => note_break(state, span, diags),
+        Stmt::Continue { span, .. } => {
             diags.push(type_diag(span.clone()));
         }
         Stmt::For {
@@ -710,9 +742,11 @@ fn check_stmt_for(
         }
     };
     let fresh = bind_for_body(ctx, binder, ty, span.clone(), diags);
+    state.ctrl.push(Ctrl::For);
     for s in body {
         check_stmt(s, ctx, state, fns, in_fn, fn_ret, diags);
     }
+    state.ctrl.pop();
     release_body_bind(ctx, binder, fresh);
 }
 
@@ -743,6 +777,7 @@ fn check_stmt_loop_block(
         breaks: Vec::new(),
     });
     state.loop_stack.push(site_idx);
+    state.ctrl.push(Ctrl::Loop);
     let mut loop_ctx = Ctx {
         types: ctx.types.clone(),
         phi_gaps: ctx.phi_gaps.clone(),
@@ -776,6 +811,7 @@ fn check_stmt_loop_block(
         });
     }
     state.loop_stack.pop();
+    state.ctrl.pop();
     let site = &state.carry.loops[site_idx];
     if !site.breaks.is_empty() {
         for p in params {
@@ -845,7 +881,9 @@ fn check_stmt_loop(
     }
     match stmt {
         Stmt::Continue { edges, span, .. } => {
-            if check_continue_edges(span.clone(), edges, loop_params, ctx, state, fns, diags) {
+            if !for_blocks_continue(state, span, diags)
+                && check_continue_edges(span.clone(), edges, loop_params, ctx, state, fns, diags)
+            {
                 if let Some(&idx) = state.loop_stack.last() {
                     if let Some(ops) = operands_for_continue(&state.carry.loops[idx].params, edges)
                     {
@@ -857,13 +895,7 @@ fn check_stmt_loop(
                 }
             }
         }
-        Stmt::Break { span } => {
-            if let Some(&idx) = state.loop_stack.last() {
-                state.carry.loops[idx]
-                    .breaks
-                    .push(BreakEdge { span: span.clone() });
-            }
-        }
+        Stmt::Break { span } => note_break(state, span, diags),
         Stmt::If {
             span,
             cond,
@@ -1214,34 +1246,26 @@ fn check_stmt_in_arm(
             );
         }
         Stmt::Continue { edges, span, .. } => {
-            if let Some(params) = loop_params {
-                if check_continue_edges(span.clone(), edges, params, ctx, state, fns, diags) {
-                    if let Some(&idx) = state.loop_stack.last() {
-                        if let Some(ops) =
-                            operands_for_continue(&state.carry.loops[idx].params, edges)
-                        {
-                            state.carry.loops[idx].backedges.push(BackEdge {
-                                span: span.clone(),
-                                operands: ops,
-                            });
+            if !for_blocks_continue(state, span, diags) {
+                if let Some(params) = loop_params {
+                    if check_continue_edges(span.clone(), edges, params, ctx, state, fns, diags) {
+                        if let Some(&idx) = state.loop_stack.last() {
+                            if let Some(ops) =
+                                operands_for_continue(&state.carry.loops[idx].params, edges)
+                            {
+                                state.carry.loops[idx].backedges.push(BackEdge {
+                                    span: span.clone(),
+                                    operands: ops,
+                                });
+                            }
                         }
                     }
+                } else {
+                    diags.push(type_diag(span.clone()));
                 }
-            } else {
-                diags.push(type_diag(span.clone()));
             }
         }
-        Stmt::Break { span } => {
-            if loop_params.is_some() {
-                if let Some(&idx) = state.loop_stack.last() {
-                    state.carry.loops[idx]
-                        .breaks
-                        .push(BreakEdge { span: span.clone() });
-                }
-            } else {
-                diags.push(type_diag(span.clone()));
-            }
-        }
+        Stmt::Break { span } => note_break(state, span, diags),
         Stmt::For {
             span,
             binder,
@@ -1342,9 +1366,11 @@ fn check_stmt_for_in_arm(
         }
     };
     let fresh = bind_for_body(ctx, binder, ty, span.clone(), diags);
+    state.ctrl.push(Ctrl::For);
     for s in body {
         check_stmt_in_arm(s, ctx, pre, state, fns, in_fn, fn_ret, loop_params, diags);
     }
+    state.ctrl.pop();
     release_body_bind(ctx, binder, fresh);
 }
 

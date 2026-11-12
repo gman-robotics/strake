@@ -1531,7 +1531,7 @@ end
         let xs = b.list_cons(0, span.clone(), seven, empty);
         let mut seen = None;
         let exit = b
-            .for_(0, span.clone(), xs, |_, ok_arm, elt| {
+            .for_(0, span.clone(), xs, |_, ok_arm, elt, _exit| {
                 seen = Some(elt);
                 Ok::<usize, ()>(ok_arm)
             })
@@ -1569,7 +1569,7 @@ end
         let t1 = b.list_cons(0, span.clone(), three, empty);
         let xs = b.list_cons(0, span.clone(), four, t1);
         let exit = b
-            .for_(0, span.clone(), xs, |b, ok_arm, elt| {
+            .for_(0, span.clone(), xs, |b, ok_arm, elt, _exit| {
                 let hit = b.new_block();
                 let next = b.new_block();
                 let want = b.const_i64(ok_arm, span.clone(), target);

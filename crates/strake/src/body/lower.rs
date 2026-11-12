@@ -1741,7 +1741,12 @@ fn lower_for(
         .copied()
         .ok_or_else(|| LowerError::unsupported("unbound list in for"))?;
     let ctx = if in_test { "for body" } else { "" };
-    b.for_(block, span.clone(), list_v, |b, ok_arm, elt| {
+    b.for_(block, span.clone(), list_v, |b, ok_arm, elt, exit| {
+        loops.push(LoopFrame {
+            header: exit,
+            exit,
+            params: Vec::new(),
+        });
         env.insert(binder.to_string(), elt);
         let mut cur = ok_arm;
         for stmt in body {
@@ -1751,6 +1756,7 @@ fn lower_for(
                 lower_stmt(b, cur, stmt, env, loops, plan, maps, false)?
             };
         }
+        loops.pop();
         Ok(cur)
     })
 }
