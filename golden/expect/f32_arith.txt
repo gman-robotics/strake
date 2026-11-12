@@ -1,0 +1,4 @@
+args: test golden/f32_arith.strake
+exit: 0
+--- stdout
+--- stderr

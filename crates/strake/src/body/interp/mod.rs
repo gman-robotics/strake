@@ -220,7 +220,11 @@ impl<'a> Machine<'a> {
             }
             let inst = func.blocks[block].insts[ip].clone();
             self.frames[frame_top].ip += 1;
-            if !self.exec_card_ext(&inst)? && !self.exec_region(&inst)? && self.exec_inst(&inst)? {
+            if !self.exec_float_arith(&inst)?
+                && !self.exec_card_ext(&inst)?
+                && !self.exec_region(&inst)?
+                && self.exec_inst(&inst)?
+            {
                 break;
             }
         }
@@ -241,7 +245,32 @@ impl<'a> Machine<'a> {
     /// One step as `run_loop` dispatches it, without the root-return check.
     #[cfg(test)]
     pub(crate) fn test_step(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
-        Ok(!self.exec_card_ext(inst)? && !self.exec_region(inst)? && self.exec_inst(inst)?)
+        Ok(!self.exec_float_arith(inst)?
+            && !self.exec_card_ext(inst)?
+            && !self.exec_region(inst)?
+            && self.exec_inst(inst)?)
+    }
+
+    fn exec_float_arith(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
+        if !matches!(inst.imm, Imm::F32(0)) {
+            return Ok(false);
+        }
+        let (x, y) = match inst.op {
+            Op::Add | Op::Sub | Op::Mul | Op::Div => {
+                self.charge(1, inst.span.clone())?;
+                let (a, b) = self.two_f64(inst)?;
+                (a as f32, b as f32)
+            }
+            _ => return Ok(false),
+        };
+        let z = match inst.op {
+            Op::Sub => x - y,
+            Op::Mul => x * y,
+            Op::Div => x / y,
+            _ => x + y,
+        };
+        self.write_reg(inst.dst, Value::F64(f32_bits_to_f64(z.to_bits())))?;
+        Ok(true)
     }
 
     fn exec_inst(&mut self, inst: &Inst) -> Result<bool, ExecFault> {
@@ -1556,6 +1585,43 @@ end
         let mut m = t3_machine_with_regs(&program, vec![None, None, None]);
         let bad = m.test_step(&t3_inst(Op::ConstI32, Imm::I64(1)));
         assert!(matches!(bad, Err(ExecFault::Codeless(_))));
+    }
+
+    #[test]
+    fn f32_arith_rounds_and_charges_one_fuel() {
+        let program = t3_program();
+        let third = f64::from(1.0f32 / 3.0f32);
+        let cases = [
+            (Op::Add, 0.25, 0.25, 0.5),
+            (Op::Sub, 0.25, 0.25, 0.0),
+            (Op::Mul, 0.25, 0.25, 0.0625),
+            (Op::Div, 0.25, 0.25, 1.0),
+            (Op::Add, 16_777_216.0, 1.0, 16_777_216.0),
+            (Op::Div, 1.0, 3.0, third),
+        ];
+        for (op, a, b, want) in cases {
+            let mut m = t3_machine_with_regs(
+                &program,
+                vec![Some(Value::F64(a)), Some(Value::F64(b)), None],
+            );
+            let before = m.fuel;
+            assert!(!m.test_step(&t3_inst(op, Imm::F32(0))).expect("f32"));
+            assert_eq!(m.fuel, before - 1, "{op:?} charges 1");
+            assert_eq!(
+                m.frames.last().unwrap().regs[2],
+                Some(Value::F64(want)),
+                "{op:?}"
+            );
+        }
+        let mut m = t3_machine_with_regs(
+            &program,
+            vec![Some(Value::F64(1.0)), Some(Value::F64(0.0)), None],
+        );
+        assert!(m.test_step(&t3_inst(Op::Div, Imm::F32(0))).is_ok());
+        match &m.frames.last().unwrap().regs[2] {
+            Some(Value::F64(z)) => assert!(z.is_infinite() && z.is_sign_positive()),
+            other => panic!("div0 {other:?}"),
+        }
     }
 
     #[test]
