@@ -501,7 +501,7 @@ fn check_stmt_property(
             body,
         } => {
             check_forall_bound(bound, state, diags);
-            let ty = forall_binder_ty(bound);
+            let ty = forall_binder_ty(bound, ctx, diags);
             ctx.bind(binder, ty, span.clone(), diags);
             for s in body {
                 check_stmt_forall(s, &mut *ctx, state, binder, fns, false, None, diags);
@@ -1358,7 +1358,7 @@ fn check_stmt_forall_in_arm(
     diags: &mut Vec<Diag>,
 ) {
     check_forall_bound(bound, state, diags);
-    let ty = forall_binder_ty(bound);
+    let ty = forall_binder_ty(bound, ctx, diags);
     if pre.contains_key(binder) {
         diags.push(shadow_diag(span.clone()));
     }
@@ -1414,9 +1414,27 @@ fn rhs_ty_hint(rhs: &Rhs) -> Type {
     }
 }
 
-fn forall_binder_ty(bound: &ForallBound) -> Type {
+fn forall_binder_ty(bound: &ForallBound, ctx: &Ctx, diags: &mut Vec<Diag>) -> Type {
     match bound {
-        ForallBound::Range { ty, .. } | ForallBound::List { ty, .. } => ty.clone(),
+        ForallBound::Range { ty, span, .. } => {
+            let i64_ty = scalar("i64", span.clone());
+            if !types_compatible(ty, &i64_ty) {
+                diags.push(type_diag(span.clone()));
+            }
+            i64_ty
+        }
+        ForallBound::List { ty, name, span } => match ctx.types.get(name) {
+            Some(Type::List(elem, _)) => {
+                if !types_compatible(ty, elem) {
+                    diags.push(type_diag(span.clone()));
+                }
+                elem.as_ref().clone()
+            }
+            _ => {
+                diags.push(type_diag(span.clone()));
+                ty.clone()
+            }
+        },
     }
 }
 
@@ -1483,7 +1501,7 @@ fn check_stmt_forall_ctx(
     diags: &mut Vec<Diag>,
 ) {
     check_forall_bound(bound, state, diags);
-    let ty = forall_binder_ty(bound);
+    let ty = forall_binder_ty(bound, ctx, diags);
     ctx.bind(binder, ty, span.clone(), diags);
     let mut inner = Ctx {
         types: ctx.types.clone(),
