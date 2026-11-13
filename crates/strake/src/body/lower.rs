@@ -1188,9 +1188,7 @@ fn lower_rhs_project(
 }
 
 fn note_record(plan: &mut LowerPlan<'_>, name: &str, _rhs: &Rhs) {
-    if let Some(ty) = plan.item_types.get(name).cloned() {
-        bind_type(plan, name, ty);
-    }
+    bind_item_type(plan, name);
 }
 
 fn bind_type(plan: &mut LowerPlan<'_>, name: &str, ty: Type) {
@@ -2281,6 +2279,21 @@ end
             .unwrap_or_else(|err| panic!("{file}: {err:?}"));
             assert_eq!(got, 0, "{file}");
         }
+    }
+
+    #[test]
+    fn match_binder_record_field_uses_item_type() {
+        let src = "strake 1\n\ntype A { n: i64 }\n\nfn f(r: result A A) -> i64\n  match r\n    ok p ->\n      q = p.n\n      ret q\n    err p ->\n      q = p.n\n      ret q\n  end\nend\n\ntest t\n  a = { n: 4 }\n  v = ok A a\n  n = call f(v)\n  assert.eq n 4\n  ret 0\nend\n";
+        let module = syntax::parse(src, "t.strake").expect("parse");
+        let program = compile_module(&module, false).expect("compile");
+        let got = crate::body::interp::call_function_i64(
+            &program,
+            "test.t",
+            &[],
+            &crate::body::host::EmptyHost,
+        )
+        .expect("exec");
+        assert_eq!(got, 0);
     }
 
     #[test]
