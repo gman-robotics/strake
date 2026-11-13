@@ -599,7 +599,6 @@ fn lower_match(
     let phi_names = match_phi_names(&site);
     let any_reaches = site.arms.iter().any(|a| a.reaches);
     let mut arm_end_blocks: Vec<(usize, std::collections::HashMap<String, u32>)> = Vec::new();
-    let mut arm_known: Vec<std::collections::HashMap<String, Type>> = Vec::new();
     for (arm, supply) in arms.iter().zip(site.arms.iter()) {
         let arm_block = arm_entries[supply.tag_index as usize];
         let mut arm_env = env.clone();
@@ -608,21 +607,13 @@ fn lower_match(
             if binder != "_" {
                 let payload = b.sum_payload(cur, span.clone(), scrut_v);
                 arm_env.insert(binder.clone(), payload);
-            }
-        }
-        let saved = plan.snap_bounds();
-        if let Some(binder) = &arm.binder {
-            if binder != "_" {
-                note_match_binder(plan, scrutinee, &arm.tag, binder);
+                bind_item_type(plan, binder);
             }
         }
         for stmt in &arm.body {
             cur = lower_match_arm_stmt(b, cur, stmt, &mut arm_env, loops, plan, maps, in_test)?;
         }
-        let arm_ty = plan.known_ty.clone();
-        plan.restore_bounds(saved);
         if supply.reaches {
-            arm_known.push(arm_ty);
             if !b.block_terminates(cur) {
                 b.jump(cur, span.clone(), join_block);
             }
@@ -650,9 +641,6 @@ fn lower_match(
         let dst = b.alloc_vreg();
         b.merge_regs(join_block, span.clone(), dst, &pairs);
         env.insert(name.clone(), dst);
-    }
-    for name in &phi_names {
-        bind_agreed_type(plan, name, &arm_known);
     }
     b.jump(join_block, span.clone(), cont);
     Ok(cont)
@@ -1329,45 +1317,10 @@ fn bind_agreed_type(
     }
 }
 
-fn note_match_binder(plan: &mut LowerPlan<'_>, scrutinee: &str, tag: &str, binder: &str) {
-    let Some(scrut) = plan.known_ty.get(scrutinee).cloned() else {
-        return;
-    };
-    let Some(payload) = payload_type(&plan.sketch.module, &scrut, tag) else {
-        return;
-    };
-    bind_type(plan, binder, payload);
-}
-
-fn payload_type(module: &Module, scrut: &Type, tag: &str) -> Option<Type> {
-    match scrut {
-        Type::Result(ok, err, _) => match tag {
-            "ok" => Some((**ok).clone()),
-            "err" => Some((**err).clone()),
-            _ => None,
-        },
-        Type::Named(name, _) => sum_variant_payload(module, name, tag),
-        _ => None,
+fn bind_item_type(plan: &mut LowerPlan<'_>, name: &str) {
+    if let Some(ty) = plan.item_types.get(name).cloned() {
+        bind_type(plan, name, ty);
     }
-}
-
-fn sum_variant_payload(module: &Module, name: &str, tag: &str) -> Option<Type> {
-    for item in &module.items {
-        let Item::TypeDef(td) = item else {
-            continue;
-        };
-        if td.name != name {
-            continue;
-        }
-        let TypeDefKind::Sum(variants) = &td.kind else {
-            return None;
-        };
-        return variants
-            .iter()
-            .find(|v| v.tag == tag)
-            .and_then(|v| v.payload.clone());
-    }
-    None
 }
 
 fn named_record(module: &Module, ty: &Type) -> Option<String> {
