@@ -188,10 +188,7 @@ fn check_use_blobs(module: &Module, blob_root: Option<&Path>, diags: &mut Vec<Di
 }
 
 fn use_blob_name_unsafe(name: &str) -> bool {
-    name.contains('/')
-        || name.contains('\\')
-        || name.contains("..")
-        || name.contains('.')
+    name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('.')
 }
 
 fn build_sum_type_index(module: &Module) -> HashMap<String, SumTypeInfo> {
