@@ -388,9 +388,8 @@ fn lower_test(
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
 ) -> Result<usize, LowerError> {
-    let name = format!("test.{}", t.name);
-    let idx = b.begin_function(&name, 0);
-    lower_test_or_property_body(b, &name, &t.body, t.span.clone(), plan, maps, "test body")?;
+    let idx = b.begin_function(&format!("test.{}", t.name), 0);
+    lower_test_or_property_body(b, &t.body, t.span.clone(), plan, maps, "test body")?;
     Ok(idx)
 }
 
@@ -400,23 +399,13 @@ fn lower_property(
     plan: &mut LowerPlan<'_>,
     maps: &CalleeMaps,
 ) -> Result<usize, LowerError> {
-    let name = format!("property.{}", p.name);
-    let idx = b.begin_function(&name, 0);
-    lower_test_or_property_body(
-        b,
-        &name,
-        &p.body,
-        p.span.clone(),
-        plan,
-        maps,
-        "property body",
-    )?;
+    let idx = b.begin_function(&format!("property.{}", p.name), 0);
+    lower_test_or_property_body(b, &p.body, p.span.clone(), plan, maps, "property body")?;
     Ok(idx)
 }
 
 fn lower_test_or_property_body(
     b: &mut Builder,
-    key: &str,
     body: &[Stmt],
     default_span: Span,
     plan: &mut LowerPlan<'_>,
@@ -424,7 +413,7 @@ fn lower_test_or_property_body(
     body_label: &str,
 ) -> Result<(), LowerError> {
     reset_type_env(plan);
-    install_item_types(plan, key);
+    install_item_types(plan, b.current_name());
     let entry = 0;
     let mut env = std::collections::HashMap::new();
     let mut cur = entry;
