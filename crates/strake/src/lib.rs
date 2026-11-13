@@ -334,4 +334,27 @@ mod tests {
         assert_eq!(exit.code, 1);
         assert!(exit.stderr.contains("E_PARSE"));
     }
+
+    #[test]
+    fn check_use_ok_with_blob_root() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = repo.join("golden/use_ok.strake");
+        let exit = check(
+            path.to_str().unwrap(),
+            Opts {
+                blob_root: Some(repo.join("golden/blob").to_string_lossy().into_owned()),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(exit.code, 0, "{}", exit.stderr);
+    }
+
+    #[test]
+    fn check_use_without_blob_root_e_use() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = repo.join("golden/use_ok.strake");
+        let exit = check(path.to_str().unwrap(), Opts::default());
+        assert_eq!(exit.code, 1);
+        assert!(exit.stderr.contains("E_USE"));
+    }
 }

@@ -148,47 +148,55 @@ fn check_module_item(
     }
 }
 
-/// `use` items: blob under `--blob-root` must exist and match the declared blake3.
-fn check_use_blobs(module: &Module, blob_root: Option<&Path>, diags: &mut Vec<Diag>) {
-    let uses: Vec<&UseDecl> = module
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            Item::Use(u) => Some(u),
-            _ => None,
-        })
-        .collect();
-    if uses.is_empty() {
-        return;
-    }
-    let Some(root) = blob_root else {
-        for u in uses {
-            diags.push(catalog_check_diag(Code::EUse, u.span.clone()));
-        }
-        return;
-    };
-    for u in uses {
-        if use_blob_name_unsafe(&u.name) {
-            diags.push(catalog_check_diag(Code::EUse, u.span.clone()));
-            continue;
-        }
-        let path = root.join(&u.name);
-        let bytes = match std::fs::read(&path) {
-            Ok(b) => b,
-            Err(_) => {
-                diags.push(catalog_check_diag(Code::EUse, u.span.clone()));
-                continue;
-            }
-        };
-        let got = blake3::hash(&bytes).to_hex().to_string();
-        if got != u.hash {
-            diags.push(catalog_check_diag(Code::EUse, u.span.clone()));
-        }
-    }
+fn module_use_decls<'a>(module: &'a Module) -> impl Iterator<Item = &'a UseDecl> + 'a {
+    module.items.iter().filter_map(|item| match item {
+        Item::Use(u) => Some(u),
+        _ => None,
+    })
+}
+
+fn push_e_use(span: Span, diags: &mut Vec<Diag>) {
+    diags.push(catalog_check_diag(Code::EUse, span));
+}
+
+fn blob_hash_matches_hex(hash: &str, bytes: &[u8]) -> bool {
+    blake3::hash(bytes).to_hex().to_string() == hash
 }
 
 fn use_blob_name_unsafe(name: &str) -> bool {
     name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('.')
+}
+
+fn check_one_use_blob(u: &UseDecl, root: &Path, diags: &mut Vec<Diag>) {
+    if use_blob_name_unsafe(&u.name) {
+        push_e_use(u.span.clone(), diags);
+        return;
+    }
+    let path = root.join(&u.name);
+    let Ok(bytes) = std::fs::read(&path) else {
+        push_e_use(u.span.clone(), diags);
+        return;
+    };
+    if !blob_hash_matches_hex(&u.hash, &bytes) {
+        push_e_use(u.span.clone(), diags);
+    }
+}
+
+/// `use` items: blob under `--blob-root` must exist and match the declared blake3.
+fn check_use_blobs(module: &Module, blob_root: Option<&Path>, diags: &mut Vec<Diag>) {
+    let uses: Vec<&UseDecl> = module_use_decls(module).collect();
+    if uses.is_empty() {
+        return;
+    }
+    let Some(root) = blob_root else {
+        for u in &uses {
+            push_e_use(u.span.clone(), diags);
+        }
+        return;
+    };
+    for u in uses {
+        check_one_use_blob(u, root, diags);
+    }
 }
 
 fn build_sum_type_index(module: &Module) -> HashMap<String, SumTypeInfo> {
@@ -3315,6 +3323,43 @@ mod tests {
             Some(Type::Named(n, _)) => n.as_str(),
             other => panic!("{name} is {other:?}"),
         }
+    }
+
+    #[test]
+    fn use_blob_name_unsafe_rejects_separators() {
+        assert!(use_blob_name_unsafe("pkg.sub"));
+        assert!(use_blob_name_unsafe("a/b"));
+        assert!(!use_blob_name_unsafe("pkg"));
+    }
+
+    #[test]
+    fn check_use_blob_missing_root_and_bad_hash() {
+        let src = concat!(
+            "strake 1\n\n",
+            "use pkg@blake3:",
+            "48c37268d0995bdaee1c79d7da54a7c9015408fa14088d3958a458e666d44eeb\n\n",
+            "fn f() -> unit\n  ret unit\nend\n"
+        );
+        let module = syntax::parse(src, "u.strake").expect("parse");
+        let err = check(&module, false, None).unwrap_err();
+        let diags = match err {
+            CheckFailure::Diags(d) => d,
+            CheckFailure::Codeless(_) => panic!("expected diags"),
+        };
+        assert!(diags.iter().all(|d| d.code == Code::EUse));
+
+        let dir = std::env::temp_dir().join(format!("strake-use-blob-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        std::fs::write(dir.join("pkg"), b"wrong bytes").expect("write blob");
+        let err = check(&module, false, Some(&dir)).unwrap_err();
+        let diags = match err {
+            CheckFailure::Diags(d) => d,
+            CheckFailure::Codeless(_) => panic!("expected diags"),
+        };
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Code::EUse);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
