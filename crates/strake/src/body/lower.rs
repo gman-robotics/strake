@@ -1276,6 +1276,19 @@ fn keep_record_span(
     end: u32,
     name: &str,
 ) {
+    if !name.is_empty() {
+        insert_record_span(index, module, file, start, end, name);
+    }
+}
+
+fn insert_record_span(
+    index: &mut std::collections::HashMap<SpanKey, String>,
+    module: &Module,
+    file: &str,
+    start: u32,
+    end: u32,
+    name: &str,
+) {
     if record_decls(module, name).is_some() {
         index.insert((file.to_string(), start, end), name.to_string());
     }

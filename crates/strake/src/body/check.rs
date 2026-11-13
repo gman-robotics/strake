@@ -375,9 +375,15 @@ fn note_type_span(spans: &Rc<RefCell<Vec<SpanRow>>>, ty: &Type) {
     let Type::Named(name, span) = ty else {
         return;
     };
+    if !name.is_empty() {
+        push_type_span(spans, name, span);
+    }
+}
+
+fn push_type_span(spans: &Rc<RefCell<Vec<SpanRow>>>, name: &str, span: &Span) {
     spans
         .borrow_mut()
-        .push((span.file.clone(), span.start, span.end, name.clone()));
+        .push((span.file.clone(), span.start, span.end, name.to_string()));
 }
 
 impl Clone for BoundTypes {
