@@ -48,11 +48,12 @@ fn check_path(path: &Path) -> strake::Exit {
 #[test]
 fn golden_check_exit_is_not_lower_abort() {
     let paths = golden_paths();
-    // 130 on GMA-489, plus 9 GMA-497 goldens. None of those nine exit 70:
-    // dup_record, record_project, result_unit_join, result_i64_join,
-    // loop_exit_record, loop_exit_bytes, match_arm_records, match_arm_project,
-    // match_arm_agree.
-    assert_eq!(paths.len(), 139, "golden corpus");
+    // 130 on GMA-489, plus 9 GMA-497 goldens, plus 3 GMA-619 goldens.
+    // GMA-497, none exit 70: dup_record, record_project, result_unit_join,
+    // result_i64_join, loop_exit_record, loop_exit_bytes, match_arm_records,
+    // match_arm_project, match_arm_agree.
+    // GMA-619: match_binder_conflict, match_binder_sum, match_binder_agree.
+    assert_eq!(paths.len(), 142, "golden corpus");
     for path in &paths {
         let exit = check_path(path);
         assert_ne!(

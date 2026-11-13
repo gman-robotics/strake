@@ -1,0 +1,4 @@
+args: check golden/match_binder_sum.strake
+exit: 1
+--- stdout
+--- stderr
