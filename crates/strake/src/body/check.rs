@@ -148,7 +148,7 @@ fn check_module_item(
     }
 }
 
-fn module_use_decls<'a>(module: &'a Module) -> impl Iterator<Item = &'a UseDecl> + 'a {
+fn module_use_decls(module: &Module) -> impl Iterator<Item = &UseDecl> + '_ {
     module.items.iter().filter_map(|item| match item {
         Item::Use(u) => Some(u),
         _ => None,
