@@ -364,6 +364,15 @@ impl Builder {
         idx
     }
 
+    pub(crate) fn current_name(&self) -> &str {
+        let idx = self.cur_fn.expect("begin_function first");
+        let name = &self.functions[idx].name;
+        if !name.is_empty() {
+            return name;
+        }
+        panic!("empty function name");
+    }
+
     pub(crate) fn begin_function(&mut self, name: &str, params: usize) -> usize {
         let fn_idx = self.functions.len();
         self.functions.push(Function {

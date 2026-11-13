@@ -2,7 +2,9 @@
 
 #![allow(clippy::too_many_arguments)]
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use super::carry::{
     self, match_arm_delivered, match_phi_names, operands_for_continue, publishes_loop_join, ArmSrc,
@@ -33,6 +35,8 @@ struct SumTypeInfo {
 pub struct Sketch {
     pub module: Module,
     pub carry: CarryPlan,
+    pub types: HashMap<String, HashMap<String, Type>>,
+    pub(crate) record_spans: HashMap<String, Vec<SpanRow>>,
 }
 
 enum Ctrl {
@@ -53,6 +57,8 @@ struct CheckState {
     module_list_binds: HashMap<String, Type>,
     /// `import region mem : region` is present (`load`/`store` allowed).
     has_region: bool,
+    item_types: HashMap<String, HashMap<String, Type>>,
+    record_spans: HashMap<String, Vec<SpanRow>>,
 }
 
 impl CheckState {
@@ -73,6 +79,8 @@ impl CheckState {
             module_int_binds,
             module_list_binds: HashMap::new(),
             has_region,
+            item_types: HashMap::new(),
+            record_spans: HashMap::new(),
         }
     }
 
@@ -115,6 +123,8 @@ pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure
     Ok(Sketch {
         module: module.clone(),
         carry: state.carry,
+        types: state.item_types,
+        record_spans: state.record_spans,
     })
 }
 
@@ -324,8 +334,78 @@ fn walk_holes_rhs(rhs: &Rhs, diags: &mut Vec<Diag>) {
     }
 }
 
+pub(crate) type SpanRow = (String, u32, u32, String);
+
+struct BoundTypes {
+    live: HashMap<String, Type>,
+    log: Rc<RefCell<HashMap<String, Type>>>,
+    spans: Rc<RefCell<Vec<SpanRow>>>,
+}
+
+impl BoundTypes {
+    fn new() -> Self {
+        Self {
+            live: HashMap::new(),
+            log: Rc::new(RefCell::new(HashMap::new())),
+            spans: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    fn insert(&mut self, name: String, ty: Type) {
+        note_type_span(&self.spans, &ty);
+        self.log.borrow_mut().insert(name.clone(), ty.clone());
+        self.live.insert(name, ty);
+    }
+
+    fn remove(&mut self, name: &str) {
+        self.log.borrow_mut().remove(name);
+        self.live.remove(name);
+    }
+
+    fn recorded(&self) -> HashMap<String, Type> {
+        self.log.borrow().clone()
+    }
+
+    fn spans(&self) -> Vec<SpanRow> {
+        self.spans.borrow().clone()
+    }
+}
+
+fn note_type_span(spans: &Rc<RefCell<Vec<SpanRow>>>, ty: &Type) {
+    let Type::Named(name, span) = ty else {
+        return;
+    };
+    if !name.is_empty() {
+        push_type_span(spans, name, span);
+    }
+}
+
+fn push_type_span(spans: &Rc<RefCell<Vec<SpanRow>>>, name: &str, span: &Span) {
+    spans
+        .borrow_mut()
+        .push((span.file.clone(), span.start, span.end, name.to_string()));
+}
+
+impl Clone for BoundTypes {
+    fn clone(&self) -> Self {
+        Self {
+            live: self.live.clone(),
+            log: Rc::clone(&self.log),
+            spans: Rc::clone(&self.spans),
+        }
+    }
+}
+
+impl std::ops::Deref for BoundTypes {
+    type Target = HashMap<String, Type>;
+
+    fn deref(&self) -> &HashMap<String, Type> {
+        &self.live
+    }
+}
+
 struct Ctx {
-    types: HashMap<String, Type>,
+    types: BoundTypes,
     phi_gaps: HashSet<String>,
     match_partial: HashSet<String>,
 }
@@ -333,7 +413,7 @@ struct Ctx {
 impl Ctx {
     fn new() -> Self {
         Self {
-            types: HashMap::new(),
+            types: BoundTypes::new(),
             phi_gaps: HashSet::new(),
             match_partial: HashSet::new(),
         }
@@ -480,6 +560,7 @@ fn check_fn(f: &FnItem, fns: &[&FnItem], state: &mut CheckState, diags: &mut Vec
     for stmt in &f.body {
         check_stmt(stmt, &mut ctx, state, fns, true, Some(&f.ret), diags);
     }
+    note_item_types(state, &f.name, &ctx);
 }
 
 fn check_test(t: &TestItem, fns: &[&FnItem], state: &mut CheckState, diags: &mut Vec<Diag>) {
@@ -489,6 +570,7 @@ fn check_test(t: &TestItem, fns: &[&FnItem], state: &mut CheckState, diags: &mut
     for stmt in &t.body {
         check_stmt(stmt, &mut ctx, state, fns, false, None, diags);
     }
+    note_item_types(state, &format!("test.{}", t.name), &ctx);
 }
 
 fn check_property(
@@ -503,6 +585,16 @@ fn check_property(
     for stmt in &p.body {
         check_stmt_property(stmt, &mut ctx, state, fns, diags);
     }
+    note_item_types(state, &format!("property.{}", p.name), &ctx);
+}
+
+fn note_item_types(state: &mut CheckState, key: &str, ctx: &Ctx) {
+    state
+        .item_types
+        .insert(key.to_string(), ctx.types.recorded());
+    state
+        .record_spans
+        .insert(key.to_string(), ctx.types.spans());
 }
 
 fn stmt_check_span(stmt: &Stmt) -> Span {
@@ -3120,5 +3212,32 @@ mod tests {
         let path = write_src("match-arm-trap", trap);
         let exit = crate::check(&path, crate::Opts::default());
         assert_eq!(exit.code, 0, "{}", exit.stderr);
+    }
+
+    fn named<'a>(map: &'a HashMap<String, Type>, name: &str) -> &'a str {
+        match map.get(name) {
+            Some(Type::Named(n, _)) => n.as_str(),
+            other => panic!("{name} is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn item_type_log_records_each_lowered_item() {
+        let src = "strake 1\n\nn = 1\n\nfn f(a: i64, c: bool) -> i64\n  b = add i64 a n\n  xs = list.empty i64\n  for x in xs\n    ret 0\n  end\n  if c\n    p = add i64 1 2\n    ret p\n  else\n    ret 0\n  end\nend\n\ntest t\n  d = add i64 1 2\n  ret 0\nend\n\nproperty q\n  e = add i64 1 2\n  assert.eq e 3\nend\n";
+        let module = syntax::parse(src, "t.strake").expect("parse");
+        let sketch = check(&module, false).expect("check");
+        let f = sketch.types.get("f").expect("fn f");
+        assert_eq!(named(f, "a"), "i64");
+        assert_eq!(named(f, "c"), "bool");
+        assert_eq!(named(f, "b"), "i64");
+        assert_eq!(named(f, "n"), "i64");
+        assert_eq!(named(f, "p"), "i64");
+        assert!(matches!(f.get("xs"), Some(Type::List(_, _))));
+        assert!(!f.contains_key("x"));
+        let t = sketch.types.get("test.t").expect("test t");
+        assert_eq!(named(t, "d"), "i64");
+        assert_eq!(named(t, "n"), "i64");
+        let q = sketch.types.get("property.q").expect("property q");
+        assert_eq!(named(q, "e"), "i64");
     }
 }
