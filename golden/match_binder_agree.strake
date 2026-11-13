@@ -1,0 +1,24 @@
+strake 1
+
+fn f(r: result i64 i64) -> i64
+  match r
+    ok p ->
+      ret p
+    err p ->
+      ret p
+  end
+end
+
+test ok_arm
+  v = ok i64 4
+  n = call f(v)
+  assert.eq n 4
+  ret 0
+end
+
+test err_arm
+  v = err i64 9
+  n = call f(v)
+  assert.eq n 9
+  ret 0
+end

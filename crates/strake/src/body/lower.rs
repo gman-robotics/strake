@@ -599,7 +599,6 @@ fn lower_match(
     let phi_names = match_phi_names(&site);
     let any_reaches = site.arms.iter().any(|a| a.reaches);
     let mut arm_end_blocks: Vec<(usize, std::collections::HashMap<String, u32>)> = Vec::new();
-    let mut arm_known: Vec<std::collections::HashMap<String, Type>> = Vec::new();
     for (arm, supply) in arms.iter().zip(site.arms.iter()) {
         let arm_block = arm_entries[supply.tag_index as usize];
         let mut arm_env = env.clone();
@@ -608,21 +607,13 @@ fn lower_match(
             if binder != "_" {
                 let payload = b.sum_payload(cur, span.clone(), scrut_v);
                 arm_env.insert(binder.clone(), payload);
-            }
-        }
-        let saved = plan.snap_bounds();
-        if let Some(binder) = &arm.binder {
-            if binder != "_" {
-                note_match_binder(plan, scrutinee, &arm.tag, binder);
+                bind_item_type(plan, binder);
             }
         }
         for stmt in &arm.body {
             cur = lower_match_arm_stmt(b, cur, stmt, &mut arm_env, loops, plan, maps, in_test)?;
         }
-        let arm_ty = plan.known_ty.clone();
-        plan.restore_bounds(saved);
         if supply.reaches {
-            arm_known.push(arm_ty);
             if !b.block_terminates(cur) {
                 b.jump(cur, span.clone(), join_block);
             }
@@ -650,9 +641,6 @@ fn lower_match(
         let dst = b.alloc_vreg();
         b.merge_regs(join_block, span.clone(), dst, &pairs);
         env.insert(name.clone(), dst);
-    }
-    for name in &phi_names {
-        bind_agreed_type(plan, name, &arm_known);
     }
     b.jump(join_block, span.clone(), cont);
     Ok(cont)
@@ -1200,9 +1188,7 @@ fn lower_rhs_project(
 }
 
 fn note_record(plan: &mut LowerPlan<'_>, name: &str, _rhs: &Rhs) {
-    if let Some(ty) = plan.item_types.get(name).cloned() {
-        bind_type(plan, name, ty);
-    }
+    bind_item_type(plan, name);
 }
 
 fn bind_type(plan: &mut LowerPlan<'_>, name: &str, ty: Type) {
@@ -1329,45 +1315,13 @@ fn bind_agreed_type(
     }
 }
 
-fn note_match_binder(plan: &mut LowerPlan<'_>, scrutinee: &str, tag: &str, binder: &str) {
-    let Some(scrut) = plan.known_ty.get(scrutinee).cloned() else {
+fn bind_item_type(plan: &mut LowerPlan<'_>, name: &str) {
+    if name == "_" {
         return;
-    };
-    let Some(payload) = payload_type(&plan.sketch.module, &scrut, tag) else {
-        return;
-    };
-    bind_type(plan, binder, payload);
-}
-
-fn payload_type(module: &Module, scrut: &Type, tag: &str) -> Option<Type> {
-    match scrut {
-        Type::Result(ok, err, _) => match tag {
-            "ok" => Some((**ok).clone()),
-            "err" => Some((**err).clone()),
-            _ => None,
-        },
-        Type::Named(name, _) => sum_variant_payload(module, name, tag),
-        _ => None,
     }
-}
-
-fn sum_variant_payload(module: &Module, name: &str, tag: &str) -> Option<Type> {
-    for item in &module.items {
-        let Item::TypeDef(td) = item else {
-            continue;
-        };
-        if td.name != name {
-            continue;
-        }
-        let TypeDefKind::Sum(variants) = &td.kind else {
-            return None;
-        };
-        return variants
-            .iter()
-            .find(|v| v.tag == tag)
-            .and_then(|v| v.payload.clone());
+    if let Some(ty) = plan.item_types.get(name).cloned() {
+        bind_type(plan, name, ty);
     }
-    None
 }
 
 fn named_record(module: &Module, ty: &Type) -> Option<String> {
@@ -2328,6 +2282,21 @@ end
             .unwrap_or_else(|err| panic!("{file}: {err:?}"));
             assert_eq!(got, 0, "{file}");
         }
+    }
+
+    #[test]
+    fn match_binder_record_field_uses_item_type() {
+        let src = "strake 1\n\ntype A { n: i64 }\n\nfn f(r: result A A) -> i64\n  match r\n    ok p ->\n      q = p.n\n      ret q\n    err p ->\n      q = p.n\n      ret q\n  end\nend\n\ntest t\n  a = { n: 4 }\n  v = ok A a\n  n = call f(v)\n  assert.eq n 4\n  ret 0\nend\n";
+        let module = syntax::parse(src, "t.strake").expect("parse");
+        let program = compile_module(&module, false).expect("compile");
+        let got = crate::body::interp::call_function_i64(
+            &program,
+            "test.t",
+            &[],
+            &crate::body::host::EmptyHost,
+        )
+        .expect("exec");
+        assert_eq!(got, 0);
     }
 
     #[test]

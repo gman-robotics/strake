@@ -1,0 +1,17 @@
+strake 1
+
+type A { n: i64 }
+type B { n: bool }
+
+fn f(r: result A B) -> i64
+  match r
+    ok p ->
+      ret 0
+    err p ->
+      ret 1
+  end
+end
+
+test t
+  ret 0
+end

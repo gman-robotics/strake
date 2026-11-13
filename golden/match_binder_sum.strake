@@ -1,0 +1,16 @@
+strake 1
+
+type Color { Blue i64 | Red bool }
+
+fn f(c: Color) -> i64
+  match c
+    Blue p ->
+      ret p
+    Red p ->
+      ret 0
+  end
+end
+
+test t
+  ret 0
+end

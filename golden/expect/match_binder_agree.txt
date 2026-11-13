@@ -1,0 +1,4 @@
+args: test golden/match_binder_agree.strake
+exit: 0
+--- stdout
+--- stderr

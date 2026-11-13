@@ -1,0 +1,5 @@
+args: check golden/match_binder_conflict.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/match_binder_conflict.strake","start":77,"end":143}}
