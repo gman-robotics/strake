@@ -1,0 +1,7 @@
+strake 1
+
+use pkg@blake3:48c37268d0995bdaee1c79d7da54a7c9015408fa14088d3958a458e666d44eeb
+
+fn f() -> unit
+  ret unit
+end

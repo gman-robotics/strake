@@ -141,7 +141,8 @@ fn check_one_file(path: &str, opts: &Opts) -> Exit {
         }
         filter_tests_for_only_fn(&mut module, name);
     }
-    match compile_module(&module, opts.draft) {
+    let blob_root = opts.blob_root.as_deref().map(Path::new);
+    match compile_module(&module, opts.draft, blob_root) {
         Ok(_) => Exit {
             code: 0,
             stdout: String::new(),
@@ -225,7 +226,8 @@ fn compile_for_test(path: &str, opts: &Opts) -> Result<body::interp::Program, Ex
     if let Some(msg) = syntax::codeless_rejection(&module) {
         return Err(codeless_exit(msg));
     }
-    match compile_module(&module, opts.draft) {
+    let blob_root = opts.blob_root.as_deref().map(Path::new);
+    match compile_module(&module, opts.draft, blob_root) {
         Ok(p) => Ok(p),
         Err(CompileError::Check(check::CheckFailure::Diags(diags))) => Err(check_fail(diags)),
         Err(CompileError::Check(check::CheckFailure::Codeless(msg))) => Err(codeless_exit(msg)),

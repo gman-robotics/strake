@@ -1177,7 +1177,7 @@ test t
 end
 "#;
         let module = syntax::parse(src, "t.strake").expect("parse");
-        let program = compile_module(&module, false).expect("compile");
+        let program = compile_module(&module, false, None).expect("compile");
         let fn_idx = program
             .functions
             .iter()
@@ -1200,7 +1200,7 @@ end
     fn add2_basic_call_returns_14() {
         let src = include_str!("../../../../../golden/add2_basic.strake");
         let module = syntax::parse(src, "golden/add2_basic.strake").expect("parse");
-        let program = compile_module(&module, false).expect("compile");
+        let program = compile_module(&module, false, None).expect("compile");
         let host = EmptyHost;
         let n = call_function_i64(&program, "add2", &[3, 4], &host).expect("exec");
         assert_eq!(n, 14);
@@ -1210,7 +1210,7 @@ end
     fn host_entry_is_call_one_frame_one() {
         let src = "strake 1\n\ntest t\n  ret 0\nend\n";
         let module = syntax::parse(src, "t.strake").expect("parse");
-        let program = compile_module(&module, false).expect("compile");
+        let program = compile_module(&module, false, None).expect("compile");
         let mut m = Machine::new_test_channel(&program, program.fuel, &EmptyHost);
         m.run_root_function(0).expect("run");
         assert_eq!(m.call_entries, 1);
