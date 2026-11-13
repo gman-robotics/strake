@@ -357,4 +357,34 @@ mod tests {
         assert_eq!(exit.code, 1);
         assert!(exit.stderr.contains("E_USE"));
     }
+
+    #[test]
+    fn check_add2_basic_ignores_blob_root_in_process() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = repo.join("golden/add2_basic.strake");
+        let blob = repo.join("golden/blob").to_string_lossy().into_owned();
+        let exit = check(
+            path.to_str().unwrap(),
+            Opts {
+                blob_root: Some(blob),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(exit.code, 0, "{}", exit.stderr);
+        assert!(exit.stderr.is_empty());
+    }
+
+    #[test]
+    fn test_command_passes_blob_root_to_check() {
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let path = repo.join("golden/add2_basic.strake");
+        let exit = test(
+            path.to_str().unwrap(),
+            Opts {
+                blob_root: Some(repo.join("golden/blob").to_string_lossy().into_owned()),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(exit.code, 0, "{}", exit.stderr);
+    }
 }

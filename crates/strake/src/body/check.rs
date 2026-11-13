@@ -3326,10 +3326,69 @@ mod tests {
     }
 
     #[test]
-    fn use_blob_name_unsafe_rejects_separators() {
-        assert!(use_blob_name_unsafe("pkg.sub"));
+    fn use_blob_name_unsafe_slash_without_backslash() {
         assert!(use_blob_name_unsafe("a/b"));
+    }
+
+    #[test]
+    fn use_blob_name_unsafe_backslash_without_slash() {
+        assert!(use_blob_name_unsafe(r"a\b"));
+    }
+
+    #[test]
+    fn use_blob_name_unsafe_dotdot_without_backslash() {
+        assert!(use_blob_name_unsafe("ab..cd"));
+    }
+
+    #[test]
+    fn use_blob_name_unsafe_dot_without_dotdot() {
+        assert!(use_blob_name_unsafe("pkg.sub"));
         assert!(!use_blob_name_unsafe("pkg"));
+    }
+
+    #[test]
+    fn check_one_use_blob_unsafe_name_skips_read() {
+        let u = UseDecl {
+            span: Span {
+                file: "t.strake".into(),
+                start: 0,
+                end: 1,
+            },
+            name: r"x\y".into(),
+            hash: "00".into(),
+        };
+        let dir = std::env::temp_dir().join(format!("strake-use-unsafe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        std::fs::write(dir.join(r"x\y"), b"blob").expect("would-be blob");
+        let mut diags = Vec::new();
+        check_one_use_blob(&u, &dir, &mut diags);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Code::EUse);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_one_use_blob_matching_hash_ok() {
+        let bytes = b"formatted pkg bytes";
+        let hash = blake3::hash(bytes).to_hex().to_string();
+        let u = UseDecl {
+            span: Span {
+                file: "t.strake".into(),
+                start: 0,
+                end: 1,
+            },
+            name: "pkg".into(),
+            hash,
+        };
+        let dir = std::env::temp_dir().join(format!("strake-use-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        std::fs::write(dir.join("pkg"), bytes).expect("write blob");
+        let mut diags = Vec::new();
+        check_one_use_blob(&u, &dir, &mut diags);
+        assert!(diags.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
