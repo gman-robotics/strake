@@ -629,20 +629,7 @@ python_lcov_fresh() {
       *.py) py_files+=("${file}") ;;
     esac
   done
-  python3 - "${py_files[@]}" <<'PY'
-import pathlib
-import sys
-
-lcov = pathlib.Path("target/coverage/python/lcov.info")
-if not lcov.is_file() or lcov.stat().st_size == 0:
-    sys.exit(1)
-stamp = lcov.stat().st_mtime
-for raw in sys.argv[1:]:
-    path = pathlib.Path(raw)
-    if not path.is_file() or path.stat().st_mtime > stamp:
-        sys.exit(1)
-sys.exit(0)
-PY
+  python3 "${SCOPE_PY}" lcov-fresh target/coverage/python/lcov.info "${py_files[@]}"
 }
 
 ensure_python_lcov() {

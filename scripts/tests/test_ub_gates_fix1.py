@@ -1667,5 +1667,101 @@ class GateCommandTests(unittest.TestCase):
             self.assertEqual(proc.stderr, "")
 
 
+class LcovFreshTests(unittest.TestCase):
+    """lcov-fresh, invoked the way run_ub_gates_ci.sh invokes it."""
+
+    def _same_code(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        proc = subprocess.run(argv, capture_output=True, text=True)
+        code = _load_scope().main(argv[2:])
+        self.assertEqual(proc.returncode, code)
+        return proc
+
+    def _run(self, lcov: Path | None, *sources: Path) -> subprocess.CompletedProcess[str]:
+        argv = ["python3", str(SCOPE_PY), "lcov-fresh"]
+        if lcov is not None:
+            argv.append(str(lcov))
+        argv.extend(str(path) for path in sources)
+        return self._same_code(argv)
+
+    def _file(self, path: Path, body: str, stamp: int) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body, encoding="utf-8")
+        os.utime(path, (stamp, stamp))
+
+    def test_missing_args_fail(self) -> None:
+        proc = self._same_code(["python3", str(SCOPE_PY), "lcov-fresh"])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("lcov-fresh requires an lcov path", proc.stderr)
+
+    def test_missing_lcov_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lib" / "a.py"
+            self._file(source, "x", 1_000_000)
+            proc = self._run(root / "target" / "coverage" / "python" / "lcov.info", source)
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+
+    def test_empty_lcov_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lcov = root / "target" / "coverage" / "python" / "lcov.info"
+            source = root / "lib" / "a.py"
+            self._file(lcov, "", 2_000_000)
+            self._file(source, "x", 1_000_000)
+            proc = self._run(lcov, source)
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertEqual(lcov.stat().st_size, 0)
+
+    def test_older_lcov_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lcov = root / "target" / "coverage" / "python" / "lcov.info"
+            source = root / "lib" / "a.py"
+            self._file(lcov, "x", 1_000_000)
+            self._file(source, "x", 2_000_000)
+            proc = self._run(lcov, source)
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+            self.assertLess(lcov.stat().st_mtime, source.stat().st_mtime)
+
+    def test_missing_source_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lcov = root / "target" / "coverage" / "python" / "lcov.info"
+            self._file(lcov, "x", 2_000_000)
+            proc = self._run(lcov, root / "lib" / "missing.py")
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+
+    def test_fresh_lcov_passes_when_not_older(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lcov = root / "target" / "coverage" / "python" / "lcov.info"
+            older = root / "lib" / "old.py"
+            same = root / "lib" / "same.py"
+            self._file(lcov, "x", 2_000_000)
+            self._file(older, "x", 1_000_000)
+            self._file(same, "x", 2_000_000)
+            proc = self._run(lcov, older, same)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertGreaterEqual(lcov.stat().st_mtime, older.stat().st_mtime)
+            self.assertEqual(lcov.stat().st_mtime, same.stat().st_mtime)
+
+    def test_second_source_older_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            lcov = root / "target" / "coverage" / "python" / "lcov.info"
+            fresh = root / "lib" / "fresh.py"
+            stale = root / "lib" / "stale.py"
+            self._file(lcov, "x", 2_000_000)
+            self._file(fresh, "x", 1_000_000)
+            self._file(stale, "x", 3_000_000)
+            proc = self._run(lcov, fresh, stale)
+            self.assertEqual(proc.returncode, 1, proc.stderr)
+
+    def test_unknown_command_names_lcov_fresh(self) -> None:
+        proc = self._same_code(["python3", str(SCOPE_PY), "no-such"])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("lcov-fresh", proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

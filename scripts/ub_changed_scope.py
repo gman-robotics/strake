@@ -917,7 +917,7 @@ def _flag(argv: list[str], name: str) -> str | None:
 
 def _usage() -> int:
     print(
-        "usage: ub_changed_scope.py lines|crap|dry|align-base|lcov-covers ...",
+        "usage: ub_changed_scope.py lines|crap|dry|align-base|lcov-covers|lcov-fresh ...",
         file=sys.stderr,
     )
     return 1
@@ -1294,6 +1294,96 @@ def _report_missing(root: Path, listing: Path) -> int:
     return _emit_missing(missing)
 
 
+def _stat_or_none(path: Path):
+    try:
+        return path.stat()
+    except OSError:
+        return None
+
+
+def _empty_file(info) -> bool:
+    return info.st_size == 0
+
+
+def _mtime_or_none(info) -> float | None:
+    if _empty_file(info):
+        return None
+    return info.st_mtime
+
+
+def _file_mtime(path: Path) -> float | None:
+    info = _stat_or_none(path)
+    if info is None:
+        return None
+    return _mtime_or_none(info)
+
+
+def _newer_than(left: float, right: float) -> bool:
+    return left > right
+
+
+def _source_is_fresh(lcov_mtime: float, source: Path) -> bool:
+    source_mtime = _file_mtime(source)
+    if source_mtime is None:
+        return False
+    return not _newer_than(source_mtime, lcov_mtime)
+
+
+def _append_path(found: list[Path], item: str) -> list[Path]:
+    found.append(Path(item))
+    return found
+
+
+def _all_paths(argv: list[str]) -> list[Path]:
+    found: list[Path] = []
+    for item in argv:
+        _append_path(found, item)
+    return found
+
+
+def _sources_of(argv: list[str]) -> list[Path]:
+    found = _all_paths(argv)
+    found.pop(0)
+    return found
+
+
+def _all_fresh(lcov_mtime: float, sources: list[Path]) -> bool:
+    pending = list(sources)
+    if not pending:
+        return True
+    return _consume(lcov_mtime, pending)
+
+
+def _consume(lcov_mtime: float, pending: list[Path]) -> bool:
+    if not _source_is_fresh(lcov_mtime, pending.pop()):
+        return False
+    return _all_fresh(lcov_mtime, pending)
+
+
+def _fresh_tree(lcov: Path, sources: list[Path]) -> bool:
+    lcov_mtime = _file_mtime(lcov)
+    if lcov_mtime is None:
+        return False
+    return _all_fresh(lcov_mtime, sources)
+
+
+def _status(ok: bool) -> int:
+    if ok:
+        return 0
+    return 1
+
+
+def _have_lcov_arg(argv: list[str]) -> bool:
+    return bool(argv)
+
+
+def cmd_lcov_fresh(argv: list[str]) -> int:
+    if not _have_lcov_arg(argv):
+        print("lcov-fresh requires an lcov path", file=sys.stderr)
+        return 1
+    return _status(_fresh_tree(Path(argv[0]), _sources_of(argv)))
+
+
 def cmd_lcov_covers(argv: list[str]) -> int:
     root = _flag(argv, "--root")
     listing = _flag(argv, "--list")
@@ -1310,6 +1400,7 @@ def _dispatch(command: str, argv: list[str]) -> int:
         "dry": cmd_dry,
         "align-base": cmd_align_base,
         "lcov-covers": cmd_lcov_covers,
+        "lcov-fresh": cmd_lcov_fresh,
     }
     func = commands.get(command)
     if func is None:
