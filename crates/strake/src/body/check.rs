@@ -2417,6 +2417,52 @@ fn parse_diag(span: Span) -> Diag {
     catalog_check_diag(Code::EParse, span)
 }
 
+fn bind_match_payload(
+    arm_ctx: &mut Ctx,
+    binder: Option<&str>,
+    payload: Option<&Type>,
+    arm_span: Span,
+    match_span: &Span,
+    binders: &mut HashSet<String>,
+    diags: &mut Vec<Diag>,
+) {
+    let Some(binder) = binder else {
+        return;
+    };
+    if binder == "_" {
+        return;
+    }
+    if arm_ctx.types.contains_key(binder) {
+        diags.push(shadow_diag(arm_span));
+        return;
+    }
+    let Some(payload_ty) = payload else {
+        return;
+    };
+    if binder_payload_clashes(arm_ctx, binder, payload_ty, binders) {
+        diags.push(type_diag(match_span.clone()));
+        return;
+    }
+    binders.insert(binder.to_string());
+    arm_ctx.bind(binder, payload_ty.clone(), arm_span, diags);
+}
+
+fn binder_payload_clashes(
+    arm_ctx: &Ctx,
+    binder: &str,
+    payload_ty: &Type,
+    binders: &HashSet<String>,
+) -> bool {
+    if !binders.contains(binder) {
+        return false;
+    }
+    arm_ctx
+        .types
+        .recorded()
+        .get(binder)
+        .is_some_and(|prev| !types_equal(prev, payload_ty))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_match(
     span: Span,
@@ -2453,6 +2499,7 @@ fn check_match(
     let mut seen_tags = HashSet::new();
     let mut arm_supplies = Vec::new();
     let mut arm_local_types: Vec<HashMap<String, Type>> = Vec::new();
+    let mut binder_names = HashSet::new();
     let site_id = state.alloc_site_id();
     let match_idx = state.carry.matches.len();
 
@@ -2473,15 +2520,15 @@ fn check_match(
             phi_gaps: ctx.phi_gaps.clone(),
             match_partial: ctx.match_partial.clone(),
         };
-        if let Some(binder) = &arm.binder {
-            if binder != "_" {
-                if arm_ctx.types.contains_key(binder) {
-                    diags.push(shadow_diag(arm.span.clone()));
-                } else if let Some(payload_ty) = expected_payload {
-                    arm_ctx.bind(binder, payload_ty.clone(), arm.span.clone(), diags);
-                }
-            }
-        }
+        bind_match_payload(
+            &mut arm_ctx,
+            arm.binder.as_deref(),
+            expected_payload,
+            arm.span.clone(),
+            &span,
+            &mut binder_names,
+            diags,
+        );
 
         for stmt in &arm.body {
             if let Some(params) = loop_params {

@@ -2,3 +2,4 @@ args: check golden/match_binder_sum.strake
 exit: 1
 --- stdout
 --- stderr
+{"code":"E_TYPE","kind":"check","msg":"operand type, arity, compare family, or eq on list/record/sum","span":{"file":"golden/match_binder_sum.strake","start":70,"end":138}}
