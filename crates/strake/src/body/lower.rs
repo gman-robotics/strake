@@ -1316,6 +1316,9 @@ fn bind_agreed_type(
 }
 
 fn bind_item_type(plan: &mut LowerPlan<'_>, name: &str) {
+    if name == "_" {
+        return;
+    }
     if let Some(ty) = plan.item_types.get(name).cloned() {
         bind_type(plan, name, ty);
     }
