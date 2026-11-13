@@ -23,7 +23,9 @@
 # a shallow clone. A mutator budget timeout fails the job in blocking mode.
 # Advisory mode reports that timeout and still exits 0. The step summary's
 # first line states which of those happened. Changed Python is measured with
-# coverage.py before the mutator. Blocking mode fails when a changed file has
+# coverage.py before crapper scores those sources. A missing Python lcov, or
+# one older than a scored Python source, is tool_error and blocks. The mutator
+# reads that same report. Blocking mode fails when a changed file has
 # mutation sites and none were killed or survived. Kills in another file do not
 # cover it. An uncovered site on a changed line is that miss when no
 # changed-line site was killed or survived. The mutator reports N/A and passes
@@ -616,6 +618,35 @@ EOF
     COVERAGE_PREFIX=(--use-existing-coverage)
   fi
   log "ub-gates: python coverage target/coverage/python/lcov.info"
+  return 0
+}
+
+python_lcov_fresh() {
+  local -a py_files=()
+  local file
+  for file in "${SCOPE_FILES[@]}"; do
+    case "${file}" in
+      *.py) py_files+=("${file}") ;;
+    esac
+  done
+  python3 "${SCOPE_PY}" lcov-fresh target/coverage/python/lcov.info "${py_files[@]}"
+}
+
+ensure_python_lcov() {
+  if ! scope_has_python; then
+    return 0
+  fi
+  if [[ ! -d scripts/tests ]]; then
+    return 0
+  fi
+  if ! run_python_coverage; then
+    emit_warning "tool_error — python lcov missing or older than scored sources"
+    return 1
+  fi
+  if ! python_lcov_fresh; then
+    emit_warning "tool_error — python lcov missing or older than scored sources"
+    return 1
+  fi
   return 0
 }
 
@@ -1214,6 +1245,14 @@ if [[ -n "${UB_GATES_COVERAGE_CMD:-}" ]]; then
   COVERAGE_PREFIX=(--use-existing-coverage)
 fi
 
+if ! ensure_python_lcov; then
+  OUTCOME="tool_error"
+  GATE_MISS=1
+  TOOL_ERROR=1
+  GATES_RAN=0
+  exit_for_outcome
+fi
+
 log "ub-gates: running on ${SCOPE_COUNT} file(s) from ${MERGE_BASE}...HEAD (advisory=${ADVISORY})"
 log "ub-gates: ${SCOPE_FILES[*]}"
 
@@ -1222,15 +1261,10 @@ run_dryer
 MUTATOR_SKIPPED=0
 MUTATOR_TIMEOUT=0
 MUTATOR_NO_COVERAGE=0
-PYTHON_COVERAGE_FAILED=0
 if [[ "${SKIP_MUTATOR}" == "1" ]]; then
   MUTATOR_SKIPPED=1
   MUTATOR_RC=""
 else
-  if ! run_python_coverage; then
-    PYTHON_COVERAGE_FAILED=1
-    emit_warning "tool_error — python coverage for changed .py files failed"
-  fi
   run_mutator
   read_mutator_counts
 fi
@@ -1248,9 +1282,6 @@ if ! classify_dryer; then
   TOOL_ERROR=1
 fi
 if [[ "${BASE_SCORE_FAILED:-0}" -eq 1 ]]; then
-  TOOL_ERROR=1
-fi
-if [[ "${PYTHON_COVERAGE_FAILED:-0}" -eq 1 ]]; then
   TOOL_ERROR=1
 fi
 
