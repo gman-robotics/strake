@@ -22,12 +22,17 @@ pub(crate) enum CompileError {
 }
 
 /// CST → check → lower (exec is separate).
-pub(crate) fn compile_module(
+pub(crate) fn compile_module(module: &Module, draft: bool) -> Result<Program, CompileError> {
+    compile_module_with_blobs(module, draft, None)
+}
+
+/// Like [`compile_module`], but resolves `use` blobs under `blob_root` when set.
+pub(crate) fn compile_module_with_blobs(
     module: &Module,
     draft: bool,
     blob_root: Option<&std::path::Path>,
 ) -> Result<Program, CompileError> {
-    let sketch = check::check(module, draft, blob_root).map_err(CompileError::Check)?;
+    let sketch = check::check_with_blobs(module, draft, blob_root).map_err(CompileError::Check)?;
     let program = lower::lower(&sketch).map_err(CompileError::Lower)?;
     #[cfg(debug_assertions)]
     {
@@ -99,7 +104,7 @@ mod tests {
     fn priv_fn_omitted_from_exports() {
         let src = include_str!("../../../../golden/priv.strake");
         let module = syntax::parse(src, "golden/priv.strake").expect("parse");
-        let program = compile_module(&module, false, None).expect("compile");
+        let program = compile_module(&module, false).expect("compile");
         assert!(program.exports.iter().any(|e| e.name == "visible"));
         assert!(!program.exports.iter().any(|e| e.name == "secret"));
     }
@@ -108,7 +113,7 @@ mod tests {
     fn property_export_named_property_dot_name() {
         let src = "strake 1\n\nproperty smoke\n  ret 0\nend\n";
         let module = syntax::parse(src, "t.strake").expect("parse");
-        let program = compile_module(&module, false, None).expect("compile");
+        let program = compile_module(&module, false).expect("compile");
         assert!(program
             .exports
             .iter()
@@ -119,6 +124,6 @@ mod tests {
     fn loop_in_fn_body_compiles() {
         let src = "strake 1\n\nfn bad() -> i64\n  loop x = 0\n    break\n  end\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
         let module = syntax::parse(src, "t.strake").expect("parse");
-        assert!(compile_module(&module, false, None).is_ok());
+        assert!(compile_module(&module, false).is_ok());
     }
 }

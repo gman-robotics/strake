@@ -92,7 +92,11 @@ impl CheckState {
     }
 }
 
-pub(crate) fn check(
+pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure> {
+    check_with_blobs(module, draft, None)
+}
+
+pub(crate) fn check_with_blobs(
     module: &Module,
     draft: bool,
     blob_root: Option<&Path>,
@@ -2752,7 +2756,7 @@ mod tests {
         let src =
             "strake 1\n\nfn f() -> i64\n  ret 1\n  x = add i64 1 2\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let sketch = check(&m, false, None);
+        let sketch = check(&m, false);
         assert!(sketch.is_err());
         let diags = match sketch.unwrap_err() {
             CheckFailure::Diags(d) => d,
@@ -2765,20 +2769,20 @@ mod tests {
     fn call_i32_param_accepts_small_literal() {
         let src = "strake 1\n\nfn id32(a: i32) -> i32\n  ret a\nend\n\ntest t\n  r = call id32(3)\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, false, None).is_ok());
+        assert!(check(&m, false).is_ok());
     }
 
     fn check_errs(src: &str) -> bool {
         let m = syntax::parse(src, "t.strake").expect("parse");
         matches!(
-            check(&m, false, None),
+            check(&m, false),
             Err(CheckFailure::Diags(d)) if d.iter().any(|diag| diag.code == Code::EType)
         )
     }
 
     fn check_ok(src: &str) -> bool {
         let m = syntax::parse(src, "t.strake").expect("parse");
-        check(&m, false, None).is_ok()
+        check(&m, false).is_ok()
     }
 
     #[test]
@@ -2821,7 +2825,7 @@ mod tests {
     fn ret_i32_accepts_small_literal() {
         let src = "strake 1\n\nfn f() -> i32\n  ret 1\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, false, None).is_ok());
+        assert!(check(&m, false).is_ok());
     }
 
     #[test]
@@ -2834,14 +2838,14 @@ mod tests {
     fn continue_i32_param_accepts_small_literal() {
         let src = "strake 1\n\ntest t\n  x = add i32 1 2\n  loop p = x\n    continue p = 1\n  end\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, false, None).is_ok());
+        assert!(check(&m, false).is_ok());
     }
 
     #[test]
     fn assert_eq_i32_literal_either_side() {
         let src = "strake 1\n\ntest t\n  x = add i32 1 2\n  assert.eq 1 x\n  assert.eq x 1\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, false, None).is_ok());
+        assert!(check(&m, false).is_ok());
     }
 
     #[test]
@@ -2877,14 +2881,14 @@ mod tests {
     fn same_width_values_still_check() {
         let src = "strake 1\n\nfn id32(a: i32) -> i32\n  ret a\nend\n\ntest t\n  x = add i32 1 2\n  r = call id32(x)\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, false, None).is_ok());
+        assert!(check(&m, false).is_ok());
     }
 
     #[test]
     fn shadow_rebind_in_fn() {
         let src = "strake 1\n\nfn f() -> i64\n  x = add i64 1 2\n  x = add i64 x 1\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let err = match check(&m, false, None).unwrap_err() {
+        let err = match check(&m, false).unwrap_err() {
             CheckFailure::Diags(d) => d,
             CheckFailure::Codeless(_) => panic!("expected diags"),
         };
@@ -2895,7 +2899,7 @@ mod tests {
     fn if_phi_missing_arm() {
         let src = "strake 1\n\nfn f(c: bool) -> i64\n  if c\n    t = add i64 1 2\n  else\n    u = add i64 3 4\n  end\n  ret t\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let err = match check(&m, false, None).unwrap_err() {
+        let err = match check(&m, false).unwrap_err() {
             CheckFailure::Diags(d) => d,
             CheckFailure::Codeless(_) => panic!("expected diags"),
         };
@@ -2906,7 +2910,7 @@ mod tests {
     fn if_join_ok() {
         let src = "strake 1\n\nfn f(c: bool) -> i64\n  if c\n    t = add i64 1 2\n  else\n    t = add i64 3 4\n  end\n  ret t\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, false, None).is_ok());
+        assert!(check(&m, false).is_ok());
     }
 
     #[test]
@@ -2914,7 +2918,7 @@ mod tests {
         let src =
             "strake 1\n\nfn f() -> i64\n  x = hole i64\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let err = match check(&m, false, None).unwrap_err() {
+        let err = match check(&m, false).unwrap_err() {
             CheckFailure::Diags(d) => d,
             CheckFailure::Codeless(_) => panic!("expected diags"),
         };
@@ -2928,7 +2932,7 @@ mod tests {
         let src =
             "strake 1\n\nfn f() -> i64\n  x = hole i64\n  ret x\nend\n\ntest t\n  ret 0\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, true, None).is_ok());
+        assert!(check(&m, true).is_ok());
     }
 
     #[test]
@@ -2951,7 +2955,7 @@ mod tests {
     fn forall_lo0_hi_max_is_forall() {
         let src = "strake 1\n\nproperty p\n  forall n: i64 in 0..9223372036854775807\n  end\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let err = match check(&m, false, None).unwrap_err() {
+        let err = match check(&m, false).unwrap_err() {
             CheckFailure::Diags(d) => d,
             CheckFailure::Codeless(_) => panic!("expected diags"),
         };
@@ -2962,7 +2966,7 @@ mod tests {
     fn forall_lo1_hi_max_check_ok() {
         let src = "strake 1\n\nproperty p\n  forall n: i64 in 1..9223372036854775807\n  end\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, false, None).is_ok());
+        assert!(check(&m, false).is_ok());
     }
 
     #[test]
@@ -2970,7 +2974,7 @@ mod tests {
         let src =
             "strake 1\n\nproperty p\n  forall n: i64 in 0..1\n    n = add i64 n 1\n  end\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let err = match check(&m, false, None).unwrap_err() {
+        let err = match check(&m, false).unwrap_err() {
             CheckFailure::Diags(d) => d,
             CheckFailure::Codeless(_) => panic!("expected diags"),
         };
@@ -2981,7 +2985,7 @@ mod tests {
     fn forall_range_unknown_module_bind_is_forall() {
         let src = "strake 1\n\nproperty p\n  forall n: i64 in lo..hi\n  end\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        let err = match check(&m, false, None).unwrap_err() {
+        let err = match check(&m, false).unwrap_err() {
             CheckFailure::Diags(d) => d,
             CheckFailure::Codeless(_) => panic!("expected diags"),
         };
@@ -2993,7 +2997,7 @@ mod tests {
     fn forall_rev_in_match_arm_is_e_forall() {
         let src = include_str!("../../../../golden/forall_rev_match_arm.strake");
         let m = syntax::parse(src, "forall_rev_match_arm.strake").expect("parse");
-        let err = match check(&m, false, None).unwrap_err() {
+        let err = match check(&m, false).unwrap_err() {
             CheckFailure::Diags(d) => d,
             CheckFailure::Codeless(_) => panic!("expected diags"),
         };
@@ -3002,7 +3006,7 @@ mod tests {
 
     fn t4_check_codes(src: &str) -> Vec<Code> {
         let m = syntax::parse(src, "t.strake").expect("parse");
-        match check(&m, false, None) {
+        match check(&m, false) {
             Ok(_) => Vec::new(),
             Err(CheckFailure::Diags(d)) => d.iter().map(|d| d.code).collect(),
             Err(CheckFailure::Codeless(c)) => panic!("unexpected codeless: {c:?}"),
@@ -3061,14 +3065,14 @@ mod tests {
         let src =
             "strake 1\n\nlo = 0\nhi = 1\n\nproperty p\n  forall n: i64 in lo..hi\n  end\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, false, None).is_ok());
+        assert!(check(&m, false).is_ok());
     }
 
     #[test]
     fn check_fn_for_over_module_list_binds() {
         let src = "strake 1\n\nfn f() -> unit\n  t0 = list.empty i64\n  for x in t0\n    ret unit\n  end\n  ret unit\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, false, None).is_ok());
+        assert!(check(&m, false).is_ok());
     }
 
     #[test]
@@ -3172,7 +3176,7 @@ mod tests {
     fn check_stmt_for_and_forall_in_property() {
         let src = "strake 1\n\nproperty p\n  t0 = list.empty i64\n  for x in t0\n    assert.eq x x\n  end\n  forall n: i64 in 0..1\n    assert.eq n n\n  end\nend\n";
         let m = syntax::parse(src, "t.strake").expect("parse");
-        assert!(check(&m, false, None).is_ok());
+        assert!(check(&m, false).is_ok());
     }
 
     #[test]
@@ -3400,7 +3404,7 @@ mod tests {
             "fn f() -> unit\n  ret unit\nend\n"
         );
         let module = syntax::parse(src, "u.strake").expect("parse");
-        let err = check(&module, false, None).unwrap_err();
+        let err = check(&module, false).unwrap_err();
         let diags = match err {
             CheckFailure::Diags(d) => d,
             CheckFailure::Codeless(_) => panic!("expected diags"),
@@ -3411,7 +3415,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("tmpdir");
         std::fs::write(dir.join("pkg"), b"wrong bytes").expect("write blob");
-        let err = check(&module, false, Some(&dir)).unwrap_err();
+        let err = check_with_blobs(&module, false, Some(&dir)).unwrap_err();
         let diags = match err {
             CheckFailure::Diags(d) => d,
             CheckFailure::Codeless(_) => panic!("expected diags"),
@@ -3425,7 +3429,7 @@ mod tests {
     fn item_type_log_records_each_lowered_item() {
         let src = "strake 1\n\nn = 1\n\nfn f(a: i64, c: bool) -> i64\n  b = add i64 a n\n  xs = list.empty i64\n  for x in xs\n    ret 0\n  end\n  if c\n    p = add i64 1 2\n    ret p\n  else\n    ret 0\n  end\nend\n\ntest t\n  d = add i64 1 2\n  ret 0\nend\n\nproperty q\n  e = add i64 1 2\n  assert.eq e 3\nend\n";
         let module = syntax::parse(src, "t.strake").expect("parse");
-        let sketch = check(&module, false, None).expect("check");
+        let sketch = check(&module, false).expect("check");
         let f = sketch.types.get("f").expect("fn f");
         assert_eq!(named(f, "a"), "i64");
         assert_eq!(named(f, "c"), "bool");

@@ -1880,7 +1880,7 @@ mod tests {
 
     fn compile_golden(file: &str, src: &str) -> Program {
         let module = syntax::parse(src, file).expect("parse");
-        compile_module(&module, false, None).expect("compile")
+        compile_module(&module, false).expect("compile")
     }
 
     fn fn_named<'a>(prog: &'a Program, name: &str) -> &'a crate::body::interp::ir::Function {
@@ -2019,9 +2019,9 @@ end
     fn visited_match_sites_equal_plan_len() {
         let src = include_str!("../../../../golden/match_in_if.strake");
         let module = syntax::parse(src, "golden/match_in_if.strake").expect("parse");
-        let sketch = crate::body::check::check(&module, false, None).expect("check");
+        let sketch = crate::body::check::check(&module, false).expect("check");
         assert_eq!(sketch.carry.matches.len(), 1);
-        let prog = compile_module(&module, false, None).expect("lower");
+        let prog = compile_module(&module, false).expect("lower");
         assert!(prog.functions.iter().any(|f| !f.blocks.is_empty()));
     }
 
@@ -2100,7 +2100,7 @@ end
         use crate::body::interp::{ir::Imm, TrapImm};
         let src = include_str!("../../../../golden/hole_draft.strake");
         let module = syntax::parse(src, "golden/hole_draft.strake").expect("parse");
-        let prog = compile_module(&module, true, None).expect("draft compile");
+        let prog = compile_module(&module, true).expect("draft compile");
         assert!(fn_named(&prog, "f")
             .blocks
             .iter()
@@ -2272,7 +2272,7 @@ end
         ];
         for (file, src) in cases {
             let module = syntax::parse(src, file).expect("parse");
-            let program = compile_module(&module, false, None).expect("compile");
+            let program = compile_module(&module, false).expect("compile");
             let got = crate::body::interp::call_function_i64(
                 &program,
                 "test.t",
@@ -2288,7 +2288,7 @@ end
     fn match_binder_record_field_uses_item_type() {
         let src = "strake 1\n\ntype A { n: i64 }\n\nfn f(r: result A A) -> i64\n  match r\n    ok p ->\n      q = p.n\n      ret q\n    err p ->\n      q = p.n\n      ret q\n  end\nend\n\ntest t\n  a = { n: 4 }\n  v = ok A a\n  n = call f(v)\n  assert.eq n 4\n  ret 0\nend\n";
         let module = syntax::parse(src, "t.strake").expect("parse");
-        let program = compile_module(&module, false, None).expect("compile");
+        let program = compile_module(&module, false).expect("compile");
         let got = crate::body::interp::call_function_i64(
             &program,
             "test.t",
@@ -2303,7 +2303,7 @@ end
     fn missing_item_type_aborts_record_lower() {
         let src = include_str!("../../../../golden/record_project.strake");
         let module = syntax::parse(src, "golden/record_project.strake").expect("parse");
-        let mut sketch = crate::body::check::check(&module, false, None).expect("check");
+        let mut sketch = crate::body::check::check(&module, false).expect("check");
         sketch.types.get_mut("f").expect("fn f").remove("p");
         sketch.record_spans.get_mut("f").expect("spans").clear();
         let err = lower(&sketch).expect_err("lower");

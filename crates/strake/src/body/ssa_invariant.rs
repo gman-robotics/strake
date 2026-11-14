@@ -21,7 +21,7 @@ fn golden_dir() -> PathBuf {
 
 fn assert_verified(file: &str, src: &str) {
     let module = syntax::parse(src, file).unwrap_or_else(|_| panic!("{file}: parse"));
-    let sketch = check::check(&module, false, None).unwrap_or_else(|_| panic!("{file}: check"));
+    let sketch = check::check(&module, false).unwrap_or_else(|_| panic!("{file}: check"));
     let program = lower::lower(&sketch).unwrap_or_else(|e| panic!("{file}: {}", e.message()));
     for func in &program.functions {
         verify_function_ssa_public(func)
@@ -31,7 +31,7 @@ fn assert_verified(file: &str, src: &str) {
 
 fn assert_check_implies_verified(file: &str, src: &str) {
     let module = syntax::parse(src, file).unwrap_or_else(|_| panic!("{file}: parse"));
-    let Ok(sketch) = check::check(&module, false, None) else {
+    let Ok(sketch) = check::check(&module, false) else {
         return;
     };
     let program = lower::lower(&sketch).unwrap_or_else(|e| panic!("{file}: {}", e.message()));
@@ -43,7 +43,7 @@ fn assert_check_implies_verified(file: &str, src: &str) {
 
 fn assert_etype(file: &str, src: &str) {
     let module = syntax::parse(src, file).unwrap_or_else(|_| panic!("{file}: parse"));
-    match check::check(&module, false, None) {
+    match check::check(&module, false) {
         Err(CheckFailure::Diags(diags)) => {
             assert!(diags.iter().any(|d| d.code == Code::EType), "{file}");
         }
@@ -54,7 +54,7 @@ fn assert_etype(file: &str, src: &str) {
 
 fn compile_run(src: &str) -> i64 {
     let module = syntax::parse(src, "t.strake").expect("parse");
-    let program = compile_module(&module, false, None).expect("compile");
+    let program = compile_module(&module, false).expect("compile");
     interp::call_function_i64(&program, "test.t", &[], &EmptyHost).expect("exec")
 }
 

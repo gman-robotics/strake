@@ -397,7 +397,7 @@ mod tests {
 
     fn compile_run(src: &str, name: &str) -> i64 {
         let module = syntax::parse(src, "t.strake").expect("parse");
-        let program = compile_module(&module, false, None).expect("compile");
+        let program = compile_module(&module, false).expect("compile");
         crate::body::interp::call_function_i64(&program, name, &[], &EmptyHost).expect("exec")
     }
 
