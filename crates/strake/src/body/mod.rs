@@ -22,6 +22,7 @@ pub(crate) enum CompileError {
 }
 
 /// CST → check → lower (exec is separate).
+#[cfg(test)]
 pub(crate) fn compile_module(module: &Module, draft: bool) -> Result<Program, CompileError> {
     compile_module_with_blobs(module, draft, None)
 }

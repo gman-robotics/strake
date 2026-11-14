@@ -92,6 +92,7 @@ impl CheckState {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure> {
     check_with_blobs(module, draft, None)
 }
