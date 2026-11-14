@@ -10,8 +10,9 @@ use std::path::{Path, PathBuf};
 use body::check;
 use body::diag::{self, Diag, ExportOutcome};
 use body::host::EmptyHost;
+use body::interp::Program;
 use body::syntax;
-use body::{compile_module, lower_abort_message, CompileError, LOWER_ABORT_EXIT};
+use body::{compile_module_with_blobs, lower_abort_message, CompileError, LOWER_ABORT_EXIT};
 
 #[cfg(test)]
 thread_local! {
@@ -119,41 +120,56 @@ fn collect_strake_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn check_one_file(path: &str, opts: &Opts) -> Exit {
-    let source = match read_source(path) {
-        Ok(s) => s,
-        Err(e) => return e,
-    };
-    let mut module = match syntax::parse(&source, path) {
-        Ok(m) => m,
-        Err(diag) => return parse_fail(diag),
-    };
+fn map_compile_error(err: CompileError) -> Exit {
+    match err {
+        CompileError::Check(check::CheckFailure::Diags(diags)) => check_fail(diags),
+        CompileError::Check(check::CheckFailure::Codeless(msg)) => codeless_exit(msg),
+        CompileError::Lower(err) => Exit {
+            code: LOWER_ABORT_EXIT,
+            stdout: String::new(),
+            stderr: lower_abort_message(&err),
+        },
+    }
+}
+
+fn load_checked_module(path: &str) -> Result<syntax::Module, Exit> {
+    let source = read_source(path)?;
+    let module = syntax::parse(&source, path).map_err(parse_fail)?;
     if let Some(msg) = syntax::codeless_rejection(&module) {
-        return codeless_exit(msg);
+        return Err(codeless_exit(msg));
     }
-    if let Some(name) = &opts.only_fn {
-        if !export_fn_exists(&module, name) {
-            return Exit {
-                code: 2,
-                stdout: String::new(),
-                stderr: format!("unknown export `{name}`\n"),
-            };
-        }
-        filter_tests_for_only_fn(&mut module, name);
+    Ok(module)
+}
+
+fn apply_only_fn_filter(module: &mut syntax::Module, name: &str) -> Result<(), Exit> {
+    if !export_fn_exists(module, name) {
+        return Err(Exit {
+            code: 2,
+            stdout: String::new(),
+            stderr: format!("unknown export `{name}`\n"),
+        });
     }
-    match compile_module(&module, opts.draft) {
+    filter_tests_for_only_fn(module, name);
+    Ok(())
+}
+
+fn compile_path(path: &str, opts: &Opts, only_fn: Option<&str>) -> Result<Program, Exit> {
+    let mut module = load_checked_module(path)?;
+    if let Some(name) = only_fn {
+        apply_only_fn_filter(&mut module, name)?;
+    }
+    let blob_root = opts.blob_root.as_deref().map(Path::new);
+    compile_module_with_blobs(&module, opts.draft, blob_root).map_err(map_compile_error)
+}
+
+fn check_one_file(path: &str, opts: &Opts) -> Exit {
+    match compile_path(path, opts, opts.only_fn.as_deref()) {
         Ok(_) => Exit {
             code: 0,
             stdout: String::new(),
             stderr: String::new(),
         },
-        Err(CompileError::Check(check::CheckFailure::Diags(diags))) => check_fail(diags),
-        Err(CompileError::Check(check::CheckFailure::Codeless(msg))) => codeless_exit(msg),
-        Err(CompileError::Lower(err)) => Exit {
-            code: LOWER_ABORT_EXIT,
-            stdout: String::new(),
-            stderr: lower_abort_message(&err),
-        },
+        Err(exit) => exit,
     }
 }
 
@@ -219,22 +235,8 @@ pub fn fmt(path: &str) -> Exit {
 
 /// `strake test [--draft] <file>`
 /// Parse, codeless gate, check, and lower for `strake test`; `Err` is the exit.
-fn compile_for_test(path: &str, opts: &Opts) -> Result<body::interp::Program, Exit> {
-    let source = read_source(path)?;
-    let module = syntax::parse(&source, path).map_err(parse_fail)?;
-    if let Some(msg) = syntax::codeless_rejection(&module) {
-        return Err(codeless_exit(msg));
-    }
-    match compile_module(&module, opts.draft) {
-        Ok(p) => Ok(p),
-        Err(CompileError::Check(check::CheckFailure::Diags(diags))) => Err(check_fail(diags)),
-        Err(CompileError::Check(check::CheckFailure::Codeless(msg))) => Err(codeless_exit(msg)),
-        Err(CompileError::Lower(err)) => Err(Exit {
-            code: LOWER_ABORT_EXIT,
-            stdout: String::new(),
-            stderr: lower_abort_message(&err),
-        }),
-    }
+fn compile_for_test(path: &str, opts: &Opts) -> Result<Program, Exit> {
+    compile_path(path, opts, None)
 }
 
 pub fn test(path: &str, opts: Opts) -> Exit {
@@ -331,5 +333,142 @@ mod tests {
         let exit = fmt(tmp.to_str().unwrap());
         assert_eq!(exit.code, 1);
         assert!(exit.stderr.contains("E_PARSE"));
+    }
+
+    fn write_temp_strake(name: &str, src: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, src).expect("write temp strake");
+        path
+    }
+
+    fn golden_repo() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    #[test]
+    fn check_only_fn_keeps_export_and_matching_test() {
+        let src = "strake 1\n\nfn a() -> i64\n  ret 1\nend\n\nfn b() -> i64\n  ret 2\nend\n\ntest t_a\n  v = call a()\n  assert.eq v 1\n  ret 0\nend\n\ntest t_b\n  v = call b()\n  assert.eq v 2\n  ret 0\nend\n";
+        let path = write_temp_strake("strake_only_fn_ab.strake", src);
+        let exit = check(
+            path.to_str().unwrap(),
+            Opts {
+                only_fn: Some("a".into()),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(exit.code, 0, "{}", exit.stderr);
+    }
+
+    #[test]
+    fn check_only_fn_unknown_export_exit_2() {
+        let src = "strake 1\n\nfn a() -> i64\n  ret 1\nend\n\ntest t\n  ret 0\nend\n";
+        let path = write_temp_strake("strake_only_fn_unknown.strake", src);
+        let exit = check(
+            path.to_str().unwrap(),
+            Opts {
+                only_fn: Some("missing".into()),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(exit.code, 2);
+        assert!(exit.stderr.contains("unknown export"));
+    }
+
+    #[test]
+    fn check_only_fn_private_export_exit_2() {
+        let repo = golden_repo();
+        let path = repo.join("golden/priv.strake");
+        let exit = check(
+            path.to_str().unwrap(),
+            Opts {
+                only_fn: Some("secret".into()),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(exit.code, 2);
+        assert!(exit.stderr.contains("unknown export"));
+    }
+
+    #[test]
+    fn check_use_ok_with_blob_root() {
+        let repo = golden_repo();
+        let path = repo.join("golden/use_ok.strake");
+        let exit = check(
+            path.to_str().unwrap(),
+            Opts {
+                blob_root: Some(repo.join("golden/blob").to_string_lossy().into_owned()),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(exit.code, 0, "{}", exit.stderr);
+    }
+
+    #[test]
+    fn check_use_without_blob_root_e_use() {
+        let repo = golden_repo();
+        let path = repo.join("golden/use_ok.strake");
+        let exit = check(path.to_str().unwrap(), Opts::default());
+        assert_eq!(exit.code, 1);
+        assert!(exit.stderr.contains("E_USE"));
+    }
+
+    #[test]
+    fn check_use_blob_mismatch_e_use() {
+        let repo = golden_repo();
+        let path = repo.join("golden/use_ok.strake");
+        let exit = check(
+            path.to_str().unwrap(),
+            Opts {
+                blob_root: Some(repo.join("golden/blob-bad").to_string_lossy().into_owned()),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(exit.code, 1);
+        assert!(exit.stderr.contains("E_USE"));
+    }
+
+    #[test]
+    fn check_add2_basic_ignores_blob_root_in_process() {
+        let repo = golden_repo();
+        let path = repo.join("golden/add2_basic.strake");
+        let blob = repo.join("golden/blob").to_string_lossy().into_owned();
+        let exit = check(
+            path.to_str().unwrap(),
+            Opts {
+                blob_root: Some(blob),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(exit.code, 0, "{}", exit.stderr);
+        assert!(exit.stderr.is_empty());
+    }
+
+    #[test]
+    fn compile_for_test_use_ok_with_blob_root() {
+        let repo = golden_repo();
+        let path = repo.join("golden/use_ok.strake");
+        let program = compile_for_test(
+            path.to_str().unwrap(),
+            &Opts {
+                blob_root: Some(repo.join("golden/blob").to_string_lossy().into_owned()),
+                ..Opts::default()
+            },
+        )
+        .expect("compile_for_test");
+        assert!(!program.exports.is_empty());
+    }
+
+    #[test]
+    fn test_command_passes_blob_root_to_check() {
+        let repo = golden_repo();
+        let path = repo.join("golden/add2_basic.strake");
+        let exit = test(
+            path.to_str().unwrap(),
+            Opts {
+                blob_root: Some(repo.join("golden/blob").to_string_lossy().into_owned()),
+                ..Opts::default()
+            },
+        );
+        assert_eq!(exit.code, 0, "{}", exit.stderr);
     }
 }

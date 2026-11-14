@@ -1,0 +1,5 @@
+strake 1
+
+fn pkg_fn() -> i64
+  ret 0
+end

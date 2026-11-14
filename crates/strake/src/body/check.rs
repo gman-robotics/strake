@@ -4,6 +4,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::rc::Rc;
 
 use super::carry::{
@@ -14,7 +15,7 @@ use super::diag::{Code, Diag, Kind, Span};
 use super::interp::ScalarTy;
 use super::syntax::{
     BinOp, ContinueEdge, FnItem, ForallBound, Item, LoopParam, Module, Operand, PropertyItem, Rhs,
-    StaticI64, Stmt, TestItem, Type, TypeDefKind,
+    StaticI64, Stmt, TestItem, Type, TypeDefKind, UseDecl,
 };
 
 pub(crate) const MATCH_JOIN_CODELESS: &str = "match arm missing the join value";
@@ -92,7 +93,16 @@ impl CheckState {
 }
 
 pub(crate) fn check(module: &Module, draft: bool) -> Result<Sketch, CheckFailure> {
+    check_with_blobs(module, draft, None)
+}
+
+pub(crate) fn check_with_blobs(
+    module: &Module,
+    draft: bool,
+    blob_root: Option<&Path>,
+) -> Result<Sketch, CheckFailure> {
     let mut diags = Vec::new();
+    check_use_blobs(module, blob_root, &mut diags);
     reject_wide_int_binds(module, &mut diags);
     let sum_types = build_sum_type_index(module);
     let record_types = build_record_type_index(module, &mut diags);
@@ -139,6 +149,57 @@ fn check_module_item(
         Item::Test(t) => check_test(t, fn_table, state, diags),
         Item::Property(p) => check_property(p, fn_table, state, diags),
         _ => {}
+    }
+}
+
+fn module_use_decls(module: &Module) -> impl Iterator<Item = &UseDecl> + '_ {
+    module.items.iter().filter_map(|item| match item {
+        Item::Use(u) => Some(u),
+        _ => None,
+    })
+}
+
+fn push_e_use(span: Span, diags: &mut Vec<Diag>) {
+    diags.push(catalog_check_diag(Code::EUse, span));
+}
+
+fn blob_hash_matches_hex(hash: &str, bytes: &[u8]) -> bool {
+    blake3::hash(bytes).to_hex().to_string() == hash
+}
+
+fn use_blob_name_unsafe(name: &str) -> bool {
+    name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('.')
+}
+
+fn check_one_use_blob(u: &UseDecl, root: &Path, diags: &mut Vec<Diag>) {
+    if use_blob_name_unsafe(&u.name) {
+        push_e_use(u.span.clone(), diags);
+        return;
+    }
+    let path = root.join(&u.name);
+    let Ok(bytes) = std::fs::read(&path) else {
+        push_e_use(u.span.clone(), diags);
+        return;
+    };
+    if !blob_hash_matches_hex(&u.hash, &bytes) {
+        push_e_use(u.span.clone(), diags);
+    }
+}
+
+/// `use` items: blob under `--blob-root` must exist and match the declared blake3.
+fn check_use_blobs(module: &Module, blob_root: Option<&Path>, diags: &mut Vec<Diag>) {
+    let uses: Vec<&UseDecl> = module_use_decls(module).collect();
+    if uses.is_empty() {
+        return;
+    }
+    let Some(root) = blob_root else {
+        for u in &uses {
+            push_e_use(u.span.clone(), diags);
+        }
+        return;
+    };
+    for u in uses {
+        check_one_use_blob(u, root, diags);
     }
 }
 
@@ -3266,6 +3327,102 @@ mod tests {
             Some(Type::Named(n, _)) => n.as_str(),
             other => panic!("{name} is {other:?}"),
         }
+    }
+
+    #[test]
+    fn use_blob_name_unsafe_slash_without_backslash() {
+        assert!(use_blob_name_unsafe("a/b"));
+    }
+
+    #[test]
+    fn use_blob_name_unsafe_backslash_without_slash() {
+        assert!(use_blob_name_unsafe(r"a\b"));
+    }
+
+    #[test]
+    fn use_blob_name_unsafe_dotdot_without_backslash() {
+        assert!(use_blob_name_unsafe("ab..cd"));
+    }
+
+    #[test]
+    fn use_blob_name_unsafe_dot_without_dotdot() {
+        assert!(use_blob_name_unsafe("pkg.sub"));
+        assert!(!use_blob_name_unsafe("pkg"));
+    }
+
+    #[test]
+    fn check_one_use_blob_unsafe_name_skips_read() {
+        let u = UseDecl {
+            span: Span {
+                file: "t.strake".into(),
+                start: 0,
+                end: 1,
+            },
+            name: r"x\y".into(),
+            hash: "00".into(),
+        };
+        let dir = std::env::temp_dir().join(format!("strake-use-unsafe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        std::fs::write(dir.join(r"x\y"), b"blob").expect("would-be blob");
+        let mut diags = Vec::new();
+        check_one_use_blob(&u, &dir, &mut diags);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Code::EUse);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_one_use_blob_matching_hash_ok() {
+        let bytes = b"formatted pkg bytes";
+        let hash = blake3::hash(bytes).to_hex().to_string();
+        let u = UseDecl {
+            span: Span {
+                file: "t.strake".into(),
+                start: 0,
+                end: 1,
+            },
+            name: "pkg".into(),
+            hash,
+        };
+        let dir = std::env::temp_dir().join(format!("strake-use-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        std::fs::write(dir.join("pkg"), bytes).expect("write blob");
+        let mut diags = Vec::new();
+        check_one_use_blob(&u, &dir, &mut diags);
+        assert!(diags.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_use_blob_missing_root_and_bad_hash() {
+        let src = concat!(
+            "strake 1\n\n",
+            "use pkg@blake3:",
+            "48c37268d0995bdaee1c79d7da54a7c9015408fa14088d3958a458e666d44eeb\n\n",
+            "fn f() -> unit\n  ret unit\nend\n"
+        );
+        let module = syntax::parse(src, "u.strake").expect("parse");
+        let err = check(&module, false).unwrap_err();
+        let diags = match err {
+            CheckFailure::Diags(d) => d,
+            CheckFailure::Codeless(_) => panic!("expected diags"),
+        };
+        assert!(diags.iter().all(|d| d.code == Code::EUse));
+
+        let dir = std::env::temp_dir().join(format!("strake-use-blob-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("tmpdir");
+        std::fs::write(dir.join("pkg"), b"wrong bytes").expect("write blob");
+        let err = check_with_blobs(&module, false, Some(&dir)).unwrap_err();
+        let diags = match err {
+            CheckFailure::Diags(d) => d,
+            CheckFailure::Codeless(_) => panic!("expected diags"),
+        };
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code, Code::EUse);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

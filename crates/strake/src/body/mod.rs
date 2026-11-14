@@ -23,7 +23,16 @@ pub(crate) enum CompileError {
 
 /// CST → check → lower (exec is separate).
 pub(crate) fn compile_module(module: &Module, draft: bool) -> Result<Program, CompileError> {
-    let sketch = check::check(module, draft).map_err(CompileError::Check)?;
+    compile_module_with_blobs(module, draft, None)
+}
+
+/// Like [`compile_module`], but resolves `use` blobs under `blob_root` when set.
+pub(crate) fn compile_module_with_blobs(
+    module: &Module,
+    draft: bool,
+    blob_root: Option<&std::path::Path>,
+) -> Result<Program, CompileError> {
+    let sketch = check::check_with_blobs(module, draft, blob_root).map_err(CompileError::Check)?;
     let program = lower::lower(&sketch).map_err(CompileError::Lower)?;
     #[cfg(debug_assertions)]
     {
