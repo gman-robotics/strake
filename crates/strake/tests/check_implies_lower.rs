@@ -53,7 +53,8 @@ fn golden_check_exit_is_not_lower_abort() {
     // result_i64_join, loop_exit_record, loop_exit_bytes, match_arm_records,
     // match_arm_project, match_arm_agree.
     // GMA-619: match_binder_conflict, match_binder_sum, match_binder_agree.
-    assert_eq!(paths.len(), 142, "golden corpus");
+    // GMA-290: use_ok, use_bad.
+    assert_eq!(paths.len(), 144, "golden corpus");
     for path in &paths {
         let exit = check_path(path);
         assert_ne!(

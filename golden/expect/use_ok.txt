@@ -1,0 +1,4 @@
+args: check --blob-root golden/blob golden/use_ok.strake
+exit: 0
+--- stdout
+--- stderr

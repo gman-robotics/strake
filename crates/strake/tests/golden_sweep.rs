@@ -154,20 +154,26 @@ impl std::ops::Deref for Scratch {
     }
 }
 
+fn copy_golden_tree(src_golden: &Path, dst_golden: &Path) {
+    for e in fs::read_dir(src_golden).unwrap() {
+        let p = e.unwrap().path();
+        let name = p.file_name().unwrap();
+        let out = dst_golden.join(name);
+        if p.is_dir() {
+            fs::create_dir_all(&out).unwrap();
+            copy_golden_tree(&p, &out);
+        } else if p.is_file() {
+            fs::copy(&p, out).unwrap();
+        }
+    }
+}
+
 /// Copies `golden/` into a scratch root so mutations never touch the repo.
 fn scratch_copy(tag: &str) -> Scratch {
     let dst = std::env::temp_dir().join(format!("strake-sweep-{tag}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dst);
-    fs::create_dir_all(dst.join("golden/expect")).unwrap();
-    let src = root();
-    for sub in ["golden", "golden/expect"] {
-        for e in fs::read_dir(src.join(sub)).unwrap() {
-            let p = e.unwrap().path();
-            if p.is_file() {
-                fs::copy(&p, dst.join(sub).join(p.file_name().unwrap())).unwrap();
-            }
-        }
-    }
+    fs::create_dir_all(dst.join("golden")).unwrap();
+    copy_golden_tree(&root().join("golden"), &dst.join("golden"));
     Scratch(dst)
 }
 

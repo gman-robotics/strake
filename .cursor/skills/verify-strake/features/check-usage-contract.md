@@ -3,7 +3,7 @@
 ## Sub-features
 
 - `strake check` without a path prints check-specific usage.
-- Usage documents `[--blob-root DIR]` for upcoming T8 blob checks.
+- Usage documents `[--blob-root DIR]`; required when the module has `use` items (blob hash / missing blob → `E_USE`).
 
 ## How to get to it (user POV)
 

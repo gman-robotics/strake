@@ -140,6 +140,8 @@ if [[ -d "$ROOT/golden" ]]; then
     "1:check golden/match_binder_conflict.strake"
     "1:check golden/match_binder_sum.strake"
     "0:test golden/match_binder_agree.strake"
+    "0:check --blob-root golden/blob golden/use_ok.strake"
+    "1:check --blob-root golden/blob-empty golden/use_bad.strake"
   )
   for entry in "${GOLDEN_SMOKE[@]}"; do
     want_exit="${entry%%:*}"

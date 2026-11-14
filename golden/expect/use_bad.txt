@@ -1,0 +1,5 @@
+args: check --blob-root golden/blob-empty golden/use_bad.strake
+exit: 1
+--- stdout
+--- stderr
+{"code":"E_USE","kind":"check","msg":"use hash missing, or not equal to blake3 of the formatted text","span":{"file":"golden/use_bad.strake","start":10,"end":89}}
